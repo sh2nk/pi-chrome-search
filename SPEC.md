@@ -38,6 +38,7 @@ but only behind a flag, only after benchmarking, and never for synthesis or secu
 | D10 | **`auto` = first enabled engine in canonical order (google → duckduckgo → yandex), with fallback to the next on `E_WALL`/`E_EMPTY`/`E_UNSUPPORTED`/`E_CDP_*`** (decision 2026-11-06). Yandex stays last. Explicit lists keep the caller's order. | No confidence heuristic for engine choice before M5 (reflex routing); yandex captcha is not paid speculatively. |
 | D11 | **`web_doctor` (deferred tool) ships in P4-C**; P1 ships `node src/cli/doctor.ts --json` and the `/web-doctor` command (decision 2026-11-06). | One report builder; before P3 every engine probe is honestly `unavailable`. |
 | D12 | **License: MIT** (decision 2026-11-06). | `LICENSE`, `package.json#license`, P7 documents it; no compliance claim about engine ToS. |
+| D13 | **AI summary and results have separate budgets** (decision 2026-11-06): reserve the results floor for `n` items (snippets 100) first, then cap the AI to the remainder (≤1200). | `n` results are preserved when the floor fits; the AI may shrink below 1200; if the floor cannot fit, the AI is dropped and results get the full 2500. Total is always ≤2500. |
 
 **Accepted risk:** Google and Yandex prohibit automated access in their ToS. The user explicitly accepts
 this for personal use on their own browser/profile. This project must not claim compliance, must not
@@ -392,7 +393,10 @@ Targets (acceptance):
 - Cache hit (TTL 10 min) → no browser navigation; header `cached:true`.
 
 Rules enforced in code:
-1. Cap summary first (1200), snippets (140), then drop results (never the summary).
+1. **Two budgets, results-first** (D13, 2026-11-06): reserve a results floor for `n` items (snippets
+   trimmed to 100) *before* capping the AI, then cap the summary to the remainder (≤1200). The summary
+   is never dropped while the reserved floor fits; if the floor itself cannot fit, the summary is dropped
+   and results get the full budget. Never cut a URL; drop whole items instead.
 2. Dedup by normalized URL; drop same-domain duplicates beyond 2 unless `n` demands them.
 3. Strip tracking params (`utm_*`, `gclid`, `yclid`, `from`, `redircnt`, `si`, …).
 4. Cache SERP + `/goto` resolutions; LRU 200 entries, TTL 10 min / 24 h.
