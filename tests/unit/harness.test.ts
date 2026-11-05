@@ -210,7 +210,8 @@ class TestClient {
     return selected.map((event) => ({ ...event }));
   }
 
-  async waitClosed(timeoutMs = 2_000): Promise<void> {    let timer: ReturnType<typeof setTimeout> | undefined;
+  async waitClosed(timeoutMs = 2_000): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
         this.#closed,
@@ -590,6 +591,8 @@ test("Target.attachToTarget allocates a fresh session per attach and keeps the s
   }
 
   // A stale (but still attached) session still drives navigation and gets its event.
+  // Page events require the Page domain to be enabled on that session (real CDP).
+  await client.send("Page.enable", {}, first.sessionId);
   const loadEvent = client.nextEvent("Page.loadEventFired");
   const navigate = resultOf<{ frameId: string }>(
     await client.send("Page.navigate", { url: "https://example.com/stale" }, first.sessionId),
@@ -780,6 +783,8 @@ test("fake CDP server routes session events only to the owning client", async (t
   ).sessionId;
   assert.notEqual(sessionA, sessionB);
 
+  // Real CDP only emits Page lifecycle events after Page.enable.
+  await a.send("Page.enable", {}, sessionA);
   const loadOnA = a.nextEvent("Page.loadEventFired");
   await a.send("Page.navigate", { url: "https://example.com/a" }, sessionA);
   assert.equal((await loadOnA).sessionId, sessionA);
@@ -970,6 +975,26 @@ test("sanitizer keeps cookie prose but redacts real headers, inputs and JSON fie
   ].join("");
   const clean = sanitizeFixture(dirty);
   for (const token of tokens) assert.equal(clean.includes(token), false, `sanitizer left ${token}`);
+  assert.ok(findUnsafe(dirty).length > 0);
+  assert.deepEqual(findUnsafe(clean), []);
+});
+
+test("sanitizer redacts unquoted attributes and escaped inline JSON tokens", () => {
+  // A real SERP emits hidden inputs without quotes and embeds its config as a
+  // JSON string inside a script, so the tokens are escaped. Both shapes leaked
+  // before the dedicated rules existed.
+  const secrets = ["plain-ei", "plain-ved", "quoted-name", "escaped-ved", "escaped-ei"];
+  const dirty = [
+    '<input type="hidden" name=ei value=plain-ei>',
+    '<input name=ved value="plain-ved">',
+    '<input name="ei" value=quoted-name>',
+    '<script>var cfg = {\\"ved\\":\\"escaped-ved\\",\\"ei\\":\\"escaped-ei\\"};</script>',
+  ].join("");
+
+  const clean = sanitizeFixture(dirty);
+  for (const secret of secrets) {
+    assert.equal(clean.includes(secret), false, `sanitizer left ${secret}`);
+  }
   assert.ok(findUnsafe(dirty).length > 0);
   assert.deepEqual(findUnsafe(clean), []);
 });

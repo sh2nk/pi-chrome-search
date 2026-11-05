@@ -231,6 +231,40 @@ export function builtinRules(): SanitizeRule[] {
         `${String(groups[0] ?? "")}${String(groups[1] ?? '"')}${REDACTED_SECRET}${String(groups[2] ?? '"')}`,
     },
     {
+      name: "secret-input-unquoted",
+      // HTML permits unquoted attribute values; Google's generated SERPs use
+      // them and a capture like `<input name=ei value=SECRET>` leaked before
+      // this rule existed. Only an *unquoted* value is matched here, so the
+      // quoted rules above keep their exact replacement shape.
+      pattern: new RegExp(
+        `(<[^>]*\\b(?:name|id)=["']?(?:${JSON_SECRET_FIELD_PATTERN})["']?[^>]*?\\bvalue=)(?!["'])([^\\s>]+)`,
+        "gi",
+      ),
+      replace: (_match, ...groups) => `${String(groups[0] ?? "")}${REDACTED_SECRET}`,
+    },
+    {
+      name: "secret-input-unquoted-name",
+      // Name unquoted, value quoted: `<input name=ei value="SECRET">`.
+      pattern: new RegExp(
+        `(<[^>]*\\b(?:name|id)=["']?(?:${JSON_SECRET_FIELD_PATTERN})["']?[^>]*?\\bvalue=)(["'])[^"']*\\2`,
+        "gi",
+      ),
+      replace: (_match, ...groups) =>
+        `${String(groups[0] ?? "")}${String(groups[1] ?? '"')}${REDACTED_SECRET}${String(groups[1] ?? '"')}`,
+    },
+    {
+      name: "json-secret-escaped",
+      // Inline JSON is often embedded in a JS string, so its quotes are
+      // backslash-escaped (`{\"ved\":\"…\"}`). The unescaped json-secret rules
+      // would miss it and a real SERP capture would ship the token.
+      pattern: new RegExp(
+        `(\\\\"(?:${JSON_SECRET_FIELD_PATTERN})\\\\"\\s*:\\s*\\\\")(?:\\\\.|[^"\\\\])*(\\\\")`,
+        "gi",
+      ),
+      replace: (_match, ...groups) =>
+        `${String(groups[0] ?? "")}${REDACTED_SECRET}${String(groups[1] ?? '\\"')}`,
+    },
+    {
       name: "secret-param",
       pattern: new RegExp(`([?&;](?:${SECRET_PARAMS})=)[^&#\\s"'<>]*`, "gi"),
       replace: (_match, ...groups) => `${String(groups[0] ?? "")}${REDACTED_SECRET}`,

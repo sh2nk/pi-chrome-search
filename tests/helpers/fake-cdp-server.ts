@@ -12,9 +12,25 @@
  *  - every `Target.attachToTarget` allocates a fresh sessionId (auto-attach does
  *    the same); the older session stays usable until it is detached, so tests
  *    can prove the client does not reuse a stale id;
+ *  - a sessionId belongs to the socket that attached it: a command from another
+ *    client returns -32001, exactly like Chrome after a reconnect;
  *  - session events go only to the socket that owns the sessionId, while
  *    `Target.*`/`Browser.*` events broadcast — otherwise a second client (or a
  *    second tab) would observe an event that Chrome would never deliver to it;
+ *  - `Page.*` lifecycle events exist only after `Page.enable` on that session.
+ *    A client that forgets it gets no load event (and therefore times out);
+ *  - losing a target emits the browser-level `Target.detachedFromTarget`
+ *    {sessionId, targetId} with **no** sessionId envelope, as real Chrome does:
+ *    the client must read the id from params. `Inspector.detached` is kept
+ *    alongside it as the legacy, session-scoped shape so older harness
+ *    assertions keep their meaning; production code must not depend on it;
+ *  - `Input.dispatchKeyEvent` models text insertion like Chrome: a `char`
+ *    event inserts its text, and so does a `keyDown` that carries `text`
+ *    (`rawKeyDown` never does). `typedText()` is therefore the visible effect
+ *    of a typing sequence, and a client that types in both events doubles every
+ *    character in it;
+ *  - `Browser.close` is refused (-32601): a test must never be able to tear
+ *    down the user's browser and still look green;
  *  - `Runtime.evaluate` honours `returnByValue` (objectId vs `value`),
  *    `awaitPromise` and reports thrown/rejected handlers as `exceptionDetails`
  *    instead of a protocol error, like Chrome;
@@ -76,8 +92,16 @@ export interface FakeCdpOptions {
   evaluateResult?: unknown;
   /** Default `true`: `Page.navigate` emits `Page.loadEventFired` on its session. */
   emitLoadEvent?: boolean;
+  /** Default `true`: the matching `Page.frameStoppedLoading` follows the load event. */
+  emitFrameStoppedLoading?: boolean;
   /** Delay before the load event; default 0 (still a macrotask, after the response). */
   loadEventDelayMs?: number;
+  /**
+   * Delay before answering `Target.attachToTarget`. Lets a test observe the
+   * window after a reconnect opens the socket but before the owned targets are
+   * attached again (`isConnected()` must be false there).
+   */
+  attachDelayMs?: number;
   /** Persistent error injection keyed by method. */
   errors?: Record<string, CdpErrorPayload>;
 }
@@ -155,6 +179,14 @@ function titleForUrl(url: string): string {
     return parsed.hostname.length > 0 ? parsed.hostname : url;
   } catch {
     return url;
+  }
+}
+
+function originForUrl(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "null";
   }
 }
 
@@ -276,11 +308,15 @@ export class FakeCdpServer {
   #targets = new Map<string, CdpTarget>();
   /** sessionId → targetId. Chrome allows several sessions per target. */
   #sessions = new Map<string, string>();
+  /** sessionId → simulated input value; only `char`/text-carrying keyDown insert. */
+  #typed = new Map<string, string>();
   /** sessionId → the WebSocket that attached it; session events never cross sockets. */
   #sessionOwner = new Map<string, WebSocket>();
   /** Every sessionId this server ever minted, so a late timer cannot broadcast a dead session's event. */
   #knownSessions = new Set<string>();
   #lostSessions = new Set<string>();
+  /** Page domain is disabled until `Page.enable`; no lifecycle event fires before that. */
+  #enabledSessions = new Set<string>();
   #nextTargetId = 2;
   #nextSessionId = 1;
   #nextObjectId = 1;
@@ -288,6 +324,8 @@ export class FakeCdpServer {
   #injected = new Map<string, CdpErrorPayload[]>();
   #persistentErrors = new Map<string, CdpErrorPayload>();
   #dropNext = new Set<string>();
+  /** Commands swallowed without a response, to exercise the client request timeout. */
+  #holdNext = new Set<string>();
   #waiters = new Set<Waiter>();
   #timers = new Set<ReturnType<typeof setTimeout>>();
   #evaluateHandler: FakeCdpEvaluateHandler | undefined;
@@ -381,12 +419,21 @@ export class FakeCdpServer {
     return selected.map((event) => ({ ...event, params: { ...event.params } }));
   }
 
-  keyEvents(): Array<{ type?: string; key?: string; text?: string }> {
+  keyEvents(): Array<{ type?: string; key?: string; text?: string; unmodifiedText?: string }> {
     return this.calls("Input.dispatchKeyEvent").map((request) => ({
       type: asString(request.params.type),
       key: asString(request.params.key),
       text: asString(request.params.text),
+      unmodifiedText: asString(request.params.unmodifiedText),
     }));
+  }
+
+  /**
+   * Text a typing sequence actually inserted into the (simulated) focused
+   * input. Keyed by session because two clients/tabs have separate inputs.
+   */
+  typedText(sessionId?: string): string {
+    return this.#typed.get(sessionId ?? "") ?? "";
   }
 
   targets(): CdpTarget[] {
@@ -420,6 +467,26 @@ export class FakeCdpServer {
   /** Drop the connection instead of answering the next matching command. */
   dropOnNext(method: string): void {
     this.#dropNext.add(method);
+  }
+
+  /** Swallow the next matching command (no response) to exercise a request timeout. */
+  holdNext(method: string): void {
+    this.#holdNext.add(method);
+  }
+
+  /** Flip load-event emission mid-test (e.g. to prove a stale event is ignored). */
+  setEmitLoadEvent(enabled: boolean): void {
+    this.#options.emitLoadEvent = enabled;
+  }
+
+  /** Whether `Page.enable` was received for a session (mirrors Chrome's domain state). */
+  isPageEnabled(sessionId: string): boolean {
+    return this.#enabledSessions.has(sessionId);
+  }
+
+  /** Live sessionId → targetId bindings, for reconnect assertions. */
+  sessionBindings(): Array<{ sessionId: string; targetId: string }> {
+    return [...this.#sessions].map(([sessionId, targetId]) => ({ sessionId, targetId }));
   }
 
   /** Terminate every connected client. The server keeps listening for reconnects. */
@@ -514,6 +581,7 @@ export class FakeCdpServer {
       const targetId = this.#sessions.get(sessionId);
       this.#sessions.delete(sessionId);
       this.#sessionOwner.delete(sessionId);
+      this.#enabledSessions.delete(sessionId);
       if (targetId !== undefined && !this.#targetHasSession(targetId)) {
         const target = this.#targets.get(targetId);
         if (target !== undefined) target.attached = false;
@@ -546,6 +614,10 @@ export class FakeCdpServer {
       return;
     }
 
+    // A held request is recorded but never answered: exactly what a hung
+    // browser looks like to the client's per-request timeout.
+    if (this.#holdNext.delete(method)) return;
+
     const injected = this.#takeInjectedError(method);
     if (injected !== undefined) {
       this.#respond(socket, { id, error: injected, ...(sessionId !== undefined ? { sessionId } : {}) });
@@ -562,6 +634,17 @@ export class FakeCdpServer {
         return;
       }
       if (!this.#sessions.has(sessionId)) {
+        this.#respond(socket, {
+          id,
+          error: { code: -32001, message: "Session with given id not found." },
+          sessionId,
+        });
+        return;
+      }
+      // Flattened sessions are scoped to the socket that attached them. Chrome
+      // does not let a second client reuse an id it never received, and a test
+      // client that leaks ids across sockets must see the same refusal.
+      if (this.#sessionOwner.get(sessionId) !== socket) {
         this.#respond(socket, {
           id,
           error: { code: -32001, message: "Session with given id not found." },
@@ -605,6 +688,22 @@ export class FakeCdpServer {
     socket.send(JSON.stringify(message));
   }
 
+  #insertInto(sessionId: string | undefined, text: string): void {
+    const key = sessionId ?? "";
+    this.#typed.set(key, (this.#typed.get(key) ?? "") + text);
+  }
+
+  /** Resolve after `ms`, tracked so `stop()` cannot leave stray timers. */
+  #delay(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this.#timers.delete(timer);
+        resolve();
+      }, Math.max(0, ms));
+      this.#timers.add(timer);
+    });
+  }
+
   #takeInjectedError(method: string): CdpErrorPayload | undefined {
     const queue = this.#injected.get(method);
     if (queue !== undefined && queue.length > 0) {
@@ -641,7 +740,9 @@ export class FakeCdpServer {
       case "Browser.getVersion":
         return result({ ...DEFAULT_VERSION, ...this.#options.version });
       case "Browser.close":
-        return result({});
+        // Refused on purpose: a destructive call must fail loudly in tests
+        // instead of looking like a successful teardown of the user's browser.
+        return failure(-32601, "Browser.close is not supported by the test harness");
 
       case "Target.getTargets":
         return result({ targetInfos: [...this.#targets.values()].map((target) => this.#targetInfo(target)) });
@@ -655,6 +756,10 @@ export class FakeCdpServer {
         const target = targetId !== undefined ? this.#targets.get(targetId) : undefined;
         if (targetId === undefined || target === undefined) {
           return failure(-32602, "No target with given id found");
+        }
+        // Tests that need to observe the reconnect window delay this response.
+        if (this.#options.attachDelayMs !== undefined && this.#options.attachDelayMs > 0) {
+          await this.#delay(this.#options.attachDelayMs);
         }
         // Chrome allocates a new sessionId on every attach. Reusing the previous
         // one would hide a client that keeps a stale id across a re-attach.
@@ -687,7 +792,10 @@ export class FakeCdpServer {
         return result({});
 
       case "Page.enable":
+        if (sessionId !== undefined) this.#enabledSessions.add(sessionId);
+        return result({});
       case "Page.disable":
+        if (sessionId !== undefined) this.#enabledSessions.delete(sessionId);
         return result({});
       case "Page.navigate": {
         const url = asString(params.url);
@@ -697,15 +805,34 @@ export class FakeCdpServer {
           target.url = url;
           if (target.title === "about:blank" || target.title === "") target.title = titleForUrl(url);
         }
-        if (this.#options.emitLoadEvent !== false) {
+        const loaderId = `loader-${this.#nextLoaderId++}`;
+        // Page lifecycle events only flow after Page.enable on this session.
+        // A client that never enables gets a silent navigate and must time out.
+        const pageEnabled = sessionId !== undefined && this.#enabledSessions.has(sessionId);
+        if (pageEnabled) {
           this.#scheduleEvent(
-            "Page.loadEventFired",
-            { timestamp: 1 },
+            "Page.frameNavigated",
+            {
+              frame: {
+                id: "frame-1",
+                loaderId,
+                url,
+                mimeType: "text/html",
+                securityOrigin: originForUrl(url),
+              },
+            },
             sessionId,
-            this.#options.loadEventDelayMs ?? 0,
+            0,
           );
+          if (this.#options.emitLoadEvent !== false) {
+            const delayMs = this.#options.loadEventDelayMs ?? 0;
+            this.#scheduleEvent("Page.loadEventFired", { timestamp: 1 }, sessionId, delayMs);
+            if (this.#options.emitFrameStoppedLoading !== false) {
+              this.#scheduleEvent("Page.frameStoppedLoading", { frameId: "frame-1" }, sessionId, delayMs);
+            }
+          }
         }
-        return result({ frameId: "frame-1", loaderId: `loader-${this.#nextLoaderId++}` });
+        return result({ frameId: "frame-1", loaderId });
       }
       case "Page.bringToFront":
         return result({});
@@ -734,8 +861,23 @@ export class FakeCdpServer {
       case "Network.getAllCookies":
         return result({ cookies: (this.#options.cookies ?? []).map((cookie) => ({ ...cookie })) });
 
-      case "Input.dispatchKeyEvent":
-      case "Input.insertText":
+      case "Input.dispatchKeyEvent": {
+        const type = asString(params.type);
+        const text = asString(params.text) ?? "";
+        // Chrome inserts on `char`, and on `keyDown` when the event carries
+        // text; `rawKeyDown` does not insert. Modelling the keyDown path as
+        // well is what makes a duplicated sequence visible in `typedText()`.
+        if ((type === "char" || type === "keyDown") && text.length > 0) {
+          this.#insertInto(sessionId, text);
+        }
+        return result({});
+      }
+      case "Input.insertText": {
+        const text = asString(params.text) ?? "";
+        if (text.length > 0) this.#insertInto(sessionId, text);
+        return result({});
+      }
+      case "Input.dispatchMouseEvent":
         return result({});
 
       default:
@@ -820,7 +962,12 @@ export class FakeCdpServer {
       if (ownerTargetId !== targetId) continue;
       this.#sessions.delete(sessionId);
       this.#lostSessions.add(sessionId);
-      // Emit while the owner is still mapped: routing depends on it.
+      this.#enabledSessions.delete(sessionId);
+      // Emit while the owner is still mapped: routing depends on it. Chrome
+      // sends `Target.detachedFromTarget` at browser level (params carry the
+      // session id), while `Inspector.detached` is the legacy session-scoped
+      // shape kept for the P0 harness assertions only.
+      this.#emit("Target.detachedFromTarget", { sessionId, targetId });
       this.#emit("Inspector.detached", { reason: "target_closed" }, sessionId);
       this.#sessionOwner.delete(sessionId);
     }
@@ -829,6 +976,7 @@ export class FakeCdpServer {
   #detachSession(sessionId: string): void {
     const targetId = this.#sessions.get(sessionId);
     this.#sessionOwner.delete(sessionId);
+    this.#enabledSessions.delete(sessionId);
     if (targetId === undefined) return;
     this.#sessions.delete(sessionId);
     if (this.#targetHasSession(targetId)) return;
@@ -888,6 +1036,7 @@ export class FakeCdpServer {
     this.#sessionOwner.clear();
     this.#knownSessions.clear();
     this.#lostSessions.clear();
+    this.#enabledSessions.clear();
     this.#nextObjectId = 1;
     const initial = targets ?? [DEFAULT_TARGET];
     for (const target of initial) this.#targets.set(target.id, { ...target });
