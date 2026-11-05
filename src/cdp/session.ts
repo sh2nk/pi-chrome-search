@@ -46,6 +46,22 @@ export const DEFAULT_NAVIGATE_TIMEOUT_MS = 20_000;
 export const DEFAULT_TYPE_MIN_MS = 30;
 export const DEFAULT_TYPE_MAX_MS = 80;
 
+/**
+ * `readyState` polling cadence and the budget for accepting `interactive`.
+ * A SERP keeps loading ads/trackers long after it is usable; waiting for
+ * `complete` would time out on Google, so `interactive` plus a short grace is
+ * the readiness bar. The adapter's marker settle waits for real content.
+ */
+const READY_STATE_POLL_MS = 120;
+const READY_STATE_INTERACTIVE_GRACE_MS = 200;
+/**
+ * Some navigations return from `Page.navigate` without any commit event and
+ * with the target URL already updated (Chrome sometimes skips the event for a
+ * fast same-URL reload). One look after this grace avoids a false timeout.
+ */
+const NAVIGATE_URL_FALLBACK_MS = 250;
+const READY_STATE_EXPRESSION = "document.readyState";
+
 export interface CdpSessionOptions {
   wsUrl: string;
   connectTimeoutMs?: number;
@@ -111,6 +127,25 @@ function parseMessage(raw: RawData): unknown {
 function positiveTimeout(value: number | undefined, fallback: number): number {
   if (typeof value === "number" && Number.isFinite(value) && value > 0) return Math.floor(value);
   return fallback;
+}
+
+/** Main frame id + current document loaderId from a `Page.getFrameTree` response. */
+function mainFrameOf(tree: unknown): { frameId?: string; loaderId?: string } {
+  const root = isRecord(tree) && isRecord(tree.frameTree) ? tree.frameTree : undefined;
+  const frame = root !== undefined && isRecord(root.frame) ? root.frame : undefined;
+  if (frame === undefined) return {};
+  return { frameId: asString(frame.id), loaderId: asString(frame.loaderId) };
+}
+
+/**
+ * `location.href` comes back normalised by the renderer (`https://host` is
+ * reported as `https://host/`), so the fallback comparison tolerates the one
+ * trailing slash Chrome adds.
+ */
+function sameNavigatedUrl(current: string, requested: string): boolean {
+  if (current === requested) return true;
+  const trim = (value: string): string => (value.endsWith("/") ? value.slice(0, -1) : value);
+  return trim(current) === trim(requested);
 }
 
 /** Typing delays allow 0, unlike connect/request deadlines. */
@@ -186,6 +221,8 @@ export class CdpSession {
   #handlers = new Map<string, Set<EventHandler>>();
   /** targetId → sessionId for every target this client attached. */
   #attached = new Map<string, string>();
+  /** targetId → last known URL, so `CdpPage.url()` is not empty right after create/attach. */
+  #targetUrls = new Map<string, string>();
   #reconnectUsed = false;
   /** TRUE from socket reopen until every live target is attached again. */
   #reattaching = false;
@@ -237,6 +274,16 @@ export class CdpSession {
     return this.#attached.get(targetId);
   }
 
+  /**
+   * Last URL this client saw for a target. `createCdpPage` seeds `url()` from it,
+   * because Chrome does not return the URL from `attachToTarget` and a page
+   * created for a freshly opened tab would otherwise report `""` until its
+   * first navigation commits.
+   */
+  targetUrlFor(targetId: string): string | undefined {
+    return this.#targetUrls.get(targetId);
+  }
+
   async version(): Promise<BrowserInfo> {
     const result = await this.send<Record<string, unknown>>("Browser.getVersion");
     const info = isRecord(result) ? result : {};
@@ -257,11 +304,13 @@ export class CdpSession {
       if (!isRecord(info)) continue;
       const id = asString(info.targetId);
       if (id === undefined) continue;
+      const url = asString(info.url) ?? "";
+      this.#targetUrls.set(id, url);
       targets.push({
         id,
         type: asString(info.type) ?? "",
         title: asString(info.title) ?? "",
-        url: asString(info.url) ?? "",
+        url,
         ...(info.attached === true ? { attached: true } : {}),
       });
     }
@@ -281,7 +330,24 @@ export class CdpSession {
       });
     }
     this.#attached.set(targetId, sessionId);
+    await this.#rememberTargetUrl(targetId);
     return { targetId, sessionId };
+  }
+
+  /**
+   * Best effort: `attachToTarget` returns only a session id, so the URL has to
+   * come from `Target.getTargetInfo`. A failure here must not fail the attach
+   * (the page still works; `url()` is simply empty until the first navigate).
+   */
+  async #rememberTargetUrl(targetId: string): Promise<void> {
+    try {
+      const result = await this.send<Record<string, unknown>>("Target.getTargetInfo", { targetId });
+      const info = isRecord(result) && isRecord(result.targetInfo) ? result.targetInfo : undefined;
+      const url = info === undefined ? undefined : asString(info.url);
+      if (url !== undefined) this.#targetUrls.set(targetId, url);
+    } catch {
+      // Swallowed on purpose; see the comment above.
+    }
   }
 
   async detach(sessionId: string): Promise<void> {
@@ -300,11 +366,16 @@ export class CdpSession {
         message: `Target.createTarget returned no targetId for ${url}`,
       });
     }
+    // The tab may still be on `about:blank` while the request loads, but the
+    // requested URL is the only thing Chrome tells us synchronously; it makes
+    // `page.url()` useful immediately after `createCdpPage`.
+    this.#targetUrls.set(targetId, url);
     return targetId;
   }
 
   async closeTarget(targetId: string): Promise<void> {
     await this.send("Target.closeTarget", { targetId });
+    this.#targetUrls.delete(targetId);
     for (const [attachedTarget, sessionId] of [...this.#attached]) {
       if (attachedTarget !== targetId) continue;
       this.#attached.delete(attachedTarget);
@@ -796,7 +867,9 @@ export function createCdpPage(
   opts: CdpPageOptions = {},
 ): CdpPageHandle {
   const clock = opts.clock ?? session.clock ?? realClock;
-  let lastUrl = opts.initialUrl ?? "";
+  // Seed from the target so a page created right after `createTarget`/`attach`
+  // reports the URL Chrome knows instead of an empty string.
+  let lastUrl = opts.initialUrl ?? session.targetUrlFor(targetId) ?? "";
   let enabledSessionId: string | undefined;
   let knownSessionId: string | undefined;
   let lost: WebSearchError | undefined;
@@ -810,8 +883,8 @@ export function createCdpPage(
 
   // Chrome reports a dead target either as a rejected command (-32000/-32001)
   // or as one of these events. Without the event listeners a navigation that is
-  // waiting for `loadEventFired` would sit until its deadline instead of
-  // failing as E_TARGET_LOST.
+  // waiting for a commit would sit until its deadline instead of failing as
+  // E_TARGET_LOST.
   session.on("Target.detachedFromTarget", (params, sessionId) => {
     const payload = isRecord(params) ? params : {};
     const detachedTarget = asString(payload.targetId);
@@ -842,9 +915,9 @@ export function createCdpPage(
   /**
    * `Page.enable` makes Chrome emit `Page.*` lifecycle events. It must happen
    * before navigation and exactly once per (re)attached session: after a
-   * reconnect Chrome has forgotten the enable, and without it the load event
-   * never arrives (the exact reason the session times out instead of reporting
-   * a false success).
+   * reconnect Chrome has forgotten the enable, and without it no
+   * `frameNavigated`/`navigatedWithinDocument` commit ever arrives (the exact
+   * reason the session times out instead of reporting a false success).
    */
   const ensureEnabled = async (stage: Stage): Promise<string> => {
     const sessionId = sessionIdOrThrow(stage);
@@ -888,35 +961,45 @@ export function createCdpPage(
 
     async navigate(url: string, o: NavigateOptions = {}): Promise<void> {
       if (lost !== undefined) throw lost;
-      if (isAborted(o.signal)) {
-        throw fail("E_CANCELLED", "navigate", { message: `navigation to ${url} was aborted` });
-      }
+      const cancelled = (): WebSearchError =>
+        fail("E_CANCELLED", "navigate", { message: `navigation to ${url} was aborted` });
+      if (isAborted(o.signal)) throw cancelled();
       const sessionId = await ensureEnabled("navigate");
-      // `ensureEnabled` awaits; the signal may have been aborted while the Page
-      // domain was being enabled, and an already-aborted signal never fires
-      // the listener below.
-      if (isAborted(o.signal)) {
-        throw fail("E_CANCELLED", "navigate", { message: `navigation to ${url} was aborted` });
-      }
+      // `ensureEnabled` awaits; the signal may have been aborted meanwhile and
+      // an already-aborted signal never fires the listener below.
+      if (lost !== undefined) throw lost;
+      if (isAborted(o.signal)) throw cancelled();
+
       const timeoutMs = positiveTimeout(o.timeoutMs, DEFAULT_NAVIGATE_TIMEOUT_MS);
+      // One deadline for the whole operation: a redirect chain that never
+      // commits must not buy extra time by restarting a timer per event.
+      const deadline = Date.now() + timeoutMs;
 
       await new Promise<void>((resolve, reject) => {
         let settled = false;
+        let committed = false;
         let responseReceived = false;
-        let expectedFrameId: string | undefined;
-        let expectedLoaderId: string | undefined;
-        let committedLoaderId: string | undefined;
+        /** Main-frame loaderId before the navigation: the stale-event discriminator. */
+        let preLoaderId: string | undefined;
+        /** Main-frame id, refined by `Page.navigate`'s response frameId. */
+        let frameFilter: string | undefined;
+        let interactiveSince: number | undefined;
+        let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
         const cleanups: Array<() => void> = [];
-        const signals: Array<{ kind: "commit" | "load" | "stop"; frameId?: string; loaderId?: string }> = [];
-        let flushScheduled = false;
+        /** Signals that arrived before the navigate response (ordering barrier). */
+        const deferred: Array<() => void> = [];
 
         const cleanup = (): void => {
           for (const off of cleanups.splice(0)) off();
-          clearTimeout(timer);
+          clearTimeout(deadlineTimer);
+          if (fallbackTimer !== undefined) {
+            clearTimeout(fallbackTimer);
+            fallbackTimer = undefined;
+          }
           o.signal?.removeEventListener("abort", onAbort);
           if (activeNavigation?.reject === abort) activeNavigation = undefined;
         };
-        const finish = (): void => {
+        const succeed = (): void => {
           if (settled) return;
           settled = true;
           cleanup();
@@ -929,122 +1012,207 @@ export function createCdpPage(
           reject(error);
         };
 
-        const timer = setTimeout(() => {
-          abort(
-            fail("E_TIMEOUT", "navigate", {
-              message: `navigate to ${url} did not finish loading within ${timeoutMs}ms`,
-              hint: "the page never fired its load event; retry, or raise navigateTimeoutMs in config",
-            }),
-          );
-        }, timeoutMs);
-        timer.unref();
+        const timeoutError = (): WebSearchError =>
+          fail("E_TIMEOUT", "navigate", {
+            message: `navigate to ${url} did not finish loading within ${timeoutMs}ms`,
+            hint:
+              "the page never committed a new document or never reached readyState interactive; " +
+              "retry, or raise navigateTimeoutMs in config",
+          });
 
-        const onAbort = (): void => {
-          abort(fail("E_CANCELLED", "navigate", { message: `navigation to ${url} was aborted` }));
-        };
+        const deadlineTimer = setTimeout(() => abort(timeoutError()), timeoutMs);
+        deadlineTimer.unref();
+
+        const onAbort = (): void => abort(cancelled());
         o.signal?.addEventListener("abort", onAbort, { once: true });
-
-        /**
-         * Evaluate buffered lifecycle signals in protocol order. ws can deliver
-         * the navigate response, `frameNavigated` and `loadEventFired` in one
-         * socket read; promise `.then` callbacks then run only after all three
-         * message handlers, so a direct "did the response arrive?" check would
-         * drop a legitimate load event. Buffering and re-evaluating after the
-         * response keeps the commit correlation without that race.
-         */
-        const processSignals = (): void => {
-          if (settled) return;
-          flushScheduled = false;
-          if (!responseReceived) {
-            // The response is the ordering barrier: keep the signals buffered
-            // and re-run after `.then` sets the expected frame/loader. A stale
-            // load from the previous document is then rejected by the commit
-            // gate below instead of settling this navigation.
-            return;
-          }
-          while (signals.length > 0) {
-            const signal = signals.shift()!;
-            if (signal.kind === "commit") {
-              if (
-                expectedFrameId !== undefined &&
-                signal.frameId !== undefined &&
-                signal.frameId !== expectedFrameId
-              ) {
-                continue;
-              }
-              if (signal.loaderId !== undefined) committedLoaderId = signal.loaderId;
-              continue;
-            }
-            if (
-              signal.kind === "stop" &&
-              expectedFrameId !== undefined &&
-              signal.frameId !== expectedFrameId
-            ) {
-              continue;
-            }
-            // The commit gate is what rejects a stale load event from the
-            // previous navigation: until the new loader commits, this page is
-            // still the old document.
-            if (expectedLoaderId !== undefined && committedLoaderId !== expectedLoaderId) continue;
-            finish();
-            return;
-          }
-        };
-
-        const enqueue = (signal: (typeof signals)[number]): void => {
-          signals.push(signal);
-          if (flushScheduled) return;
-          flushScheduled = true;
-          queueMicrotask(processSignals);
-        };
 
         const forThisSession = (eventSessionId: string | undefined): boolean =>
           eventSessionId !== undefined && eventSessionId === knownSessionId && lost === undefined;
 
-        // All three listeners are installed *before* the navigate command, so
-        // an event cannot be missed.
+        const readReadyState = async (): Promise<unknown> => {
+          const response = await session.send<EvaluateResponse>(
+            "Runtime.evaluate",
+            { expression: READY_STATE_EXPRESSION, returnByValue: true },
+            sessionId,
+          );
+          const result = response.result;
+          if (result === undefined || !isRecord(result)) return undefined;
+          return result.value;
+        };
+
+        /**
+         * Readiness phase: `Page.navigate` resolving means *committed*, not
+         * *loaded*. A SERP that waits for `load` (consent hops, long-tail ads)
+         * would burn the deadline on a page that is already readable, so the
+         * bar is `interactive` (with a short grace for `complete`).
+         */
+        const pollReadyState = async (): Promise<void> => {
+          while (!settled) {
+            const now = Date.now();
+            if (now >= deadline) {
+              abort(timeoutError());
+              return;
+            }
+            if (
+              interactiveSince !== undefined &&
+              now - interactiveSince >= READY_STATE_INTERACTIVE_GRACE_MS
+            ) {
+              succeed();
+              return;
+            }
+
+            let state: unknown;
+            let probeFailed = false;
+            try {
+              state = await readReadyState();
+            } catch (error) {
+              if (settled) return;
+              const failure = asWebSearchError(error, "E_CDP_DISCONNECTED", "navigate");
+              // A destroyed execution context right after the commit is normal
+              // ("Cannot find context with specified id"); only a dead target or
+              // a dead socket is fatal. Anything else is retried until the
+              // deadline, so a transient renderer error cannot fail a live page.
+              if (
+                failure.details.code === "E_TARGET_LOST" ||
+                failure.details.code === "E_CDP_DISCONNECTED"
+              ) {
+                abort(failure);
+                return;
+              }
+              probeFailed = true;
+            }
+            if (settled) return;
+
+            if (!probeFailed) {
+              if (state === "complete") {
+                succeed();
+                return;
+              }
+              if (state === "interactive") interactiveSince ??= Date.now();
+              else interactiveSince = undefined;
+            }
+
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) continue; // the loop head turns this into E_TIMEOUT
+            await sleepFor(Math.min(READY_STATE_POLL_MS, remaining), undefined, { ref: false });
+          }
+        };
+
+        const commit = (committedUrl: string): void => {
+          if (settled || committed) return;
+          committed = true;
+          lastUrl = committedUrl;
+          if (fallbackTimer !== undefined) {
+            clearTimeout(fallbackTimer);
+            fallbackTimer = undefined;
+          }
+          void pollReadyState();
+        };
+
+        const frameMatches = (frameId: string | undefined): boolean =>
+          frameFilter === undefined || frameId === undefined || frameId === frameFilter;
+
+        /**
+         * A commit is only the *new* document when it carries a loaderId
+         * different from the pre-navigate one. A redirect chain emits several
+         * (each hop commits); the first new one is enough. This is also what
+         * makes an event replayed from the previous page inert.
+         */
+        const applyFrameNavigated = (params: Record<string, unknown>): void => {
+          if (settled) return;
+          const frame = isRecord(params.frame) ? params.frame : undefined;
+          if (frame === undefined) return;
+          if (!frameMatches(asString(frame.id))) return;
+          const loaderId = asString(frame.loaderId);
+          if (preLoaderId !== undefined && (loaderId === undefined || loaderId === preLoaderId)) return;
+          const frameUrl = asString(frame.url);
+          if (frameUrl !== undefined) lastUrl = frameUrl;
+          commit(lastUrl === "" ? url : lastUrl);
+        };
+
+        const applyNavigatedWithinDocument = (params: Record<string, unknown>): void => {
+          if (settled) return;
+          if (!frameMatches(asString(params.frameId))) return;
+          // Same-document navigation: the loaderId intentionally does not
+          // change, so the loader gate above must not be applied here.
+          const frameUrl = asString(params.url);
+          lastUrl = frameUrl ?? url;
+          commit(lastUrl);
+        };
+
+        const runOrDefer = (action: () => void): void => {
+          if (!responseReceived) {
+            deferred.push(action);
+            return;
+          }
+          action();
+        };
+
+        // Both listeners are installed *before* `Page.navigate`, so a commit
+        // event cannot be missed even when it arrives in the same socket read
+        // as the response.
         cleanups.push(
           session.on("Page.frameNavigated", (params, eventSessionId) => {
             if (!forThisSession(eventSessionId)) return;
-            const frame = isRecord(params.frame) ? params.frame : undefined;
-            if (frame === undefined) return;
-            enqueue({
-              kind: "commit",
-              frameId: asString(frame.id),
-              loaderId: asString(frame.loaderId),
-            });
+            runOrDefer(() => applyFrameNavigated(params));
+          }),
+        );
+        cleanups.push(
+          session.on("Page.navigatedWithinDocument", (params, eventSessionId) => {
+            if (!forThisSession(eventSessionId)) return;
+            runOrDefer(() => applyNavigatedWithinDocument(params));
           }),
         );
 
-        cleanups.push(
-          session.on("Page.loadEventFired", (_params, eventSessionId) => {
-            if (!forThisSession(eventSessionId)) return;
-            enqueue({ kind: "load" });
-          }),
-        );
+        /**
+         * Some navigations return without any commit event and the target URL
+         * is already the requested one. One probe after a short grace keeps
+         * that case from timing out, without trusting the URL earlier (the tab
+         * still shows the previous document until the commit happens).
+         */
+        const checkUrlFallback = async (): Promise<void> => {
+          fallbackTimer = undefined;
+          if (settled || committed) return;
+          let current: unknown;
+          try {
+            current = await evaluateRaw<unknown>("location.href");
+          } catch {
+            return; // best effort; commit events can still arrive before the deadline
+          }
+          if (settled || committed) return;
+          if (typeof current === "string" && sameNavigatedUrl(current, url)) commit(current);
+        };
 
-        cleanups.push(
-          session.on("Page.frameStoppedLoading", (params, eventSessionId) => {
-            if (!forThisSession(eventSessionId)) return;
-            enqueue({ kind: "stop", frameId: asString(params.frameId) });
-          }),
-        );
+        const begin = async (): Promise<void> => {
+          const tree = await session.send<Record<string, unknown>>("Page.getFrameTree", {}, sessionId);
+          if (settled) return;
+          const main = mainFrameOf(tree);
+          preLoaderId = main.loaderId;
+          frameFilter = main.frameId;
+
+          const response = await session.send<NavigateResponse>("Page.navigate", { url }, sessionId);
+          if (settled) return;
+
+          responseReceived = true;
+          // The response frameId is authoritative when the frame tree did not
+          // carry one; `??=` keeps the pre-navigate id otherwise.
+          frameFilter ??= asString(response.frameId);
+
+          while (!settled) {
+            const next = deferred.shift();
+            if (next === undefined) break;
+            next();
+          }
+          if (settled || committed) return;
+
+          fallbackTimer = setTimeout(() => {
+            void checkUrlFallback();
+          }, NAVIGATE_URL_FALLBACK_MS);
+          fallbackTimer.unref();
+        };
 
         activeNavigation = { reject: abort };
-
-        session.send<NavigateResponse>("Page.navigate", { url }, sessionId).then(
-          (response) => {
-            if (settled) return;
-            responseReceived = true;
-            expectedFrameId = asString(response.frameId);
-            expectedLoaderId = asString(response.loaderId);
-            lastUrl = url;
-            processSignals();
-          },
-          (error: unknown) => {
-            abort(asWebSearchError(error, "E_CDP_DISCONNECTED", "navigate"));
-          },
-        );
+        void begin().catch((error: unknown) => abort(asWebSearchError(error, "E_CDP_DISCONNECTED", "navigate")));
       });
     },
 

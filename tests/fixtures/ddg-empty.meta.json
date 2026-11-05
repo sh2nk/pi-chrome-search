@@ -1,0 +1,10 @@
+{
+  "engine": "duckduckgo",
+  "urlPathShape": "https://duckduckgo.com/?q=<query>&kl=ru-ru",
+  "queryClass": "empty",
+  "capturedAt": "2026-11-06",
+  "ai": "no",
+  "results": 0,
+  "notes": "synthetic zero-result DDG shell",
+  "capturedWith": "synthetic"
+}

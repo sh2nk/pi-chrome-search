@@ -4,8 +4,8 @@
  * handling — not a mocked transport.
  *
  * Implemented subset: Browser.getVersion, Target.{getTargets,getTargetInfo,
- * attachToTarget,createTarget,closeTarget,detachFromTarget}, Page.{enable,navigate,
- * bringToFront,captureScreenshot}, Runtime.{enable,evaluate}, Network.{getCookies,
+ * attachToTarget,createTarget,closeTarget,detachFromTarget}, Page.{enable,getFrameTree,
+ * navigate,bringToFront,captureScreenshot}, Runtime.{enable,evaluate}, Network.{getCookies,
  * getAllCookies}, Input.{dispatchKeyEvent,insertText}.
  *
  * Chrome behaviours that tests depend on, modelled here on purpose:
@@ -19,6 +19,18 @@
  *    second tab) would observe an event that Chrome would never deliver to it;
  *  - `Page.*` lifecycle events exist only after `Page.enable` on that session.
  *    A client that forgets it gets no load event (and therefore times out);
+ *  - navigation is modelled the way Chrome actually behaves, which is *not*
+ *    "navigate then load": every `Page.navigate` commits a new document with a
+ *    fresh main-frame loaderId (`Page.getFrameTree` exposes the current one)
+ *    and emits `Page.frameNavigated`; a redirect chain emits one commit per
+ *    hop, each with its own loaderId; a fragment/history navigation emits only
+ *    `Page.navigatedWithinDocument` and keeps the loaderId. `document.readyState`
+ *    is answered from a configurable sequence (`loading → interactive →
+ *    complete` by default) advanced once per probe, so a client must poll it —
+ *    a load event alone is never proof that the page is usable;
+ *  - `navigateUpdatesUrl: false` models a navigation Chrome reports (with a
+ *    frameId) without committing anything: no event, no URL change, no loader
+ *    change. That is what a stale event must never be mistaken for;
  *  - losing a target emits the browser-level `Target.detachedFromTarget`
  *    {sessionId, targetId} with **no** sessionId envelope, as real Chrome does:
  *    the client must read the id from params. `Inspector.detached` is kept
@@ -97,6 +109,35 @@ export interface FakeCdpOptions {
   /** Delay before the load event; default 0 (still a macrotask, after the response). */
   loadEventDelayMs?: number;
   /**
+   * Default `true`: `Page.navigate` emits `Page.frameNavigated` for the new
+   * document. Set `false` to model a commit Chrome does not announce (the
+   * client then has to fall back to the target URL).
+   */
+  emitFrameNavigated?: boolean;
+  /**
+   * Default `true`: `Page.navigate` commits — the target URL and the main-frame
+   * loaderId change. `false` models a navigation Chrome answers without
+   * committing (blocked, downloaded, aborted): no event and old URL stays.
+   */
+  navigateUpdatesUrl?: boolean;
+  /**
+   * Extra redirect hops before the final document. Each hop emits its own
+   * `Page.frameNavigated` with a fresh loaderId, like a consent/redirect chain.
+   */
+  redirectChain?: ReadonlyArray<string>;
+  /**
+   * Default `false`. When `true`, `Page.navigate` is a same-document (fragment
+   * or history) navigation: URL changes, loaderId does not, and only
+   * `Page.navigatedWithinDocument` is emitted.
+   */
+  sameDocumentNavigation?: boolean;
+  /**
+   * `document.readyState` answers, advanced once per probe and then held at the
+   * last value. Default `loading → interactive → complete`. `["loading"]` stalls
+   * forever; `["interactive"]` never reaches `complete`.
+   */
+  readyState?: ReadonlyArray<string>;
+  /**
    * Delay before answering `Target.attachToTarget`. Lets a test observe the
    * window after a reconnect opens the socket but before the owned targets are
    * attached again (`isConnected()` must be false there).
@@ -142,6 +183,9 @@ const DEFAULT_TARGET: CdpTarget = {
   title: "about:blank",
   url: "about:blank",
 };
+
+/** What a real document reports while it parses, then after `DOMContentLoaded`. */
+const DEFAULT_READY_STATES: ReadonlyArray<string> = ["loading", "interactive", "complete"];
 
 function result(value: unknown): Outcome {
   return { kind: "result", value };
@@ -321,6 +365,10 @@ export class FakeCdpServer {
   #nextSessionId = 1;
   #nextObjectId = 1;
   #nextLoaderId = 1;
+  /** targetId → loaderId of the document currently committed in the main frame. */
+  #frameLoaders = new Map<string, string>();
+  /** targetId → how many `document.readyState` probes this document answered. */
+  #readyStateProbes = new Map<string, number>();
   #injected = new Map<string, CdpErrorPayload[]>();
   #persistentErrors = new Map<string, CdpErrorPayload>();
   #dropNext = new Set<string>();
@@ -477,6 +525,32 @@ export class FakeCdpServer {
   /** Flip load-event emission mid-test (e.g. to prove a stale event is ignored). */
   setEmitLoadEvent(enabled: boolean): void {
     this.#options.emitLoadEvent = enabled;
+  }
+
+  /** Flip commit-event emission mid-test (the stale-replay case needs it off). */
+  setEmitFrameNavigated(enabled: boolean): void {
+    this.#options.emitFrameNavigated = enabled;
+  }
+
+  /** Flip whether `Page.navigate` actually commits a new document mid-test. */
+  setNavigateUpdatesUrl(enabled: boolean): void {
+    this.#options.navigateUpdatesUrl = enabled;
+  }
+
+  /** Replace the `document.readyState` sequence mid-test. */
+  setReadyState(sequence: ReadonlyArray<string>): void {
+    this.#options.readyState = sequence;
+  }
+
+  /** How many `document.readyState` probes the current document has answered. */
+  readyStateProbes(targetId?: string): number {
+    return this.#readyStateProbes.get(targetId ?? this.#firstTargetId() ?? "") ?? 0;
+  }
+
+  /** The loaderId `Page.getFrameTree` reports for a target's main frame. */
+  frameLoaderId(targetId?: string): string | undefined {
+    const id = targetId ?? this.#firstTargetId();
+    return id === undefined ? undefined : this.#frameLoaders.get(id);
   }
 
   /** Whether `Page.enable` was received for a session (mirrors Chrome's domain state). */
@@ -797,34 +871,65 @@ export class FakeCdpServer {
       case "Page.disable":
         if (sessionId !== undefined) this.#enabledSessions.delete(sessionId);
         return result({});
+      case "Page.getFrameTree": {
+        const target = sessionId !== undefined ? this.#targetForSession(sessionId) : this.#firstTarget();
+        return result({ frameTree: { frame: this.#mainFrame(target) } });
+      }
       case "Page.navigate": {
         const url = asString(params.url);
         if (url === undefined) return failure(-32602, "Invalid parameters");
         const target = sessionId !== undefined ? this.#targetForSession(sessionId) : this.#firstTarget();
-        if (target !== undefined) {
+        const commits = this.#options.navigateUpdatesUrl !== false;
+        const sameDocument = this.#options.sameDocumentNavigation === true;
+        const announce = commits && this.#options.emitFrameNavigated !== false && !sameDocument;
+        // Per-hop loaderIds are minted in commit order, so the final document
+        // always carries the newest one (a client that keys on it stays sane).
+        const hopLoaders = announce
+          ? (this.#options.redirectChain ?? []).map(() => this.#newLoaderId())
+          : [];
+        const loaderId = commits && !sameDocument ? this.#newLoaderId() : undefined;
+
+        if (target !== undefined && commits) {
           target.url = url;
           if (target.title === "about:blank" || target.title === "") target.title = titleForUrl(url);
+          this.#readyStateProbes.set(target.id, 0);
+          // A same-document navigation keeps the document, so its loaderId
+          // intentionally stays the same.
+          if (loaderId !== undefined) this.#frameLoaders.set(target.id, loaderId);
         }
-        const loaderId = `loader-${this.#nextLoaderId++}`;
+
         // Page lifecycle events only flow after Page.enable on this session.
         // A client that never enables gets a silent navigate and must time out.
         const pageEnabled = sessionId !== undefined && this.#enabledSessions.has(sessionId);
-        if (pageEnabled) {
-          this.#scheduleEvent(
-            "Page.frameNavigated",
-            {
-              frame: {
-                id: "frame-1",
-                loaderId,
-                url,
-                mimeType: "text/html",
-                securityOrigin: originForUrl(url),
-              },
-            },
-            sessionId,
-            0,
-          );
-          if (this.#options.emitLoadEvent !== false) {
+        if (pageEnabled && commits) {
+          if (sameDocument) {
+            this.#scheduleEvent(
+              "Page.navigatedWithinDocument",
+              { frameId: "frame-1", url },
+              sessionId,
+              0,
+            );
+          } else if (announce) {
+            // Every redirect hop commits with its own loaderId before the final
+            // document; a client waiting for one specific loaderId would hang.
+            // They are flushed in one tick, the way Chrome delivers a redirect
+            // chain in a single socket read.
+            const hops = this.#options.redirectChain ?? [];
+            const frames = hops.map((hop, index) =>
+              this.#framePayload(hop, hopLoaders[index] ?? this.#newLoaderId()),
+            );
+            if (loaderId !== undefined) {
+              frames.push(this.#framePayload(url, loaderId));
+            }
+            if (target !== undefined && loaderId !== undefined) {
+              this.#frameLoaders.set(target.id, loaderId);
+            }
+            this.#scheduleEvents(
+              frames.map((frame) => ({ method: "Page.frameNavigated", params: { frame } })),
+              sessionId,
+            );
+          }
+          if (this.#options.emitLoadEvent !== false && !sameDocument) {
             const delayMs = this.#options.loadEventDelayMs ?? 0;
             this.#scheduleEvent("Page.loadEventFired", { timestamp: 1 }, sessionId, delayMs);
             if (this.#options.emitFrameStoppedLoading !== false) {
@@ -832,7 +937,11 @@ export class FakeCdpServer {
             }
           }
         }
-        return result({ frameId: "frame-1", loaderId });
+        // A navigation Chrome does not commit reports a frame but neither a
+        // loaderId nor any lifecycle event, and leaves the URL untouched.
+        return result(
+          loaderId === undefined ? { frameId: "frame-1" } : { frameId: "frame-1", loaderId },
+        );
       }
       case "Page.bringToFront":
         return result({});
@@ -898,6 +1007,13 @@ export class FakeCdpServer {
   ): Promise<Outcome> {
     const awaitPromise = params.awaitPromise === true;
     const returnByValue = params.returnByValue === true;
+    // `document.readyState` describes the simulated document, so it is answered
+    // from the configured progression rather than from a scripted evaluate
+    // fixture: navigation readiness must not be fakeable by `setEvaluateResult`.
+    if (/document\.readyState/.test(expression)) {
+      const state = this.#nextReadyState(target);
+      return result({ result: remoteObject(state, returnByValue, this.#newObjectId()) });
+    }
     let value: unknown;
     try {
       if (this.#evaluateHandler !== undefined) {
@@ -929,6 +1045,52 @@ export class FakeCdpServer {
     return `object-${this.#nextObjectId++}`;
   }
 
+  #newLoaderId(): string {
+    return `loader-${this.#nextLoaderId++}`;
+  }
+
+  /** The loaderId of the committed document, allocating one for a fresh target. */
+  #loaderForTarget(targetId: string): string {
+    const existing = this.#frameLoaders.get(targetId);
+    if (existing !== undefined) return existing;
+    const loaderId = this.#newLoaderId();
+    this.#frameLoaders.set(targetId, loaderId);
+    return loaderId;
+  }
+
+  #framePayload(url: string, loaderId: string): Record<string, unknown> {
+    return {
+      id: "frame-1",
+      loaderId,
+      url,
+      mimeType: "text/html",
+      securityOrigin: originForUrl(url),
+    };
+  }
+
+  #mainFrame(target: CdpTarget | undefined): Record<string, unknown> {
+    const url = target?.url ?? "about:blank";
+    const loaderId = target === undefined ? "loader-0" : this.#loaderForTarget(target.id);
+    return this.#framePayload(url, loaderId);
+  }
+
+  /**
+   * One answer per probe, then held at the last value: a client that polls
+   * sees the document progress, and a client that never polls never reaches a
+   * later state (which is what a stall test relies on).
+   */
+  #nextReadyState(target: CdpTarget | undefined): string {
+    const sequence =
+      this.#options.readyState !== undefined && this.#options.readyState.length > 0
+        ? this.#options.readyState
+        : DEFAULT_READY_STATES;
+    const key = target?.id ?? "";
+    const index = this.#readyStateProbes.get(key) ?? 0;
+    this.#readyStateProbes.set(key, index + 1);
+    const last = sequence.length - 1;
+    return sequence[Math.min(index, last)] ?? "complete";
+  }
+
   #targetInfo(target: CdpTarget): Record<string, unknown> {
     return {
       targetId: target.id,
@@ -957,6 +1119,8 @@ export class FakeCdpServer {
 
   #destroyTarget(targetId: string): void {
     this.#targets.delete(targetId);
+    this.#frameLoaders.delete(targetId);
+    this.#readyStateProbes.delete(targetId);
     this.#emit("Target.targetDestroyed", { targetId });
     for (const [sessionId, ownerTargetId] of [...this.#sessions]) {
       if (ownerTargetId !== targetId) continue;
@@ -1004,6 +1168,22 @@ export class FakeCdpServer {
     this.#timers.add(timer);
   }
 
+  /**
+   * Emit several events from one timer. Chrome delivers a redirect chain's
+   * commits in a single socket read; separate timers would let a fast client
+   * observe only the first one and make the ordering accidental.
+   */
+  #scheduleEvents(
+    events: ReadonlyArray<{ method: string; params: Record<string, unknown> }>,
+    sessionId: string | undefined,
+  ): void {
+    const timer = setTimeout(() => {
+      this.#timers.delete(timer);
+      for (const event of events) this.#emit(event.method, event.params, sessionId);
+    }, 0);
+    this.#timers.add(timer);
+  }
+
   #emit(method: string, params: Record<string, unknown>, sessionId?: string): void {
     this.#events.push({ method, params, ...(sessionId !== undefined ? { sessionId } : {}) });
     const payload = JSON.stringify({
@@ -1037,6 +1217,9 @@ export class FakeCdpServer {
     this.#knownSessions.clear();
     this.#lostSessions.clear();
     this.#enabledSessions.clear();
+    this.#frameLoaders.clear();
+    this.#readyStateProbes.clear();
+    this.#nextLoaderId = 1;
     this.#nextObjectId = 1;
     const initial = targets ?? [DEFAULT_TARGET];
     for (const target of initial) this.#targets.set(target.id, { ...target });

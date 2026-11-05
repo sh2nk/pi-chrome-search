@@ -1,0 +1,10 @@
+{
+  "engine": "yandex",
+  "urlPathShape": "https://yandex.ru/search/?text=<query>",
+  "queryClass": "empty",
+  "capturedAt": "2026-11-06",
+  "ai": "no",
+  "results": 0,
+  "notes": "synthetic zero-result Yandex shell",
+  "capturedWith": "synthetic"
+}

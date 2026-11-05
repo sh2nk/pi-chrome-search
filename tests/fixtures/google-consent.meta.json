@@ -1,0 +1,10 @@
+{
+  "engine": "google",
+  "urlPathShape": "https://consent.google.com/m?continue=<query>",
+  "queryClass": "wall",
+  "capturedAt": "2026-11-06",
+  "ai": "no",
+  "results": 0,
+  "notes": "synthetic consent marker page",
+  "capturedWith": "synthetic"
+}

@@ -264,7 +264,10 @@ test("a browser-level Target.detachedFromTarget without an envelope still prunes
 test("a socket drop reconnects once, re-attaches and the page keeps working", async (t) => {
   // The delayed attach keeps the reconnect window observable: the fresh socket
   // is open, but `isConnected()` must stay false until the target is bound.
-  const { server, session, attached: first, page } = await setup(t, { attachDelayMs: 40 });
+  const { server, session, attached: first, page } = await setup(t, {
+    attachDelayMs: 40,
+    readyState: ["complete"],
+  });
 
   await page.navigate("https://example.com/one", { timeoutMs: 1_000 });
   assert.equal(server.calls("Page.enable").length, 1);
@@ -350,53 +353,211 @@ test("close() rejects pending requests and is idempotent", async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// Navigation
+// Navigation: commit, then readiness
 // ---------------------------------------------------------------------------
 
-test("navigate waits for the load event, updates url() and enables Page once", async (t) => {
-  const { server, session, page } = await setup(t);
+/** Number of `document.readyState` probes the client made (readiness polling). */
+function readyStateProbes(server: FakeCdpServer): number {
+  return server
+    .calls("Runtime.evaluate")
+    .filter((call) => /document\.readyState/.test(String(call.params.expression))).length;
+}
 
-  await page.navigate("https://example.com/search?q=x", { timeoutMs: 1_000 });
+/** The `frame` payload of a `Page.frameNavigated` event, for loaderId assertions. */
+function frameOf(event: { params: Record<string, unknown> }): Record<string, unknown> {
+  const frame = event.params.frame;
+  assert.ok(typeof frame === "object" && frame !== null, "frameNavigated must carry a frame");
+  return frame as Record<string, unknown>;
+}
+
+test("navigate commits, polls readyState to complete and enables Page once", async (t) => {
+  const { server, page } = await setup(t);
+
+  const started = Date.now();
+  await page.navigate("https://example.com/search?q=x", { timeoutMs: 2_000 });
+  const elapsed = Date.now() - started;
+
   assert.equal(page.url(), "https://example.com/search?q=x");
   assert.equal(server.calls("Page.navigate").length, 1);
   assert.equal(server.lastCall("Page.navigate")?.params.url, "https://example.com/search?q=x");
+  assert.equal(server.calls("Page.getFrameTree").length, 1, "the pre-navigate loaderId is read first");
   assert.equal(server.calls("Page.enable").length, 1);
-  assert.equal(server.eventsSent("Page.loadEventFired").length, 1);
+  assert.equal(server.eventsSent("Page.frameNavigated").length, 1);
+  // The default sequence is loading → interactive → complete, so readiness can
+  // only be reached by polling; a load event is not treated as readiness.
+  assert.ok(readyStateProbes(server) >= 2, "readiness must be polled, not assumed");
+  assert.ok(elapsed < 1_500, `a local commit should not take ${elapsed}ms`);
 
-  await page.navigate("https://example.com/second", { timeoutMs: 1_000 });
+  await page.navigate("https://example.com/second", { timeoutMs: 2_000 });
   assert.equal(server.calls("Page.enable").length, 1, "Page.enable is per session, not per navigate");
   assert.equal(page.url(), "https://example.com/second");
 });
 
-test("navigate times out when the load event never arrives", async (t) => {
-  const { page } = await setup(t, { emitLoadEvent: false });
+test("navigate times out when the navigation never commits", async (t) => {
+  const { page } = await setup(t, { emitFrameNavigated: false, navigateUpdatesUrl: false });
 
   const error = await rejectsWithCode(
-    page.navigate("https://example.com/slow", { timeoutMs: 60 }),
+    page.navigate("https://example.com/blocked", { timeoutMs: 60 }),
     "E_TIMEOUT",
   );
   assert.match(error.details.message ?? "", /did not finish loading/);
   assert.equal(error.details.stage, "navigate");
 });
 
-test("a stale load event from the previous document does not satisfy the next navigate", async (t) => {
-  const { server, session, page } = await setup(t);
+test("a stale frameNavigated from the previous document does not commit the next navigation", async (t) => {
+  const { server, session, page } = await setup(t, { readyState: ["complete"] });
 
   await page.navigate("https://example.com/first", { timeoutMs: 1_000 });
+  const firstLoader = server.frameLoaderId("target-1");
+  assert.ok(firstLoader !== undefined);
   const sessionId = session.sessionIdFor("target-1");
   assert.ok(sessionId !== undefined);
 
-  server.setEmitLoadEvent(false);
-  const next = page.navigate("https://example.com/second", { timeoutMs: 80 });
-  // Replay a load event from the previous navigation while the new document
-  // is still uncommitted. It must not settle the wait.
+  // The tab no longer commits: Chrome answers with a frameId but neither a new
+  // URL nor a new loaderId, so the old document is still current.
+  server.setNavigateUpdatesUrl(false);
+  server.setEmitFrameNavigated(false);
+  const started = Date.now();
+  const next = page.navigate("https://example.com/second", { timeoutMs: 450 });
+  await server.waitFor("Page.navigate", { count: 2 });
+
+  // Replay the previous page's commit (same loaderId) plus its load event while
+  // the new document is uncommitted. Neither may settle the wait.
+  server.sendEvent(
+    "Page.frameNavigated",
+    {
+      frame: {
+        id: "frame-1",
+        loaderId: firstLoader,
+        url: "https://example.com/first",
+        mimeType: "text/html",
+        securityOrigin: "https://example.com",
+      },
+    },
+    sessionId,
+  );
   server.sendEvent("Page.loadEventFired", { timestamp: 1 }, sessionId);
 
   await rejectsWithCode(next, "E_TIMEOUT");
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 300, `a stale commit settled the wait after only ${elapsed}ms`);
+  assert.equal(page.url(), "https://example.com/first");
+});
+
+test("a redirect chain emits several commits and resolves on the first new loaderId", async (t) => {
+  const { server, page } = await setup(t, {
+    redirectChain: ["https://consent.example/continue"],
+    readyState: ["complete"],
+  });
+
+  const started = Date.now();
+  await page.navigate("https://www.google.com/search?q=x&hl=ru", { timeoutMs: 2_000 });
+  const elapsed = Date.now() - started;
+
+  const commits = server.eventsSent("Page.frameNavigated");
+  assert.equal(commits.length, 2, "one commit per redirect hop plus the final document");
+  const loaders = commits.map((event) => String(frameOf(event).loaderId));
+  assert.notEqual(loaders[0], loaders[1], "each hop must carry its own loaderId");
+  assert.equal(loaders[1], server.frameLoaderId("target-1"), "the final document is the committed one");
+  assert.equal(page.url(), "https://www.google.com/search?q=x&hl=ru");
+  assert.ok(elapsed < 1_500, `a redirect chain should resolve quickly, took ${elapsed}ms`);
+  t.diagnostic(`redirect chain (2 commits) resolved in ${elapsed}ms via ${loaders.join(" → ")}`);
+});
+
+test("a same-document navigation resolves on navigatedWithinDocument and keeps the loaderId", async (t) => {
+  const { server, session, page } = await setup(t, {
+    sameDocumentNavigation: true,
+    readyState: ["complete"],
+  });
+  const sessionId = session.sessionIdFor("target-1");
+  assert.ok(sessionId !== undefined);
+  const tree = await session.send<{ frameTree: { frame: { loaderId: string } } }>(
+    "Page.getFrameTree",
+    {},
+    sessionId,
+  );
+  const before = tree.frameTree.frame.loaderId;
+
+  await page.navigate("https://example.com/search?q=x#results", { timeoutMs: 1_000 });
+
+  assert.equal(server.eventsSent("Page.frameNavigated").length, 0);
+  assert.equal(server.eventsSent("Page.navigatedWithinDocument").length, 1);
+  assert.equal(page.url(), "https://example.com/search?q=x#results");
+  assert.equal(server.frameLoaderId("target-1"), before, "no new document, no new loaderId");
+});
+
+test("a page that never fires load but reaches interactive resolves", async (t) => {
+  const { server, page } = await setup(t, { emitLoadEvent: false, readyState: ["interactive"] });
+
+  const started = Date.now();
+  await page.navigate("https://example.com/slow-tail", { timeoutMs: 2_000 });
+  const elapsed = Date.now() - started;
+
+  assert.equal(page.url(), "https://example.com/slow-tail");
+  assert.equal(server.eventsSent("Page.loadEventFired").length, 0);
+  // `interactive` is accepted only after its grace window, not on first sight.
+  assert.ok(elapsed >= 180, `interactive was accepted too early (${elapsed}ms)`);
+  assert.ok(elapsed < 1_500, `interactive should not wait for the deadline (${elapsed}ms)`);
+  assert.ok(readyStateProbes(server) >= 2, "the grace window needs at least one extra poll");
+  t.diagnostic(`interactive-only page resolved in ${elapsed}ms`);
+});
+
+test("a page stalled at readyState loading hits the deadline with E_TIMEOUT", async (t) => {
+  const { server, page } = await setup(t, { readyState: ["loading"] });
+
+  const started = Date.now();
+  const error = await rejectsWithCode(
+    page.navigate("https://example.com/stall", { timeoutMs: 400 }),
+    "E_TIMEOUT",
+  );
+  const elapsed = Date.now() - started;
+
+  assert.equal(error.details.stage, "navigate");
+  assert.match(error.details.message ?? "", /did not finish loading/);
+  assert.ok(elapsed >= 350, `timed out before the deadline (${elapsed}ms)`);
+  assert.ok(elapsed < 1_500, `timed out far past the deadline (${elapsed}ms)`);
+  assert.ok(readyStateProbes(server) >= 2, "a stalled page must still be polled");
+  t.diagnostic(`stalled page hit the 400ms deadline after ${elapsed}ms`);
+});
+
+test("a navigation that returns without a commit event resolves on the target URL after the grace", async (t) => {
+  const { server, page } = await setup(t, {
+    emitFrameNavigated: false,
+    readyState: ["complete"],
+  });
+
+  const started = Date.now();
+  await page.navigate("https://example.com/silent", { timeoutMs: 2_000 });
+  const elapsed = Date.now() - started;
+
+  assert.equal(page.url(), "https://example.com/silent");
+  assert.equal(server.eventsSent("Page.frameNavigated").length, 0);
+  assert.ok(elapsed >= 200, `the URL fallback must wait for its grace (${elapsed}ms)`);
+  assert.ok(
+    server
+      .calls("Runtime.evaluate")
+      .some((call) => /location\.href|document\.URL/.test(String(call.params.expression))),
+    "the fallback reads the target URL",
+  );
+  t.diagnostic(`URL fallback resolved a silent navigation in ${elapsed}ms`);
+});
+
+test("a transient renderer error during the readyState poll does not fail the navigation", async (t) => {
+  // Chrome destroys the old execution context on commit; one probe can fail
+  // with "Cannot find context with specified id". That is not a dead tab.
+  const { server, page } = await setup(t);
+  server.failNext("Runtime.evaluate", {
+    code: -32000,
+    message: "Cannot find context with specified id",
+  });
+
+  await page.navigate("https://example.com/context-race", { timeoutMs: 2_000 });
+  assert.equal(page.url(), "https://example.com/context-race");
+  assert.ok(readyStateProbes(server) >= 2, "the poll must survive the first failed probe");
 });
 
 test("Page.loadEventFired is only emitted after Page.enable", async (t) => {
-  const { server, session, attached, page } = await setup(t);
+  const { server, session, attached, page } = await setup(t, { readyState: ["complete"] });
 
   await session.send("Page.navigate", { url: "https://example.com/unenabled" }, attached.sessionId);
   await sleep(25);
@@ -410,16 +571,49 @@ test("Page.loadEventFired is only emitted after Page.enable", async (t) => {
   assert.equal(server.eventsSent("Page.loadEventFired").length, 1);
 });
 
-test("navigate honours an abort signal with E_CANCELLED", async (t) => {
-  const { page } = await setup(t, { emitLoadEvent: false });
+test("navigate rejects an already-aborted signal with E_CANCELLED", async (t) => {
+  const { page } = await setup(t);
   const controller = new AbortController();
-  const navigation = page.navigate("https://example.com/abort", {
-    timeoutMs: 1_000,
+  controller.abort();
+
+  await rejectsWithCode(
+    page.navigate("https://example.com/abort", { timeoutMs: 1_000, signal: controller.signal }),
+    "E_CANCELLED",
+  );
+});
+
+test("abort during the commit wait is E_CANCELLED", async (t) => {
+  // No commit event and no URL change: the navigation is unambiguously inside
+  // the commit phase when the abort lands.
+  const { server, page } = await setup(t, {
+    emitFrameNavigated: false,
+    navigateUpdatesUrl: false,
+  });
+  const controller = new AbortController();
+  const navigation = page.navigate("https://example.com/commit-abort", {
+    timeoutMs: 2_000,
     signal: controller.signal,
   });
+  await server.waitFor("Page.navigate");
   controller.abort();
 
   await rejectsWithCode(navigation, "E_CANCELLED");
+  assert.equal(server.eventsSent("Page.frameNavigated").length, 0);
+});
+
+test("abort during the readyState poll is E_CANCELLED", async (t) => {
+  const { server, page } = await setup(t, { readyState: ["loading"] });
+  const controller = new AbortController();
+  const navigation = page.navigate("https://example.com/ready-abort", {
+    timeoutMs: 2_000,
+    signal: controller.signal,
+  });
+  // The first Runtime.evaluate is the readiness probe: the commit has happened.
+  await server.waitFor("Runtime.evaluate");
+  controller.abort();
+
+  await rejectsWithCode(navigation, "E_CANCELLED");
+  assert.ok(readyStateProbes(server) >= 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -679,4 +873,28 @@ test("bringToFront sends Page.bringToFront", async (t) => {
 test("title returns document.title", async (t) => {
   const { page } = await setup(t);
   assert.equal(await page.title(), "about:blank");
+});
+
+test("url() is populated from the target after createTarget and attach", async (t) => {
+  const { server, session } = await setup(t);
+
+  const created = await session.createTarget("https://example.com/created");
+  // Chrome returns only a targetId from createTarget; without the cached URL a
+  // page created here would report "" until its first navigation commits.
+  const createdPage = createCdpPage(session, created);
+  assert.equal(createdPage.url(), "https://example.com/created");
+
+  await session.attach(created);
+  const attachedPage = createCdpPage(session, created);
+  assert.equal(attachedPage.url(), "https://example.com/created");
+
+  // An existing tab keeps its current URL: attachToTarget has no URL, so it is
+  // read with Target.getTargetInfo.
+  const existing = server.addTarget({
+    id: "target-existing",
+    url: "https://example.com/existing",
+  });
+  await session.attach(existing.id);
+  assert.equal(session.targetUrlFor(existing.id), "https://example.com/existing");
+  assert.equal(createCdpPage(session, existing.id).url(), "https://example.com/existing");
 });

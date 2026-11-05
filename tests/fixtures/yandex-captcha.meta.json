@@ -1,0 +1,10 @@
+{
+  "engine": "yandex",
+  "urlPathShape": "https://yandex.ru/showcaptcha?text=<query>",
+  "queryClass": "wall",
+  "capturedAt": "2026-11-06",
+  "ai": "no",
+  "results": 0,
+  "notes": "synthetic SmartCaptcha marker page",
+  "capturedWith": "synthetic"
+}
