@@ -242,3 +242,28 @@ same `usage` field.
 - The AI Overview/Neuro/Search Assist presence is query- and experiment-dependent; `ai:no` is normal.
 - Selectors are obfuscated and will drift; the text markers are more stable than class names.
 - The user's profile was copied for some probes; cookies did not survive. Do not build on profile copies.
+
+## 11. CDP navigation semantics (measured 2026-11-06, Chrome 157)
+
+`Page.navigate` + `Page.loadEventFired` + loaderId correlation is **not** a usable readiness gate on a
+real profile. Navigating to `https://www.google.com/search?q=…&hl=ru` in the user's logged-in Chrome
+produced no matching `loadEventFired` within 30 s: the SERP redirects through consent/`/search` hops and
+keeps loading ads/trackers, so the correlated event never arrives and the client reports `E_TIMEOUT` on a
+page that is visibly rendered and searchable.
+
+What works (implemented in `cdp/session.ts`):
+
+1. `Page.getFrameTree` **before** navigating → the current main-frame `loaderId` is the stale-event
+   discriminator. Without it, a replayed `frameNavigated` from the previous document silently satisfies
+   the wait.
+2. Subscribe to `Page.frameNavigated` (one event per redirect hop, each with a fresh `loaderId`) and
+   `Page.navigatedWithinDocument` (fragment/history navs keep the `loaderId`) **before** `Page.navigate`.
+3. Resolve on the first commit with `loaderId !== preLoaderId`; a 250 ms single URL check covers the rare
+   navigation that returns without an event and with the target URL already updated.
+4. Then poll `document.readyState` (120 ms) and accept `interactive` + 200 ms grace — waiting for
+   `complete` reproduces the timeout. Content readiness is the adapter's marker settle, not the client's.
+5. `attach` does not return a URL: seed `page.url()` from `createTarget` and one best-effort
+   `Target.getTargetInfo` on attach, otherwise a freshly opened tab reports `""`.
+
+Measured: redirect chain resolves in ~3 ms; an `interactive`-only page in ~245 ms (grace path); a stalled
+`loading` page still fails at the deadline; a stale replay fails instead of falsely succeeding.
