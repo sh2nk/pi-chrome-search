@@ -46,8 +46,10 @@ export interface CdpPage {
 export type CdpSource = "env-ws" | "env-ports" | "devtools-active-port" | "port-scan";
 
 export interface CdpEndpoint {
+  /** TCP port that answered the probe (for DevToolsActivePort: the port in the file). */
   port: number;
-  /** ws://127.0.0.1:<port><path> — the only URL the session client connects to. */
+  /** The URL the session client must connect to. Never rebuild it from `port` — a probed
+   * /json/version response may advertise a different port than the one that answered. */
   wsUrl: string;
   source: CdpSource;
   /** Profile directory the endpoint was found for, when known. */

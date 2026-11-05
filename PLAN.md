@@ -497,7 +497,7 @@ hard rules were broken along the way.
 
 | Phase | Status | Gate evidence | Blocker / note |
 |---|---|---|---|
-| P0 contracts | `[~]` | `evidence/P0.md` | contracts+scaffold committed; harness/audit in flight |
+| P0 contracts | `[x]` | `evidence/P0.md` | contracts, scaffold, harness, audit green |
 | P1 attach/doctor | `[ ]` | `evidence/P1.md` | needs B0 (CDP enable) |
 | P2 plumbing | `[ ]` | `evidence/P2.md` | — |
 | P3 engines | `[ ]` | `evidence/P3.md`, `evidence/P3-live.md` | live serial |

@@ -1,0 +1,895 @@
+/**
+ * Raw CDP WebSocket server for P1-B (`src/cdp/session.ts`), on a real loopback
+ * port so the client exercises `ws`, JSON framing, flattened sessions and close
+ * handling — not a mocked transport.
+ *
+ * Implemented subset: Browser.getVersion, Target.{getTargets,getTargetInfo,
+ * attachToTarget,createTarget,closeTarget,detachFromTarget}, Page.{enable,navigate,
+ * bringToFront,captureScreenshot}, Runtime.{enable,evaluate}, Network.{getCookies,
+ * getAllCookies}, Input.{dispatchKeyEvent,insertText}.
+ *
+ * Chrome behaviours that tests depend on, modelled here on purpose:
+ *  - every `Target.attachToTarget` allocates a fresh sessionId (auto-attach does
+ *    the same); the older session stays usable until it is detached, so tests
+ *    can prove the client does not reuse a stale id;
+ *  - session events go only to the socket that owns the sessionId, while
+ *    `Target.*`/`Browser.*` events broadcast — otherwise a second client (or a
+ *    second tab) would observe an event that Chrome would never deliver to it;
+ *  - `Runtime.evaluate` honours `returnByValue` (objectId vs `value`),
+ *    `awaitPromise` and reports thrown/rejected handlers as `exceptionDetails`
+ *    instead of a protocol error, like Chrome;
+ *  - `Network.getCookies` filters by the requested URLs, `getAllCookies` does not.
+ *
+ * Deterministic ids: responses echo the request id and sessionId exactly. Unknown
+ * methods return Chrome's -32601 instead of hanging. `sent()` is the client→server
+ * log (despite the name, it is what the fake received); `eventsSent()` is the
+ * server→client event log.
+ */
+
+import type { AddressInfo } from "node:net";
+import { WebSocket, WebSocketServer, type RawData } from "ws";
+
+import type { BrowserInfo, CdpTarget } from "../../src/cdp/types.ts";
+import { filterCookiesForUrls } from "./cookie-match.ts";
+
+export interface CdpErrorPayload {
+  code: number;
+  message: string;
+  data?: string;
+}
+
+export interface FakeCdpRequest {
+  id?: number;
+  method: string;
+  params: Record<string, unknown>;
+  sessionId?: string;
+}
+
+export interface FakeCdpEvent {
+  method: string;
+  params: Record<string, unknown>;
+  sessionId?: string;
+}
+
+export interface FakeCdpCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path?: string;
+  [key: string]: unknown;
+}
+
+export type FakeCdpEvaluateHandler = (
+  expression: string,
+  params: Record<string, unknown>,
+  target: CdpTarget | undefined,
+) => unknown | Promise<unknown>;
+
+export interface FakeCdpOptions {
+  targets?: ReadonlyArray<CdpTarget>;
+  version?: Partial<BrowserInfo>;
+  cookies?: ReadonlyArray<FakeCdpCookie>;
+  screenshot?: Uint8Array | string;
+  /** Per-expression override; receives the attached target when there is one. */
+  evaluate?: FakeCdpEvaluateHandler;
+  /** Static `Runtime.evaluate` value when no handler is set. */
+  evaluateResult?: unknown;
+  /** Default `true`: `Page.navigate` emits `Page.loadEventFired` on its session. */
+  emitLoadEvent?: boolean;
+  /** Delay before the load event; default 0 (still a macrotask, after the response). */
+  loadEventDelayMs?: number;
+  /** Persistent error injection keyed by method. */
+  errors?: Record<string, CdpErrorPayload>;
+}
+
+export interface WaitForOptions {
+  /** Number of matching requests to wait for. Default 1. */
+  count?: number;
+  /** Default 2 000 ms. */
+  timeoutMs?: number;
+}
+
+type Outcome =
+  | { kind: "result"; value: unknown }
+  | { kind: "error"; error: CdpErrorPayload }
+  | { kind: "none" }
+  | { kind: "drop" };
+
+interface Waiter {
+  method: string;
+  count: number;
+  resolve: (request: FakeCdpRequest) => void;
+  reject: (reason: unknown) => void;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+const DEFAULT_VERSION: BrowserInfo = {
+  product: "Chrome/157.0.8103.38",
+  protocolVersion: "1.3",
+  userAgent:
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36",
+  revision: "@fake-cdp",
+  jsVersion: "13.7",
+};
+
+const DEFAULT_TARGET: CdpTarget = {
+  id: "target-1",
+  type: "page",
+  title: "about:blank",
+  url: "about:blank",
+};
+
+function result(value: unknown): Outcome {
+  return { kind: "result", value };
+}
+
+function failure(code: number, message: string): Outcome {
+  return { kind: "error", error: { code, message } };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function rawToString(raw: RawData): string {
+  if (Array.isArray(raw)) return Buffer.concat(raw).toString("utf8");
+  if (raw instanceof ArrayBuffer) return Buffer.from(raw).toString("utf8");
+  return raw.toString("utf8");
+}
+
+function parseMessage(raw: RawData): unknown {
+  try {
+    return JSON.parse(rawToString(raw));
+  } catch {
+    return undefined;
+  }
+}
+
+function titleForUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.length > 0 ? parsed.hostname : url;
+  } catch {
+    return url;
+  }
+}
+
+interface RemoteValue {
+  type: string;
+  value?: unknown;
+  subtype?: string;
+  className?: string;
+  unserializableValue?: string;
+  description?: string;
+  objectId?: string;
+}
+
+function serializeValue(value: unknown): RemoteValue {
+  if (value === null) return { type: "object", subtype: "null", value: null };
+  switch (typeof value) {
+    case "undefined":
+      return { type: "undefined" };
+    case "string":
+      return { type: "string", value };
+    case "boolean":
+      return { type: "boolean", value };
+    case "number":
+      return Number.isFinite(value)
+        ? { type: "number", value }
+        : { type: "number", unserializableValue: String(value) };
+    case "bigint":
+      return { type: "bigint", unserializableValue: `${value}n` };
+    case "object":
+      return { type: "object", value };
+    case "function":
+    case "symbol":
+      return { type: "undefined" };
+    default:
+      return { type: "undefined" };
+  }
+}
+
+function describeValue(value: unknown): string {
+  if (Array.isArray(value)) return `Array(${value.length})`;
+  const constructor = (value as { constructor?: { name?: unknown } }).constructor;
+  const name = constructor?.name;
+  return typeof name === "string" && name.length > 0 ? name : "Object";
+}
+
+/**
+ * RemoteObject as `Runtime.evaluate` returns it. Chrome serialises primitives
+ * even without `returnByValue`; object values need `objectId` and lose `value`
+ * unless the caller asked for a by-value copy. A fake that always inlined
+ * `value` would let a client that forgets `returnByValue: true` look correct.
+ */
+function remoteObject(value: unknown, returnByValue: boolean, objectId: string): RemoteValue {
+  const serialized = serializeValue(value);
+  if (returnByValue) return serialized;
+  if (serialized.type !== "object" || serialized.subtype === "null") return serialized;
+  const { value: _omitted, ...rest } = serialized;
+  return { ...rest, description: describeValue(value), objectId };
+}
+
+function promiseObject(objectId: string): RemoteValue {
+  return { type: "object", subtype: "promise", className: "Promise", objectId };
+}
+
+function errorObject(objectId: string): RemoteValue {
+  return { type: "object", subtype: "error", className: "Error", objectId };
+}
+
+function exceptionDetailsFor(
+  error: unknown,
+  awaitPromise: boolean,
+  objectId: string,
+): Record<string, unknown> {
+  const name = error instanceof Error && error.name.length > 0 ? error.name : "Error";
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    exceptionId: 1,
+    text: awaitPromise ? "Uncaught (in promise)" : "Uncaught",
+    lineNumber: 0,
+    columnNumber: 0,
+    exception: {
+      type: "object",
+      subtype: "error",
+      className: name,
+      description: `${name}: ${message}`,
+      objectId,
+    },
+  };
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  if (typeof value === "function") {
+    return typeof (value as { then?: unknown }).then === "function";
+  }
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
+}
+
+/**
+ * Default evaluator for the checks P1 needs without a real page. Real adapters
+ * always supply their own handler map (or use `FakePage`).
+ */
+function defaultEvaluate(expression: string, target: CdpTarget | undefined): unknown {
+  if (/navigator\.webdriver/.test(expression)) return false;
+  if (/document\.title/.test(expression)) return target?.title ?? "";
+  if (/location\.href|document\.URL/.test(expression)) return target?.url ?? "about:blank";
+  return null;
+}
+
+export class FakeCdpServer {
+  #options: FakeCdpOptions;
+  #wss: WebSocketServer | null = null;
+  #port = 0;
+  #sockets = new Set<WebSocket>();
+  #requests: FakeCdpRequest[] = [];
+  #events: FakeCdpEvent[] = [];
+  #targets = new Map<string, CdpTarget>();
+  /** sessionId → targetId. Chrome allows several sessions per target. */
+  #sessions = new Map<string, string>();
+  /** sessionId → the WebSocket that attached it; session events never cross sockets. */
+  #sessionOwner = new Map<string, WebSocket>();
+  /** Every sessionId this server ever minted, so a late timer cannot broadcast a dead session's event. */
+  #knownSessions = new Set<string>();
+  #lostSessions = new Set<string>();
+  #nextTargetId = 2;
+  #nextSessionId = 1;
+  #nextObjectId = 1;
+  #nextLoaderId = 1;
+  #injected = new Map<string, CdpErrorPayload[]>();
+  #persistentErrors = new Map<string, CdpErrorPayload>();
+  #dropNext = new Set<string>();
+  #waiters = new Set<Waiter>();
+  #timers = new Set<ReturnType<typeof setTimeout>>();
+  #evaluateHandler: FakeCdpEvaluateHandler | undefined;
+  #evaluateResult: unknown;
+
+  constructor(options: FakeCdpOptions = {}) {
+    this.#options = { ...options };
+    this.#resetState(options.targets);
+    this.#evaluateHandler = options.evaluate;
+    this.#evaluateResult = options.evaluateResult;
+    for (const [method, error] of Object.entries(options.errors ?? {})) {
+      this.#persistentErrors.set(method, { ...error });
+    }
+  }
+
+  // --- lifecycle -----------------------------------------------------------
+
+  async start(): Promise<void> {
+    if (this.#wss !== null) return;
+    const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    this.#wss = wss;
+    wss.on("connection", (socket) => this.#onConnection(socket));
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error): void => {
+        wss.off("listening", onListening);
+        this.#wss = null;
+        reject(error);
+      };
+      const onListening = (): void => {
+        wss.off("error", onError);
+        resolve();
+      };
+      wss.once("listening", onListening);
+      wss.once("error", onError);
+    });
+    const address = wss.address();
+    if (typeof address === "object" && address !== null) {
+      this.#port = (address as AddressInfo).port;
+    }
+  }
+
+  async stop(): Promise<void> {
+    const wss = this.#wss;
+    this.#wss = null;
+    this.#port = 0;
+    this.#rejectWaiters(new DOMException("fake CDP server stopped", "AbortError"));
+    for (const timer of this.#timers) clearTimeout(timer);
+    this.#timers.clear();
+    if (wss === null) return;
+    for (const socket of this.#sockets) socket.terminate();
+    this.#sockets.clear();
+    await new Promise<void>((resolve) => wss.close(() => resolve()));
+  }
+
+  port(): number {
+    return this.#port;
+  }
+
+  wsUrl(path = "/devtools/browser/fake-cdp"): string {
+    return `ws://127.0.0.1:${this.#port}${path}`;
+  }
+
+  clientCount(): number {
+    return this.#sockets.size;
+  }
+
+  // --- records -------------------------------------------------------------
+
+  /** Client→server CDP messages, including commands without an id (rare). */
+  sent(): FakeCdpRequest[] {
+    return this.#requests.map((request) => ({ ...request, params: { ...request.params } }));
+  }
+
+  methods(): string[] {
+    return this.#requests.map((request) => request.method);
+  }
+
+  calls(method: string): FakeCdpRequest[] {
+    return this.#requests
+      .filter((request) => request.method === method)
+      .map((request) => ({ ...request, params: { ...request.params } }));
+  }
+
+  lastCall(method: string): FakeCdpRequest | undefined {
+    return this.calls(method).at(-1);
+  }
+
+  /** Server→client events, including injected ones. */
+  eventsSent(method?: string): FakeCdpEvent[] {
+    const selected = method === undefined ? this.#events : this.#events.filter((event) => event.method === method);
+    return selected.map((event) => ({ ...event, params: { ...event.params } }));
+  }
+
+  keyEvents(): Array<{ type?: string; key?: string; text?: string }> {
+    return this.calls("Input.dispatchKeyEvent").map((request) => ({
+      type: asString(request.params.type),
+      key: asString(request.params.key),
+      text: asString(request.params.text),
+    }));
+  }
+
+  targets(): CdpTarget[] {
+    return [...this.#targets.values()].map((target) => ({ ...target }));
+  }
+
+  resetCalls(): void {
+    this.#requests = [];
+    this.#events = [];
+  }
+
+  // --- fault injection -----------------------------------------------------
+
+  /** Inject an error for the next matching command only. */
+  failNext(method: string, error: Partial<CdpErrorPayload> = {}): void {
+    const queue = this.#injected.get(method) ?? [];
+    queue.push({
+      code: error.code ?? -32000,
+      message: error.message ?? "Injected CDP failure",
+      ...(error.data !== undefined ? { data: error.data } : {}),
+    });
+    this.#injected.set(method, queue);
+  }
+
+  /** Persist an error for every matching command; `null` clears it. */
+  setError(method: string, error: CdpErrorPayload | null): void {
+    if (error === null) this.#persistentErrors.delete(method);
+    else this.#persistentErrors.set(method, { ...error });
+  }
+
+  /** Drop the connection instead of answering the next matching command. */
+  dropOnNext(method: string): void {
+    this.#dropNext.add(method);
+  }
+
+  /** Terminate every connected client. The server keeps listening for reconnects. */
+  dropConnections(): void {
+    for (const socket of this.#sockets) socket.terminate();
+    this.#sockets.clear();
+  }
+
+  /**
+   * Close a tab the way Chrome does: `Target.targetDestroyed` (browser level) and
+   * `Inspector.detached` reason `target_closed` for attached sessions. Later
+   * commands on those sessions fail with -32000 "Target closed.".
+   */
+  loseTarget(targetId?: string): string | undefined {
+    const id = targetId ?? this.#firstTargetId();
+    if (id === undefined || !this.#targets.has(id)) return undefined;
+    this.#destroyTarget(id);
+    return id;
+  }
+
+  addTarget(target: Partial<CdpTarget> & { id?: string } = {}): CdpTarget {
+    const id = target.id ?? `target-${this.#nextTargetId++}`;
+    const url = target.url ?? "about:blank";
+    const created: CdpTarget = {
+      id,
+      type: target.type ?? "page",
+      title: target.title ?? titleForUrl(url),
+      url,
+      ...(target.attached !== undefined ? { attached: target.attached } : {}),
+    };
+    this.#targets.set(id, created);
+    return { ...created };
+  }
+
+  setEvaluateResult(value: unknown): void {
+    this.#evaluateResult = value;
+  }
+
+  setEvaluateHandler(handler: FakeCdpEvaluateHandler | null): void {
+    this.#evaluateHandler = handler ?? undefined;
+  }
+
+  /** Emit an arbitrary event to every connected client. */
+  sendEvent(method: string, params: Record<string, unknown> = {}, sessionId?: string): void {
+    this.#emit(method, params, sessionId);
+  }
+
+  // --- waiting -------------------------------------------------------------
+
+  waitFor(method: string, options: WaitForOptions = {}): Promise<FakeCdpRequest> {
+    const count = options.count ?? 1;
+    const matching = this.calls(method);
+    if (matching.length >= count) return Promise.resolve(matching[count - 1]!);
+
+    return new Promise<FakeCdpRequest>((resolve, reject) => {
+      const waiter: Waiter = { method, count, resolve, reject };
+      const timeoutMs = options.timeoutMs ?? 2_000;
+      waiter.timer = setTimeout(() => {
+        this.#waiters.delete(waiter);
+        reject(new DOMException(`timed out waiting for ${method}`, "TimeoutError"));
+      }, timeoutMs);
+      waiter.timer.unref();
+      this.#waiters.add(waiter);
+    });
+  }
+
+  // --- socket handling -----------------------------------------------------
+
+  #onConnection(socket: WebSocket): void {
+    this.#sockets.add(socket);
+    socket.on("message", (raw) => {
+      void this.#handle(socket, raw);
+    });
+    socket.on("close", () => {
+      this.#forgetSocket(socket);
+    });
+    socket.on("error", () => {
+      this.#forgetSocket(socket);
+    });
+  }
+
+  /**
+   * A disconnected client loses its sessions, like Chrome: the sessionId is no
+   * longer known (-32001), and the target is `attached: false` once no other
+   * client holds a session on it. No `Inspector.detached` event is emitted,
+   * because there is no client left to receive it.
+   */
+  #forgetSocket(socket: WebSocket): void {
+    this.#sockets.delete(socket);
+    for (const [sessionId, owner] of [...this.#sessionOwner]) {
+      if (owner !== socket) continue;
+      const targetId = this.#sessions.get(sessionId);
+      this.#sessions.delete(sessionId);
+      this.#sessionOwner.delete(sessionId);
+      if (targetId !== undefined && !this.#targetHasSession(targetId)) {
+        const target = this.#targets.get(targetId);
+        if (target !== undefined) target.attached = false;
+      }
+    }
+  }
+
+  async #handle(socket: WebSocket, raw: RawData): Promise<void> {
+    const parsed = parseMessage(raw);
+    if (!isRecord(parsed) || typeof parsed.method !== "string") return;
+
+    const method = parsed.method;
+    const params = isRecord(parsed.params) ? parsed.params : {};
+    const sessionId = asString(parsed.sessionId);
+    const id = typeof parsed.id === "number" ? parsed.id : undefined;
+    const request: FakeCdpRequest = {
+      method,
+      params,
+      ...(id !== undefined ? { id } : {}),
+      ...(sessionId !== undefined ? { sessionId } : {}),
+    };
+    this.#requests.push(request);
+    this.#satisfyWaiters(request);
+
+    // Client-sent events have no id and never get a response.
+    if (id === undefined) return;
+
+    if (this.#dropNext.delete(method)) {
+      socket.terminate();
+      return;
+    }
+
+    const injected = this.#takeInjectedError(method);
+    if (injected !== undefined) {
+      this.#respond(socket, { id, error: injected, ...(sessionId !== undefined ? { sessionId } : {}) });
+      return;
+    }
+
+    if (sessionId !== undefined) {
+      if (this.#lostSessions.has(sessionId)) {
+        this.#respond(socket, {
+          id,
+          error: { code: -32000, message: "Target closed." },
+          sessionId,
+        });
+        return;
+      }
+      if (!this.#sessions.has(sessionId)) {
+        this.#respond(socket, {
+          id,
+          error: { code: -32001, message: "Session with given id not found." },
+          sessionId,
+        });
+        return;
+      }
+    }
+
+    let outcome: Outcome;
+    try {
+      outcome = await this.#dispatch(request, socket);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      outcome = failure(-32000, message);
+    }
+
+    if (outcome.kind === "drop") {
+      socket.terminate();
+      return;
+    }
+    if (outcome.kind === "error") {
+      this.#respond(socket, {
+        id,
+        error: outcome.error,
+        ...(sessionId !== undefined ? { sessionId } : {}),
+      });
+      return;
+    }
+    if (outcome.kind === "result") {
+      this.#respond(socket, {
+        id,
+        result: outcome.value,
+        ...(sessionId !== undefined ? { sessionId } : {}),
+      });
+    }
+  }
+
+  #respond(socket: WebSocket, message: Record<string, unknown>): void {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify(message));
+  }
+
+  #takeInjectedError(method: string): CdpErrorPayload | undefined {
+    const queue = this.#injected.get(method);
+    if (queue !== undefined && queue.length > 0) {
+      const error = queue.shift()!;
+      if (queue.length === 0) this.#injected.delete(method);
+      return error;
+    }
+    return this.#persistentErrors.get(method);
+  }
+
+  #satisfyWaiters(request: FakeCdpRequest): void {
+    for (const waiter of [...this.#waiters]) {
+      const matching = this.#requests.filter((item) => item.method === waiter.method);
+      if (matching.length < waiter.count) continue;
+      if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+      this.#waiters.delete(waiter);
+      waiter.resolve({ ...request, params: { ...request.params } });
+    }
+  }
+
+  #rejectWaiters(reason: unknown): void {
+    for (const waiter of this.#waiters) {
+      if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+      waiter.reject(reason);
+    }
+    this.#waiters.clear();
+  }
+
+  // --- CDP dispatch --------------------------------------------------------
+
+  async #dispatch(request: FakeCdpRequest, socket: WebSocket): Promise<Outcome> {
+    const { method, params, sessionId } = request;
+    switch (method) {
+      case "Browser.getVersion":
+        return result({ ...DEFAULT_VERSION, ...this.#options.version });
+      case "Browser.close":
+        return result({});
+
+      case "Target.getTargets":
+        return result({ targetInfos: [...this.#targets.values()].map((target) => this.#targetInfo(target)) });
+      case "Target.getTargetInfo": {
+        const target = this.#targets.get(asString(params.targetId) ?? "");
+        if (target === undefined) return failure(-32602, "No target with given id found");
+        return result({ targetInfo: this.#targetInfo(target) });
+      }
+      case "Target.attachToTarget": {
+        const targetId = asString(params.targetId);
+        const target = targetId !== undefined ? this.#targets.get(targetId) : undefined;
+        if (targetId === undefined || target === undefined) {
+          return failure(-32602, "No target with given id found");
+        }
+        // Chrome allocates a new sessionId on every attach. Reusing the previous
+        // one would hide a client that keeps a stale id across a re-attach.
+        const sessionId = `session-${this.#nextSessionId++}`;
+        this.#sessions.set(sessionId, targetId);
+        this.#sessionOwner.set(sessionId, socket);
+        this.#knownSessions.add(sessionId);
+        target.attached = true;
+        return result({ sessionId });
+      }
+      case "Target.detachFromTarget": {
+        const attachedSession = asString(params.sessionId);
+        if (attachedSession !== undefined) this.#detachSession(attachedSession);
+        return result({});
+      }
+      case "Target.createTarget": {
+        const url = asString(params.url) ?? "about:blank";
+        const created = this.addTarget({ url });
+        return result({ targetId: created.id });
+      }
+      case "Target.closeTarget": {
+        const targetId = asString(params.targetId);
+        if (targetId === undefined || !this.#targets.has(targetId)) {
+          return failure(-32602, "No target with given id found");
+        }
+        this.#destroyTarget(targetId);
+        return result({ success: true });
+      }
+      case "Target.setDiscoverTargets":
+        return result({});
+
+      case "Page.enable":
+      case "Page.disable":
+        return result({});
+      case "Page.navigate": {
+        const url = asString(params.url);
+        if (url === undefined) return failure(-32602, "Invalid parameters");
+        const target = sessionId !== undefined ? this.#targetForSession(sessionId) : this.#firstTarget();
+        if (target !== undefined) {
+          target.url = url;
+          if (target.title === "about:blank" || target.title === "") target.title = titleForUrl(url);
+        }
+        if (this.#options.emitLoadEvent !== false) {
+          this.#scheduleEvent(
+            "Page.loadEventFired",
+            { timestamp: 1 },
+            sessionId,
+            this.#options.loadEventDelayMs ?? 0,
+          );
+        }
+        return result({ frameId: "frame-1", loaderId: `loader-${this.#nextLoaderId++}` });
+      }
+      case "Page.bringToFront":
+        return result({});
+      case "Page.captureScreenshot": {
+        const source = this.#options.screenshot ?? Buffer.from("fake-screenshot");
+        return result({ data: Buffer.from(source).toString("base64") });
+      }
+
+      case "Runtime.enable":
+      case "Runtime.disable":
+        return result({});
+      case "Runtime.evaluate": {
+        const expression = asString(params.expression) ?? "";
+        const target = sessionId !== undefined ? this.#targetForSession(sessionId) : this.#firstTarget();
+        return this.#evaluate(expression, params, target);
+      }
+
+      case "Network.getCookies": {
+        const urls = Array.isArray(params.urls)
+          ? params.urls.filter((url): url is string => typeof url === "string")
+          : [];
+        return result({
+          cookies: filterCookiesForUrls(this.#options.cookies ?? [], urls).map((cookie) => ({ ...cookie })),
+        });
+      }
+      case "Network.getAllCookies":
+        return result({ cookies: (this.#options.cookies ?? []).map((cookie) => ({ ...cookie })) });
+
+      case "Input.dispatchKeyEvent":
+      case "Input.insertText":
+        return result({});
+
+      default:
+        return failure(-32601, `'${method}' wasn't found`);
+    }
+  }
+
+  /**
+   * `Runtime.evaluate` semantics: `awaitPromise` decides whether a returned
+   * thenable is resolved, `returnByValue` decides objectId vs inlined value, and
+   * a throw/rejection becomes `exceptionDetails` on a normal response (Chrome
+   * does not turn it into a protocol error, so client code must read the field).
+   */
+  async #evaluate(
+    expression: string,
+    params: Record<string, unknown>,
+    target: CdpTarget | undefined,
+  ): Promise<Outcome> {
+    const awaitPromise = params.awaitPromise === true;
+    const returnByValue = params.returnByValue === true;
+    let value: unknown;
+    try {
+      if (this.#evaluateHandler !== undefined) {
+        value = this.#evaluateHandler(expression, params, target);
+      } else if (this.#evaluateResult !== undefined) {
+        value = this.#evaluateResult;
+      } else {
+        value = defaultEvaluate(expression, target);
+      }
+      if (isPromiseLike(value)) {
+        if (!awaitPromise) {
+          // Not awaited: Chrome hands back a Promise objectId. Attach a no-op
+          // rejection handler so a rejected fixture promise cannot crash the run.
+          void value.then(undefined, () => undefined);
+          return result({ result: promiseObject(this.#newObjectId()) });
+        }
+        value = await value;
+      }
+    } catch (error) {
+      return result({
+        result: errorObject(this.#newObjectId()),
+        exceptionDetails: exceptionDetailsFor(error, awaitPromise, this.#newObjectId()),
+      });
+    }
+    return result({ result: remoteObject(value, returnByValue, this.#newObjectId()) });
+  }
+
+  #newObjectId(): string {
+    return `object-${this.#nextObjectId++}`;
+  }
+
+  #targetInfo(target: CdpTarget): Record<string, unknown> {
+    return {
+      targetId: target.id,
+      type: target.type,
+      title: target.title,
+      url: target.url,
+      attached: target.attached === true,
+      canAccessOpener: false,
+    };
+  }
+
+  #firstTarget(): CdpTarget | undefined {
+    for (const target of this.#targets.values()) return target;
+    return undefined;
+  }
+
+  #firstTargetId(): string | undefined {
+    for (const id of this.#targets.keys()) return id;
+    return undefined;
+  }
+
+  #targetForSession(sessionId: string): CdpTarget | undefined {
+    const targetId = this.#sessions.get(sessionId);
+    return targetId === undefined ? undefined : this.#targets.get(targetId);
+  }
+
+  #destroyTarget(targetId: string): void {
+    this.#targets.delete(targetId);
+    this.#emit("Target.targetDestroyed", { targetId });
+    for (const [sessionId, ownerTargetId] of [...this.#sessions]) {
+      if (ownerTargetId !== targetId) continue;
+      this.#sessions.delete(sessionId);
+      this.#lostSessions.add(sessionId);
+      // Emit while the owner is still mapped: routing depends on it.
+      this.#emit("Inspector.detached", { reason: "target_closed" }, sessionId);
+      this.#sessionOwner.delete(sessionId);
+    }
+  }
+
+  #detachSession(sessionId: string): void {
+    const targetId = this.#sessions.get(sessionId);
+    this.#sessionOwner.delete(sessionId);
+    if (targetId === undefined) return;
+    this.#sessions.delete(sessionId);
+    if (this.#targetHasSession(targetId)) return;
+    const target = this.#targets.get(targetId);
+    if (target !== undefined) target.attached = false;
+  }
+
+  #targetHasSession(targetId: string): boolean {
+    for (const sessionTargetId of this.#sessions.values()) {
+      if (sessionTargetId === targetId) return true;
+    }
+    return false;
+  }
+
+  #scheduleEvent(
+    method: string,
+    params: Record<string, unknown>,
+    sessionId: string | undefined,
+    delayMs: number,
+  ): void {
+    const timer = setTimeout(() => {
+      this.#timers.delete(timer);
+      this.#emit(method, params, sessionId);
+    }, Math.max(0, delayMs));
+    this.#timers.add(timer);
+  }
+
+  #emit(method: string, params: Record<string, unknown>, sessionId?: string): void {
+    this.#events.push({ method, params, ...(sessionId !== undefined ? { sessionId } : {}) });
+    const payload = JSON.stringify({
+      method,
+      params,
+      ...(sessionId !== undefined ? { sessionId } : {}),
+    });
+    if (sessionId !== undefined) {
+      // Session events belong to the client that attached the session. Sending
+      // them to every socket would let a test "observe" an event Chrome would
+      // route elsewhere — exactly the isolation P1-B needs to get right.
+      const owner = this.#sessionOwner.get(sessionId);
+      if (owner !== undefined) {
+        if (owner.readyState === WebSocket.OPEN) owner.send(payload);
+        return;
+      }
+      // Unknown owner but a session this fake minted: its client detached or
+      // disconnected, so Chrome would drop the event — do not broadcast it.
+      if (this.#knownSessions.has(sessionId)) return;
+      // Never-attached id: only reachable through sendEvent(), keep it observable.
+    }
+    for (const socket of this.#sockets) {
+      if (socket.readyState === WebSocket.OPEN) socket.send(payload);
+    }
+  }
+
+  #resetState(targets?: ReadonlyArray<CdpTarget>): void {
+    this.#targets.clear();
+    this.#sessions.clear();
+    this.#sessionOwner.clear();
+    this.#knownSessions.clear();
+    this.#lostSessions.clear();
+    this.#nextObjectId = 1;
+    const initial = targets ?? [DEFAULT_TARGET];
+    for (const target of initial) this.#targets.set(target.id, { ...target });
+  }
+}

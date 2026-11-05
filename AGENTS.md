@@ -60,16 +60,20 @@ The window being visible is **desired**, not a bug.
 - Node `26.13.0` (native TS type-stripping: `node --test tests/*.test.ts` works), pi `1.5.0`.
 - OpenRouter is authenticated in pi (`~/.pi/agent/auth.json`, provider `openrouter`) — classifiers only.
 - Local llama.cpp is configured as provider `ik-llama` (`http://127.0.0.1:8080/v1`), may be down.
-- CDP is **not enabled yet**: no `DevToolsActivePort`, `127.0.0.1:9222` closed.
+- CDP is **enabled and verified** (2026-11-06): `~/.config/google-chrome/DevToolsActivePort` exists with
+  port `9222` + `/devtools/browser/<uuid>`; `curl :9222/json/version` returns nothing in this mode, but the
+  raw WS endpoint answers `Browser.getVersion` → `Chrome/157.0.8103.38`. **The file is authoritative.**
+  The UUID path changes per Chrome session; after a Chrome restart re-check the file (and, if it is absent,
+  repeat the Allow flow below).
 
-### Enable CDP (one-time, user action)
+### Enable CDP (one-time per Chrome session)
 Because Chrome 136+ ignores `--remote-debugging-port` for the default profile:
 1. Open `chrome://inspect/#remote-debugging` in the user's Chrome.
 2. Tick **Discover network targets** / the remote-debugging toggle, click **Allow**.
-3. Verify: `cat ~/.config/google-chrome/DevToolsActivePort` (port + path) or
-   `curl -s http://127.0.0.1:9222/json/version`.
+3. Verify: `cat ~/.config/google-chrome/DevToolsActivePort` (port + path). `curl :9222/json/version` may
+   return nothing — that is expected and not a failure; the file is authoritative.
 4. In our code: read `DevToolsActivePort`, build `ws://127.0.0.1:<port><path>`; if `/json/version` is
-   disabled in this mode, the file is authoritative. Escape hatch: `PI_CHROME_CDP_WS=ws://…`.
+   disabled in this mode, the file wins. Escape hatch: `PI_CHROME_CDP_WS=ws://…`.
 
 If the flow differs on this Chrome build, **document the exact clicks here** after verifying. The flow
 is gated in `PLAN.md` V1.3 (`node src/cli/doctor.ts --json`); a phase that cannot see CDP is `BLOCKED`,
