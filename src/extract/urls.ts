@@ -143,9 +143,23 @@ export function stableQueryKey(raw: string): string | null {
   return normalized.replace(/^https?:\/\//, "");
 }
 
-function isGoogleHost(hostname: string): boolean {
-  const host = hostname.toLowerCase();
-  return host === "google.com" || /(^|\.)google\.[a-z]{2,}(\.[a-z]{2,})?$/.test(host);
+/**
+ * Google's host shape, spelled out instead of "anything under google.*".
+ *
+ * `parseLink` decides whether an absolute href is Google's own wrapper, and the
+ * resolver then sends the browser's cookies to that host. A wildcard such as
+ * `google.duckdns.org` would therefore let a hostile SERP href aim the
+ * cookie-bearing request at an attacker, so only the real shapes pass: an
+ * optional `www.`, then `google.com`, `google.<2-3 letter ccTLD>` (google.de,
+ * google.ru) or `google.<co|com>.<2 letter ccTLD>` (google.co.uk,
+ * google.com.br).
+ */
+const GOOGLE_CC_TLD = /^google\.[a-z]{2,3}$/;
+const GOOGLE_CO_CC_TLD = /^google\.(?:co|com)\.[a-z]{2}$/;
+
+export function isGoogleHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^www\./, "");
+  return host === "google.com" || GOOGLE_CC_TLD.test(host) || GOOGLE_CO_CC_TLD.test(host);
 }
 
 function isDuckDuckGoHost(hostname: string): boolean {

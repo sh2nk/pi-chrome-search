@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   domainOf,
+  isGoogleHost,
   isHttpUrl,
   isTrackingParam,
   normalizeUrl,
@@ -125,6 +126,59 @@ test("parseLink: a non-Google absolute /goto is not treated as a Google wrapper"
   const parsed = parseLink("https://example.com/goto?url=abc", "https://example.com/");
   assert.equal(parsed?.kind, "direct");
   assert.equal(parsed?.url, "https://example.com/goto?url=abc");
+});
+
+test("isGoogleHost: explicit google shapes only, never a wildcard subdomain", () => {
+  for (const host of [
+    "google.com",
+    "www.google.com",
+    "GOOGLE.DE",
+    "www.google.co.uk",
+    "google.co.uk",
+    "google.com.br",
+    "google.ru",
+    "google.co.in",
+  ]) {
+    assert.equal(isGoogleHost(host), true, host);
+  }
+
+  // A host we would send cookies to must not be nameable by a SERP href.
+  for (const host of [
+    "google.duckdns.org",
+    "google.com.evil.co",
+    "google.co.uk.evil",
+    "notgoogle.com",
+    "evilgoogle.com",
+    "google",
+    "",
+  ]) {
+    assert.equal(isGoogleHost(host), false, host);
+  }
+});
+
+test("parseLink: a hostile google-lookalike href is direct, so /goto cannot leak cookies", () => {
+  for (const href of [
+    "https://google.duckdns.org/goto?url=abc",
+    "https://google.com.evil.co/goto?url=abc",
+    "https://google.co.uk.evil/goto?url=abc",
+    "https://notgoogle.com/goto?url=abc",
+  ]) {
+    const parsed = parseLink(href, "https://www.google.com/search?q=x");
+    assert.equal(parsed?.kind, "direct", href);
+    assert.equal(parsed?.url, href, "the href is kept as a plain link, never as a wrapper");
+    assert.equal(parsed?.wrapperUrl, null);
+  }
+
+  // The real country hosts are still wrappers.
+  for (const href of [
+    "https://google.de/goto?url=abc",
+    "https://www.google.co.uk/goto?url=abc",
+    "https://google.com.br/goto?url=abc",
+  ]) {
+    const parsed = parseLink(href, "https://www.google.com/search?q=x");
+    assert.equal(parsed?.kind, "goto", href);
+    assert.equal(parsed?.url, null);
+  }
 });
 
 test("parseLink: Google /url?q= yields the decoded target", () => {
