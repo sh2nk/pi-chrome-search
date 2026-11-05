@@ -195,7 +195,7 @@ conflicts, and that every later gate is a single command.
 | Lane | Deliverable | Files owned |
 |---|---|---|
 | P0-A | npm scaffold: `type: module`, `pi.extensions`, peer deps `@earendil-works/pi-coding-agent` + `typebox`, dep `ws`, dev `typescript`/`@types/ws`/`@types/node`; scripts `typecheck`, `test`, `test:live`, `bench`, `audit`; strict tsconfig; `.gitignore` | `package.json`, `tsconfig.json`, `.gitignore` |
-| P0-B | frozen contracts: engine/tool/CDP types, error-code union + hint table, config type + strict loader (unknown key → `E_CONFIG`), no-op extension registration, `/web-doctor` stub | `src/engines/types.ts`, `src/tools/types.ts`, `src/cdp/types.ts`, `src/runtime/error-codes.ts`, `src/config.ts`, `src/index.ts` |
+| P0-B | frozen contracts: engine/tool/CDP types, error-code union + hint table, config type + strict loader (unknown key → `E_CONFIG`), no-op extension registration, `/web-doctor` stub | `src/engines/types.ts`, `src/engines/index.ts` (registry stub), `src/tools/types.ts`, `src/cdp/types.ts`, `src/runtime/types.ts`, `src/runtime/error-codes.ts`, `src/reflex/types.ts`, `src/version.ts`, `src/config.ts`, `src/index.ts`, `src/cli/doctor.ts` (stub) |
 | P0-C | test harness: in-memory `CdpPage`, fake CDP ws server, injectable clock, fixture sanitizer rules, `evidence/` template | `tests/helpers/*`, `tests/fixtures/README.md`, `evidence/README.md` |
 | P0-D | audit script: forbidden-import/flag greps, description-budget hook, secret scan, personal-data check for fixtures | `scripts/audit.mjs` |
 
@@ -234,7 +234,8 @@ prove it is not an automation browser, and make the state diagnosable.
 | P1-E | doctor report assembly + per-engine probe (`n=1`, summary off) + `src/cli/doctor.ts --json` + `/web-doctor`, `/web-focus` | `src/runtime/doctor.ts`, `src/cli/doctor.ts`, `src/commands/doctor.ts`, `tests/unit/doctor.test.ts`, `tests/fixtures/doctor.schema.json` | P1-D |
 
 Before P3 the probe loop has no adapters: each engine verdict is reported honestly as `unavailable`
-(`E_UNSUPPORTED`), and the doctor must not crash or invent canaries.
+(`E_UNSUPPORTED`), and the doctor must not crash or invent canaries. The deferred `web_doctor` tool is
+delivered in P4-C (D11); P1 ships only the CLI and the command.
 
 **Validation gates**
 
@@ -341,7 +342,7 @@ doctor that can actually diagnose every engine.
 |---|---|---|---|
 | P4-A | `extract/read.ts` (article/main scoring, strip nav/footer/aside/cookie banners, Markdown) + `runtime/ssrf.ts` (block localhost/127/8, 10/8, 172.16/12, 192.168/16, `::1`, `169.254/16`, `file:`, `data:`; re-check on redirect) + `web_read.ts` (offset, `maxChars` 6000/ceiling 20000, `truncated`/`nextOffset`/`title`/`byline`/`publishedAt`, http(s) only, domain audit log) | `src/extract/read.ts`, `src/runtime/ssrf.ts`, `src/tools/web_read.ts`, `tests/unit/{read,ssrf,web_read}.test.ts`, `tests/fixtures/read-*.html.gz` | P2 |
 | P4-B | `engines/images.ts` (Google `tbm=isch`, Yandex images) + `image_search.ts` (`n≤12`, default 4, `attach` ≤4 thumbnails off by default, deferred) | `src/engines/images.ts`, `src/tools/image_search.ts`, `tests/unit/images.test.ts`, `tests/fixtures/images-*.html.gz` | P2 + P3 patterns |
-| P4-C | `artifacts.ts` (dir `<ts>-<engine>-<hash>`, HTML sanitized of form values, retention 30 dirs / 50 MB); doctor per-engine probes + canary aggregation + safe `--fix` (reconnect, close orphan owned tabs, prune artifacts, clear stale lock only) | `src/runtime/artifacts.ts`, updates to `src/runtime/doctor.ts`, `src/cli/doctor.ts`, `tests/unit/artifacts.test.ts`, `tests/unit/doctor_engines.test.ts` | P1-E + P3 |
+| P4-C | `artifacts.ts` (dir `<ts>-<engine>-<hash>`, HTML sanitized of form values, retention 30 dirs / 50 MB); doctor per-engine probes + canary aggregation + safe `--fix` (reconnect, close orphan owned tabs, prune artifacts, clear stale lock only); deferred `web_doctor` tool (D11) | `src/runtime/artifacts.ts`, updates to `src/runtime/doctor.ts`, `src/cli/doctor.ts`, `src/tools/web_doctor.ts`, `tests/unit/artifacts.test.ts`, `tests/unit/doctor_engines.test.ts` | P1-E + P3 |
 | P4-D | tool-surface audit: `web_read`/`image_search` exposure `deferred`, total description budget, no prompt-visible deferred tools | `tests/unit/tool_surface.test.ts`, `evidence/P4-surface.md` | P2-E + P4-A/B |
 
 **Validation gates**
@@ -496,7 +497,7 @@ hard rules were broken along the way.
 
 | Phase | Status | Gate evidence | Blocker / note |
 |---|---|---|---|
-| P0 contracts | `[ ]` | `evidence/P0.md` | — |
+| P0 contracts | `[~]` | `evidence/P0.md` | contracts+scaffold committed; harness/audit in flight |
 | P1 attach/doctor | `[ ]` | `evidence/P1.md` | needs B0 (CDP enable) |
 | P2 plumbing | `[ ]` | `evidence/P2.md` | — |
 | P3 engines | `[ ]` | `evidence/P3.md`, `evidence/P3-live.md` | live serial |
@@ -598,6 +599,27 @@ export interface EngineRegistry {
 Non-negotiable contract points: `buildUrl` is pure; adapters never navigate themselves; adapters never
 take screenshots or write artifacts (the tool layer does); adapters return raw data only, and all caps are
 applied in `extract/compact.ts`; `RetryOnWall` lives in the adapter flag, the retry happens in the tool.
+
+### A.1 P0 deltas (frozen 2026-11-06, `p0:` commit)
+
+These are the interfaces actually committed in P0; later phases must not change them without a
+`contract:` commit.
+
+- `EngineSelection = "auto" | EngineId | EngineId[]` (D9) and
+  `EngineRegistry.has(id)`, `EngineRegistry.select(requested): EngineId[]` (D10: `auto` → canonical
+  order, explicit lists keep caller order, disabled/unknown ids are dropped).
+- `Engine.extract(page, q)` — the query is required (page/freshness/summary affect extraction).
+- `SerpItem.engine?: EngineId` is set by the merge layer only when results are mixed; `RawSerp.timings`
+  is a required object (may be `{}`).
+- `CdpConnector` (in `src/cdp/types.ts`): `connect()`, `acquirePage(engine)`, `releaseAll()`,
+  `isConnected()`, `endpoint()`. `CdpEndpoint` carries `port`, `wsUrl`, `source`, `profileDir?`.
+- `src/runtime/types.ts`: `Clock`, `Cache` (generic key/value), `Limiter`, `Artifacts`, `Logger`,
+  `DecisionLogRow`. `src/runtime/error-codes.ts` also owns `WebSearchError`, `ERROR_HINTS`, `RETRYABLE`.
+- `src/reflex/types.ts`: `Reflex`, `Candidate`, `Evidence`, `CoverageVerdict`, `Route`.
+- Additive config key `cdp.profileDir` (default `null`) backs `PI_CHROME_SEARCH_PROFILE` (launch mode only).
+  It is not written back by the extension; window bounds live in state, not config.
+- Test harness (P0-C) lives in `tests/helpers/` and is the only shared test surface; lane tests must not
+  edit it without an orchestrator handoff.
 
 ---
 

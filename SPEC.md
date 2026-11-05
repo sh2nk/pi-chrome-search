@@ -34,6 +34,10 @@ but only behind a flag, only after benchmarking, and never for synthesis or secu
 | D6 | **Explicit error taxonomy + doctor + artifacts**, so a fixer agent can be spun up quickly. | Every failure has a code, a hint, and (where useful) a saved page artifact. `/web-doctor` and `web_doctor` exist from M1. |
 | D7 | **System 1 is optional**, behind a flag, benchmarked before it is enabled. Backends: local llama.cpp (free) → OpenRouter classifier (cheap) → rules. | Never on the critical path; deterministic fallback always exists; cost guard and decision log. |
 | D8 | **OpenRouter is allowed only for classifiers, never for search.** Auth is already in pi (`~/.pi/agent/auth.json`, provider `openrouter`). | Use `ctx.modelRegistry.getAvailableOfType("classifier", "openrouter")`; never read keys directly from env/files. |
+| D9 | **`web_search.engines` accepts `"auto"`, one engine id, or a list of ids** (decision 2026-11-06). Multi-engine merge applies only when the caller passes a list. | Frozen as `EngineSelection`; `compact.ts` merges by normalized URL and tags the engine per result only when mixed. |
+| D10 | **`auto` = first enabled engine in canonical order (google → duckduckgo → yandex), with fallback to the next on `E_WALL`/`E_EMPTY`/`E_UNSUPPORTED`/`E_CDP_*`** (decision 2026-11-06). Yandex stays last. Explicit lists keep the caller's order. | No confidence heuristic for engine choice before M5 (reflex routing); yandex captcha is not paid speculatively. |
+| D11 | **`web_doctor` (deferred tool) ships in P4-C**; P1 ships `node src/cli/doctor.ts --json` and the `/web-doctor` command (decision 2026-11-06). | One report builder; before P3 every engine probe is honestly `unavailable`. |
+| D12 | **License: MIT** (decision 2026-11-06). | `LICENSE`, `package.json#license`, P7 documents it; no compliance claim about engine ToS. |
 
 **Accepted risk:** Google and Yandex prohibit automated access in their ToS. The user explicitly accepts
 this for personal use on their own browser/profile. This project must not claim compliance, must not
@@ -287,7 +291,7 @@ interface Engine {
 web_search({
   q: string,                         // supports site:, filetype:, quotes
   n?: number,                        // 1..10, default 5
-  engines?: "auto" | "google" | "duckduckgo" | "yandex",   // default auto
+  engines?: "auto" | EngineId | EngineId[],  // default auto (D9)
   summary?: boolean,                 // default true
   freshness?: "d" | "w" | "m" | "y",
   page?: number,                     // default 1 (google/yandex only)
