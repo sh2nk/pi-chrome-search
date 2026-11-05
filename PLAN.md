@@ -498,7 +498,7 @@ hard rules were broken along the way.
 | Phase | Status | Gate evidence | Blocker / note |
 |---|---|---|---|
 | P0 contracts | `[x]` | `evidence/P0.md` | contracts, scaffold, harness, audit green |
-| P1 attach/doctor | `[~]` | `evidence/P1.md` | discovery/session/errors/log/browser green; doctor + live V1.3 in flight |
+| P1 attach/doctor | `[x]` | `evidence/P1.md` | M0 gates V1.1–V1.6 pass; live doctor JSON recorded |
 | P2 plumbing | `[~]` | `evidence/P2.md` | compact/cache/limiter/humanize/web_search green; registry+budget in flight |
 | P3 engines | `[ ]` | `evidence/P3.md`, `evidence/P3-live.md` | live serial; artifacts pulled forward from P4-C (V3.6) |
 | P4 read/images/doctor | `[ ]` | `evidence/P4.md` | live serial |
