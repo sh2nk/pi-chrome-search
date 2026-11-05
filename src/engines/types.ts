@@ -112,8 +112,9 @@ export interface EngineRegistry {
   /** Enabled engines in canonical order; yandex last. */
   enabled(): EngineId[];
   /**
-   * Resolve a user selection to a try-order (D10): `auto` and lists keep canonical
-   * order, unknown/disabled ids are dropped. The tool layer owns fallback.
+   * Resolve a user selection to a try-order (D9/D10): `auto` uses the canonical order
+   * (google → duckduckgo → yandex) and the tool stops at the first success; an explicit
+   * list keeps the caller's order and merges the results. Unknown/disabled ids are dropped.
    */
   select(requested: EngineSelection): EngineId[];
 }
