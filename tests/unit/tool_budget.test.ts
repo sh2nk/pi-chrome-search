@@ -33,7 +33,7 @@ import {
 } from "../../src/engines/index.ts";
 import { ENGINE_IDS, type Engine, type EngineId } from "../../src/engines/types.ts";
 import { isWebSearchError, type WebSearchError } from "../../src/runtime/error-codes.ts";
-import { createWebSearchTool } from "../../src/tools/web_search.ts";
+import { createTools } from "../../src/tools/index.ts";
 
 // ---------------------------------------------------------------------------
 // Tool surface budget
@@ -45,9 +45,11 @@ const TOOL_BUDGET_CHARS = 900;
 /** PLAN V2.6: `web_search` alone is capped at 350 chars (P2-D contract). */
 const WEB_SEARCH_DESCRIPTION_MAX = 350;
 
-const webSearchTool = createWebSearchTool(() => {
+const tools = createTools(() => {
   throw new Error("tool_budget: a shape probe must not resolve tool dependencies");
 });
+const webSearchTool = tools.find((tool) => tool.name === "web_search");
+if (webSearchTool === undefined) throw new Error("tool_budget: web_search is not exported by createTools");
 
 interface DeclaredTool {
   name: string;
@@ -63,14 +65,11 @@ interface DeclaredTool {
  *
  * The sum below is the gate; keep entries at most one line each.
  */
-const TOOL_DESCRIPTIONS: DeclaredTool[] = [
-  {
-    name: webSearchTool.name,
-    description: webSearchTool.description,
-    exposure: webSearchTool.exposure,
-  },
-  // P4-D: append web_read / image_search / web_research (all `deferred`) here.
-];
+const TOOL_DESCRIPTIONS: DeclaredTool[] = tools.map((tool) => ({
+  name: tool.name,
+  description: tool.description,
+  exposure: tool.exposure,
+}));
 
 test("web_search is a cheap direct tool with honest annotations", (t) => {
   assert.equal(webSearchTool.name, "web_search");
