@@ -1,0 +1,10 @@
+{
+  "engine": "google",
+  "urlPathShape": "https://www.google.com/search?q=%3Cquery%3E&hl=ru",
+  "queryClass": "technical-ai",
+  "capturedAt": "2026-11-05T23:32:09.207Z",
+  "ai": "yes",
+  "results": 8,
+  "capturedWith": "research/probes/06-capture-fixtures.mjs",
+  "notes": "results = marker census in the HTML (ads included); ai = text heuristic (adapter detection is authoritative)"
+}

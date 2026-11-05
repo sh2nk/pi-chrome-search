@@ -41,10 +41,17 @@ if (!name || !engine || !url) {
   process.exit(2);
 }
 
+// Scripts, styles and inline SVG are dropped before a fixture is stored:
+// they carry session config and, in SVG path data, coordinate runs that look
+// exactly like IPv4 addresses to the personal-data audit (136 false positives
+// on the first live Google/DDG captures). Adapters extract text, never icons.
 const stripActive = (html) =>
   html
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, "")
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, "")
+    .replace(/<template\b[^>]*>[\s\S]*?<\/template>/gi, "");
 
 const shapeOf = (raw) => {
   const parsed = new URL(raw);
@@ -59,7 +66,9 @@ const shapeOf = (raw) => {
 
 const t0 = Date.now();
 const endpoint = await discoverEndpoint({});
-const session = await CdpSession.connect({ wsUrl: endpoint.wsUrl, connectTimeoutMs: 5000 });
+// Chrome's grant-check can take seconds (observed 1.3 s and one 5 s+ stall on
+// the same session), so keep the connect bounded but not tight.
+const session = await CdpSession.connect({ wsUrl: endpoint.wsUrl, connectTimeoutMs: 15_000 });
 const targetId = await session.createTarget("about:blank", { newWindow: true });
 
 try {

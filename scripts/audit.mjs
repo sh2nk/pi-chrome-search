@@ -733,6 +733,10 @@ function isPlaceholderValue(raw) {
   if (value.startsWith("<") || value.startsWith("%") || value.startsWith("{") || value.startsWith("$")) {
     return true;
   }
+  // The fixture sanitizer's own marker is a placeholder, not a leaked value:
+  // `sxsrf=[redacted]` is the expected end state, and flagging it made R7
+  // permanently red for every sanitized capture.
+  if (value.includes("[redacted")) return true;
   return PLACEHOLDER_VALUES.has(value);
 }
 

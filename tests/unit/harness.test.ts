@@ -999,6 +999,22 @@ test("sanitizer redacts unquoted attributes and escaped inline JSON tokens", () 
   assert.deepEqual(findUnsafe(clean), []);
 });
 
+test("sanitizer redacts percent-encoded tokens in nested URLs", () => {
+  // Live Google capture: the SERP carries its own URL inside attributes/JS with
+  // `%26sxsrf%3D…` separators, and the plain rules missed every one of them.
+  const secrets = ["AKL5yDh4encoded", "367e406cencoded"];
+  const dirty =
+    "<a href=\"/search?q=x%26sca_esv%3D367e406cencoded%26hl%3Dru%26sxsrf%3DAKL5yDh4encoded%26udm%3D2\">x</a>";
+
+  const clean = sanitizeFixture(dirty);
+  for (const secret of secrets) {
+    assert.equal(clean.includes(secret), false, `sanitizer left ${secret}`);
+  }
+  assert.ok(clean.includes("sxsrf%3D"), "the parameter name must survive for adapter debugging");
+  assert.ok(findUnsafe(dirty).length > 0);
+  assert.deepEqual(findUnsafe(clean), []);
+});
+
 test("gzip/gunzip round-trip", () => {
   const sample = "<html><body><h3>Example</h3></body></html>";
   const compressed = gzip(sample);

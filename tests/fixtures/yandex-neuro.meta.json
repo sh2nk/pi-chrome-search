@@ -1,0 +1,10 @@
+{
+  "engine": "yandex",
+  "urlPathShape": "https://yandex.ru/search/?text=%3Cquery%3E",
+  "queryClass": "technical-ai",
+  "capturedAt": "2026-11-05T23:33:22.386Z",
+  "ai": "yes",
+  "results": 17,
+  "capturedWith": "research/probes/06-capture-fixtures.mjs",
+  "notes": "results = marker census in the HTML (ads included); ai = text heuristic (adapter detection is authoritative)"
+}

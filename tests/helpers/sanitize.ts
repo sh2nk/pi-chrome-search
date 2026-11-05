@@ -67,6 +67,7 @@ const SECRET_PARAMS = [
   "cd",
   "cad",
   "uact",
+  "fbs",
   "token",
   "access_token",
   "refresh_token",
@@ -266,7 +267,10 @@ export function builtinRules(): SanitizeRule[] {
     },
     {
       name: "secret-param",
-      pattern: new RegExp(`([?&;](?:${SECRET_PARAMS})=)[^&#\\s"'<>]*`, "gi"),
+      // A prefixed name (`parent-reqid`, `utm_reqid`) is still the same token;
+      // the live Yandex capture kept `parent-reqid=` because the separator was
+      // a hyphen rather than `?`/`&`/`;`.
+      pattern: new RegExp(`([?&;][A-Za-z0-9_-]*(?:${SECRET_PARAMS})=)[^&#\\s"'<>]*`, "gi"),
       replace: (_match, ...groups) => `${String(groups[0] ?? "")}${REDACTED_SECRET}`,
     },
     {
@@ -276,6 +280,24 @@ export function builtinRules(): SanitizeRule[] {
         "gi",
       ),
       replace: (_match, ...groups) => `${String(groups[0] ?? "")}${REDACTED_SECRET}${String(groups[1] ?? "")}`,
+    },
+    {
+      name: "secret-param-encoded",
+      // A SERP nests a second URL inside an attribute or a JS string, so the
+      // token arrives percent-encoded (`…%26sxsrf%3DAKL5…`). The plain rules
+      // above miss it and the live Google capture shipped 37 such values.
+      pattern: new RegExp(`((?:${SECRET_PARAMS})%3D)[^%&#'"\\s<>]*`, "gi"),
+      replace: (_match, ...groups) => `${String(groups[0] ?? "")}${REDACTED_SECRET}`,
+    },
+    {
+      name: "long-token",
+      // Opaque capability payloads (protobuf `url=` in /goto, signed `fbs=`,
+      // inline data URIs) carry no value for an adapter test and cannot be
+      // judged safe, so anything this long becomes a marker. The audit's R7
+      // treats a 200+ char base64-like run as a leak; this keeps the two
+      // contracts aligned by construction.
+      pattern: /[A-Za-z0-9+/=_-]{200,}/g,
+      replace: REDACTED_SECRET,
     },
     {
       name: "secret-assignment",
@@ -299,6 +321,14 @@ export function builtinRules(): SanitizeRule[] {
       pattern: IPV4,
       replace: REDACTED_IP,
       allow: isIpPlaceholder,
+    },
+    {
+      name: "ipv4-glued",
+      // Redaction can leave an IP-shaped tail next to the marker
+      // (`[redacted-ip].701.431.3`); the audit's own regex would still report
+      // it, so collapse the whole run into the marker once.
+      pattern: /\[redacted-ip\](?:\.\d{1,3})+/g,
+      replace: REDACTED_IP,
     },
   ];
 }
