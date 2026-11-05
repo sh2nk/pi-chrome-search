@@ -609,6 +609,9 @@ These are the interfaces actually committed in P0; later phases must not change 
   `EngineRegistry.has(id)`, `EngineRegistry.select(requested): EngineId[]` (D10: `auto` → canonical
   order, explicit lists keep caller order, disabled/unknown ids are dropped).
 - `Engine.extract(page, q)` — the query is required (page/freshness/summary affect extraction).
+- `EngineInteraction` (additive, 2026-11-06): optional `interaction` on `Engine` with `homeUrl`,
+  `boxSelectors`, `marker`, optional `selector`/`minCount`. P3 adapters fill it; `web_search` types the
+  first search of a session when present and navigates the SERP directly otherwise.
 - `SerpItem.engine?: EngineId` is set by the merge layer only when results are mixed; `RawSerp.timings`
   is a required object (may be `{}`).
 - `CdpConnector` (in `src/cdp/types.ts`): `connect()`, `acquirePage(engine)`, `releaseAll()`,

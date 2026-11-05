@@ -74,10 +74,24 @@ export interface Wall {
   markers: string[];
 }
 
+export interface EngineInteraction {
+  /** Engine home page for the typed first search of a session. */
+  homeUrl: string;
+  /** Search-box candidates, tried in order. */
+  boxSelectors: readonly string[];
+  /** Text marker that means "SERP is ready" (prefer a stable text marker). */
+  marker: string;
+  /** Optional structural marker; pairs with minCount to avoid a stale home-page match. */
+  selector?: string;
+  minCount?: number;
+}
+
 export interface Engine {
   readonly id: EngineId;
   /** Yandex only: the tool layer may retry once after a wall. Adapters never retry themselves. */
   readonly retryOnWall?: boolean;
+  /** Optional human-search metadata; absent means the tool navigates the SERP directly. */
+  readonly interaction?: EngineInteraction;
   /** Pure: same Query → same URL. No network, no clock, no config lookups. */
   buildUrl(q: Query): string;
   /** Marker-based settle with a deadline; resolves when the page is ready to extract. */
