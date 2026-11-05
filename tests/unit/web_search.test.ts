@@ -183,6 +183,8 @@ interface HarnessOptions {
   limiter?: Limiter;
   artifacts?: Artifacts;
   cache?: Cache;
+  /** Transport for the /goto resolver; offline tests must always stub it. */
+  fetchImpl?: typeof fetch;
 }
 
 interface Harness {
@@ -258,6 +260,11 @@ function makeHarness(options: HarnessOptions): Harness {
   };
 
   const engineMap = Object.fromEntries(options.engines.map((engine) => [engine.id, engine]));
+  const fetchImpl =
+    options.fetchImpl ??
+    (async (): Promise<Response> => {
+      throw new Error("offline test: /goto resolution must be stubbed through fetchImpl");
+    });
   const deps: ToolDeps = {
     config,
     engines: createEngineRegistry(engineMap, config),
@@ -267,6 +274,7 @@ function makeHarness(options: HarnessOptions): Harness {
     artifacts,
     log,
     clock,
+    fetchImpl,
   };
 
   return { config, clock, page, deps, cache, limiterCalls, saved, pageRequests };
@@ -1261,3 +1269,62 @@ test("a cache hit skips the progress callback because nothing is searched", asyn
   assert.deepEqual(updates, []);
 });
 
+
+// ---------------------------------------------------------------------------
+// Google /goto resolution (SPEC §6.1, extract/goto.ts)
+// ---------------------------------------------------------------------------
+
+const GOTO_ITEM: SerpItem = {
+  title: "Wrapper result",
+  url: "https://www.google.com/goto?url=AbC123opaque",
+  snippet: "A result whose href is a /goto wrapper.",
+};
+
+test("/goto wrappers are resolved through the injected fetch and cached across runs", async () => {
+  const engine = new StubEngine({ id: "google", results: [GOTO_ITEM] });
+  const fetched: string[] = [];
+  const harness = makeHarness({
+    engines: [engine],
+    fetchImpl: async (input: RequestInfo | URL): Promise<Response> => {
+      fetched.push(String(input));
+      return new Response(null, { status: 302, headers: { location: "https://example.test/real-target" } });
+    },
+  });
+
+  const first = expectSuccess(await run(harness, { q: "wrapper query", n: 5 }));
+  assert.equal(fetched.length, 1, "one wrapper must cost exactly one GET");
+  assert.match(first.content.map((block) => block.text).join(""), /example\.test\/real-target/);
+
+  // The resolved SERP is cached, so a repeated query never repeats the redirect.
+  const second = expectSuccess(await run(harness, { q: "wrapper query", n: 5 }));
+  assert.equal(fetched.length, 1, "a cache hit must not refetch the wrapper");
+  assert.match(second.content.map((block) => block.text).join(""), /example\.test\/real-target/);
+});
+
+test("an unresolvable /goto wrapper is kept instead of failing the search", async () => {
+  const engine = new StubEngine({ id: "google", results: [GOTO_ITEM] });
+  const harness = makeHarness({
+    engines: [engine],
+    // A 200 with no Location is the observed live case: one navigation fallback
+    // lands on the wrapper itself (a Google URL), which must not become a result.
+    fetchImpl: async (): Promise<Response> => new Response(null, { status: 200 }),
+  });
+
+  const result = expectSuccess(await run(harness, { q: "wrapper query", n: 5 }));
+  const text = result.content.map((block) => block.text).join("");
+  assert.match(text, /google\.com\/goto/);
+  assert.equal(harness.page.navigations().length, 2, "SERP navigation plus one fallback navigation");
+});
+
+test("a failing /goto fetch keeps the wrapper and never becomes a search failure", async () => {
+  const engine = new StubEngine({ id: "google", results: [GOTO_ITEM] });
+  const harness = makeHarness({
+    engines: [engine],
+    fetchImpl: async (): Promise<Response> => {
+      throw new Error("network down");
+    },
+  });
+
+  const result = expectSuccess(await run(harness, { q: "wrapper query", n: 5 }));
+  assert.match(result.content.map((block) => block.text).join(""), /google\.com\/goto/);
+});

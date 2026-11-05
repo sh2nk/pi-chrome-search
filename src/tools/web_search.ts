@@ -32,6 +32,8 @@ import { humanSearch } from "../cdp/humanize.ts";
 import type { CdpPage } from "../cdp/types.ts";
 import type { Config } from "../config.ts";
 import { compactSerps } from "../extract/compact.ts";
+import { createGotoResolver } from "../extract/goto.ts";
+import { parseLink } from "../extract/urls.ts";
 import {
   ENGINE_IDS,
   type Engine,
@@ -600,6 +602,66 @@ async function navigateAndSettle(
   }
 }
 
+/**
+ * Google wraps organic links as `/goto?url=<opaque protobuf>` (SPEC §6.1).
+ * Adapters are pure DOM extractors, so they hand back the wrapper; resolving it
+ * is a browser-cookie HTTP GET with a single-navigation fallback
+ * (`extract/goto.ts`), cached 24 h.
+ *
+ * Failure policy: an unresolvable wrapper stays in the result. A link the user
+ * cannot click is worse than one with an ugly URL, and a single stuck redirect
+ * must not fail a SERP that was extracted successfully. Abort still wins: a
+ * cancelled search must not be reported as a success.
+ */
+async function resolveGotoResults(
+  page: CdpPage,
+  serp: RawSerp,
+  deps: ToolDeps,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  const base = page.url();
+  if (!serp.results.some((item) => parseLink(item.url, base)?.kind === "goto")) return;
+
+  const resolver = createGotoResolver({
+    cache: deps.cache,
+    clock: deps.clock,
+    ...(deps.fetchImpl === undefined ? {} : { fetchImpl: deps.fetchImpl }),
+    cookieSource: (urls) => page.cookiesFor([...urls]),
+    navigateFallback: async (wrapperUrl) => {
+      await page.navigate(wrapperUrl, signal === undefined ? {} : { signal });
+      return page.url();
+    },
+  });
+
+  let resolved = 0;
+  for (const item of serp.results) {
+    const link = parseLink(item.url, base);
+    if (link === null || link.kind !== "goto" || link.wrapperUrl === null) continue;
+    try {
+      const resolution = await resolver.resolve(link.wrapperUrl, signal);
+      if (resolution.url !== null) {
+        item.url = resolution.url;
+        resolved += 1;
+      }
+    } catch {
+      // Keep the wrapper; see the policy above.
+    }
+  }
+
+  if (signal?.aborted === true) {
+    throw fail("E_CANCELLED", "extract", {
+      engine: serp.engine,
+      message: "the search was aborted while resolving result links",
+    });
+  }
+  void deps.log.write({
+    kind: "goto",
+    engine: serp.engine,
+    links: serp.results.length,
+    resolved,
+  });
+}
+
 type UpdateFn = (update: { content: ToolTextBlock[]; details: Record<string, unknown> }) => void | Promise<void>;
 
 function asUpdater(value: unknown): UpdateFn | undefined {
@@ -764,6 +826,10 @@ async function runEngine(
       ...(failure.details.message === undefined ? {} : { message: failure.details.message }),
     });
   }
+
+  // Google organics arrive as /goto wrappers; resolve them before caching so
+  // the stored SERP already holds clickable targets (cache hits skip this).
+  await resolveGotoResults(page, serp, deps, signal);
 
   // A SERP with zero organic results is a failed search, not an empty success:
   // it must trigger the next engine and must never be cached as the answer.

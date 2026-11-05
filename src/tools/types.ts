@@ -20,6 +20,12 @@ export interface ToolDeps {
   clock: Clock;
   /** Absent or disabled means rules-only behaviour; tools must work without it. */
   reflex?: Reflex;
+  /**
+   * Injectable transport for the /goto resolver (SPEC §6.1). Production leaves
+   * it unset and the resolver uses the platform fetch; tests must set it so an
+   * offline run can never reach Google.
+   */
+  fetchImpl?: typeof fetch;
 }
 
 export interface ToolFailureDetails {
