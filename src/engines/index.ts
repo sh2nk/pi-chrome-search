@@ -20,6 +20,7 @@
 
 import type { Config } from "../config.ts";
 import { duckduckgoEngine } from "./duckduckgo.ts";
+import { yandexEngine } from "./yandex.ts";
 import { WebSearchError } from "../runtime/error-codes.ts";
 import {
   ENGINE_IDS,
@@ -49,6 +50,7 @@ export type EngineMap = Partial<Record<EngineId, Engine>>;
  */
 export const DEFAULT_ENGINES: EngineMap = Object.freeze({
   duckduckgo: duckduckgoEngine,
+  yandex: yandexEngine,
 });
 
 /**
