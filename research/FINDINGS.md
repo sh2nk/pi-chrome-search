@@ -1,5 +1,10 @@
 # FINDINGS — live probes, 2026-11-05
 
+**Plan of record:** `../PLAN.md`. These findings are inputs to P3 (adapters) and P4 (read/images): the
+selectors and sizes below are the contract that the offline fixtures encode, and every live gate
+re-verifies them once. If a gate sees drift, patch the adapter **and** update this file — the phase is not
+accepted until `evidence/P<N>.md` and this document agree. Probe scripts stay one-shot: no loops.
+
 Everything below was measured on the user's machine, not inferred from docs. Numbers are from a small
 number of runs on one IP; treat them as orders of magnitude, not constants. Re-measure in `bench/`.
 
@@ -231,6 +236,8 @@ same `usage` field.
 
 ## 10. Caveats
 
+- Findings are snapshots, not guarantees: P3/P4/P7 gates re-check them on the live browser, and
+  `PLAN.md` V3.1/V3.2 turn them into offline fixtures with canaries.
 - One IP, one day, few runs. Google/Yandex behaviour is A/B and reputation-dependent.
 - The AI Overview/Neuro/Search Assist presence is query- and experiment-dependent; `ai:no` is normal.
 - Selectors are obfuscated and will drift; the text markers are more stable than class names.

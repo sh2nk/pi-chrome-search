@@ -1,8 +1,10 @@
 # SPEC — `pi-chrome-search`
 
-**Status:** draft v0.1 · 2026-11-05
+**Status:** draft v0.2 · 2026-11-05
 **Owner:** sh2nk
 **Implementer:** the next coding agent (read `AGENTS.md` first)
+**Execution plan:** `PLAN.md` — phases P0–P7, lane ownership, parallel waves and validation gates. This
+SPEC defines *what*; `PLAN.md` defines *in what order and proven how*. On conflict, this SPEC wins.
 **Working title / npm name:** `pi-chrome-search` (name checked free on npm)
 
 ---
@@ -82,6 +84,7 @@ These are observations, not assumptions: the code must work on other profiles/IP
 pi process
 └── extension (src/index.ts)
     ├── config.ts             ~/.pi/agent/web-search.json (or $PI_CODING_AGENT_DIR)
+    ├── cli/doctor.ts         headless doctor (--json), used by gates and CI
     ├── tools/
     │   ├── web_search.ts     direct
     │   ├── web_read.ts       deferred
@@ -118,6 +121,10 @@ pi process
 **Hard rule:** the extension never imports `playwright` in production. Use raw CDP over `ws`
 (`chrome-remote-interface`-style, but hand-rolled or via `ws`) to keep the injected surface minimal.
 `playwright-core` may be used **only** in `research/` and `bench/` for comparison.
+
+Supporting repo surface (not runtime): `scripts/audit.mjs` enforces the hard rules and token budgets and
+is run at every wave; `evidence/P0.md…P7.md` record the gate commands and their re-run output. Both are
+specified in `PLAN.md`.
 
 ---
 
@@ -201,6 +208,8 @@ Each adapter implements:
 ```ts
 interface Engine {
   id: "google" | "duckduckgo" | "yandex";
+  /** Yandex only: the tool layer may retry once after a wall (~3 s). Adapters never retry themselves. */
+  retryOnWall?: boolean;
   buildUrl(q: Query): string;
   /** Wait until this engine's page is ready (marker-based, with deadline). */
   settle(page: CdpPage, signal?: AbortSignal): Promise<void>;
@@ -648,23 +657,44 @@ names the provider/model and budgets. `reflex.localOnly: true` forbids remote ca
 - **Bench** (`bench/run.ts`): golden queries, recall@5, output tokens, latency; compare
   `reflex.enabled=false` vs `true`.
 - **Tool budget test:** sum of tool descriptions + schemas ≤ 900 chars.
+- **Hard-rules audit:** `npm run audit` (no `playwright`/launch/headless in `src/`, no fingerprint
+  overrides, no captcha solvers, no secrets, sanitized fixtures) runs at every wave and in P7.
+- **Gate evidence:** a phase is done only when the orchestrator re-runs the commands from `PLAN.md §3`
+  and commits the output to `evidence/P<N>.md`. Tests that pass locally but are not recorded did not pass.
 
 ---
 
 ## 14. Milestones
 
-| M | Deliverable | Acceptance |
-|---|---|---|
-| **M0** | Scaffold (`package.json`, tsconfig, `src/index.ts`), config loader, CDP discovery, `web_doctor` skeleton, lock | `pi -e ./src/index.ts` loads; `/web-doctor` reports CDP state on the user's Chrome; no `launch()` |
-| **M1** | `web_search` + Google adapter (organics, AI Overview, `/goto`), compact formatter, cache, pacing | Google query with AI Overview returns `ai:yes` + ≥5 results ≤2500 chars; without → `ai:no` + results; artifact on parse failure |
-| **M2** | Yandex adapter (Neuro, captcha flow) + DDG adapter (Search Assist) | All three engines pass live smoke; captcha returns `E_WALL` with a working hint; Yandex retry-once works |
-| **M3** | `web_read` (readability → Markdown, caps, SSRF guard) | Any docs page returns clean Markdown ≤6000 chars; offset works; private URL blocked |
-| **M4** | `image_search` (Google/Yandex), artifacts/screenshot, doctor probes for all engines | Image query returns ≥4 items; `--json` doctor is schema-valid; selectors canaried |
-| **M5** | System 1 reflex layer behind flag: local llama.cpp + OpenRouter classifiers, cost guard, decision log, bench | Both backends pass the bench (recall within 2 points, tokens/reads down); disabled by default |
-| **M6** | `web_research` loop (optional) + codemode bench | Budgets respected; citations resolve; bench compares direct vs codemode vs `web_research` and records the winner |
-| **M7** | Packaging, README, publish dry-run | `npm pack` contents correct; `pi install npm:pi-chrome-search` works from tarball; docs complete |
+Execution order, lane-level parallelism (up to 4 worker subagents under one orchestrator) and the exact
+validation gates live in `PLAN.md`. The table below is the milestone contract; the `Phase` column shows
+where each milestone is built. A milestone is accepted only when its phase gates are green in `evidence/`.
 
-Effort estimate: M0–M3 ≈ 4–6 focused days; M4–M7 ≈ 1–2 weeks. Selector maintenance is ongoing.
+| M | Phase | Deliverable | Acceptance |
+|---|---|---|---|
+| — | **P0** | Contracts, scaffold, `scripts/audit.mjs`, test harness (pre-M0) | Frozen interfaces compile; `pi -e` loads; audit clean |
+| **M0** | **P1** | CDP discovery/attach, owned window/tab, lock, `web_doctor` | `pi -e ./src/index.ts` loads; `/web-doctor` reports CDP state on the user's Chrome; `navigator.webdriver === false`; no `launch()` |
+| — | **P2** | Search plumbing: compact/caps, cache, limiter, humanize, `web_search` shell | Caps/cache/limiter/budget tests green; stub engine renders a compliant result |
+| **M1** | **P3** | `web_search` + Google adapter (organics, AI Overview, `/goto`), compact formatter, cache, pacing | Google query with AI Overview returns `ai:yes` + ≥5 results ≤2500 chars; without → `ai:no` + results; artifact on parse failure |
+| **M2** | **P3** | Yandex adapter (Neuro, captcha flow) + DDG adapter (Search Assist) | All three engines pass live smoke; captcha returns `E_WALL` with a working hint; Yandex retry-once works |
+| **M3** | **P4** | `web_read` (readability → Markdown, caps, SSRF guard) | Any docs page returns clean Markdown ≤6000 chars; offset works; private URL blocked |
+| **M4** | **P4** | `image_search` (Google/Yandex), artifacts/screenshot, doctor probes for all engines | Image query returns ≥4 items; `--json` doctor is schema-valid; selectors canaried |
+| **M5** | **P5** | System 1 reflex layer behind flag: local llama.cpp + OpenRouter classifiers, cost guard, decision log, bench | Both backends pass the bench (recall within 2 points, tokens/reads down); disabled by default |
+| **M6** | **P6** | `web_research` loop (optional) + codemode bench | Budgets respected; citations resolve; bench compares direct vs codemode vs `web_research` and records the winner |
+| **M7** | **P7** | Packaging, README, publish dry-run, final hard-rules audit | `npm pack` contents correct; installs from tarball; docs complete; audit has no unexplained waivers |
+
+Execution rules that are not negotiable (details in `PLAN.md` §1):
+
+- One phase agent per phase; parallel worker subagents only with disjoint file ownership; workers never
+  commit and never verify their own gate.
+- Live Chrome work is orchestrator-only, serialized, one probe per engine per gate; a wall stops the run
+  and asks the user. No retry loops.
+- Every wave ends with `npm run typecheck && npm test && npm run audit`; every phase ends with
+  `evidence/P<N>.md`.
+
+Effort estimate: P0–P2 ≈ 2–3 days; P3 ≈ 2–3 days; P4 ≈ 1–2 days; P5–P6 ≈ 3–5 days; P7 ≈ 1 day.
+Selector maintenance is ongoing. Parallel wall-clock is bounded by the serial live gates and by P0's
+contract quality.
 
 ---
 

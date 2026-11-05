@@ -41,6 +41,19 @@ risk: repeated runs get the profile captcha'd or `/sorry`'d.
 | `04-goto-resolve.mjs` | Google `/goto?url=…` resolves to a real URL via `302 Location` with browser cookies |
 | `05-http-fallback.mjs` | keyless HTTP tricks (Yandex `search/site` works; Google WML is header/TLS-sensitive) |
 
+## Where these probes sit in `PLAN.md`
+
+| Probe | Feeds | Notes |
+|---|---|---|
+| `01`, `02` | P1 (attach/doctor) and P3 (adapter contract) | run live **once** at the P1/P3 gate, never in parallel with other live work |
+| `03`, `04` | P3 fixtures: `google-{ai,no-ai,wall,empty}`, `ddg-*`, `yandex-*`, `goto-{302,200}` | sanitize before committing (no cookies, tokens, `sxsrf`/`reqid`, emails, exact IP, personal queries) — P3 fixture rule |
+| `04` resolution trick | P2-A `extract/urls.ts` + P3-Google | the HTTP 302 → `Location` path is production behaviour, cached 24 h |
+| `05` | P3 fallback lane (degraded only) | never the main path; results marked `degraded: true`, `ai:false` |
+
+Probe output is evidence, not code: paste the numbers into `../FINDINGS.md` and the phase gate into
+`evidence/P<N>.md`. If a probe contradicts a plan assumption, the orchestrator updates the plan before the
+lane starts — not after it fails.
+
 ## Historical (do not reuse)
 
 The first probe round used `playwright.launchPersistentContext()`. It worked for ~6 queries, then Google
