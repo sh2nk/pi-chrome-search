@@ -498,9 +498,9 @@ hard rules were broken along the way.
 | Phase | Status | Gate evidence | Blocker / note |
 |---|---|---|---|
 | P0 contracts | `[x]` | `evidence/P0.md` | contracts, scaffold, harness, audit green |
-| P1 attach/doctor | `[ ]` | `evidence/P1.md` | needs B0 (CDP enable) |
-| P2 plumbing | `[ ]` | `evidence/P2.md` | — |
-| P3 engines | `[ ]` | `evidence/P3.md`, `evidence/P3-live.md` | live serial |
+| P1 attach/doctor | `[~]` | `evidence/P1.md` | discovery/session/errors/log/browser green; doctor + live V1.3 in flight |
+| P2 plumbing | `[~]` | `evidence/P2.md` | compact/cache/limiter/humanize/web_search green; registry+budget in flight |
+| P3 engines | `[ ]` | `evidence/P3.md`, `evidence/P3-live.md` | live serial; artifacts pulled forward from P4-C (V3.6) |
 | P4 read/images/doctor | `[ ]` | `evidence/P4.md` | live serial |
 | P5 reflex | `[ ]` | `evidence/P5.md`, `bench/RESULTS.md` | bench gate decides |
 | P6 research | `[ ]` | `evidence/P6.md` | — |
@@ -508,6 +508,20 @@ hard rules were broken along the way.
 
 Status values: `[ ]` not started · `[~]` in progress · `[x]` gates pass · `[!]` blocked (reason
 required) · `[-]` waived (orchestrator + user approve, reason required).
+
+### 5.1 Execution deltas (orchestrator, 2026-11-06)
+
+- **Artifacts moved into P3.** V3.6 requires `page.html`/`page.txt`/`screenshot.jpg`/`meta.json` on
+  `E_PARSE`/`E_WALL` during the P3 live gate, but `src/runtime/artifacts.ts` was assigned to P4-C. A
+  dedicated P3-Artifacts lane lands before the P3 live gate; P4-C keeps retention/doctor integration.
+- **DDG pagination deferred.** SPEC §6.3 mentions `&s=<offset>` but the frozen `Query.page` is
+  google/yandex-only and P3-DDG's brief has `kl` only. M2 serves DDG `page>1` as page 1 and reports
+  `pageIgnored:true`; revisit after the live fixture capture.
+- **Lane commits.** Each lane is committed green with its gate command (`p0:`, `m0:`, `m0.5:`); evidence
+  files aggregate the phase. This is a per-lane refinement of the per-wave commit rule.
+- **Commands/paths.** `web-search.lock` and `web-search/state.json` live under
+  `$PI_CODING_AGENT_DIR` (default `~/.pi/agent`); `doctor.jsonl`/`decisions.jsonl` are JSONL with one
+  rotation generation.
 
 ---
 
