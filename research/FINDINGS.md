@@ -172,7 +172,62 @@ Raw-vs-compact character counts are in §2–§4. Token estimate for Russian: ~2
 
 ---
 
-## 8. Caveats
+## 8. Classifier backends (OpenRouter / local)
+
+Pi ships classifier models as a separate model type. The ones visible through `openrouter` (from
+`pi/packages/ai/dist/providers/data/openrouter.json`; prices = USD per 1M input tokens, no output):
+
+| Model ID under `openrouter` | $/1M in | Ctx | Input |
+|---|---|---|---|
+| `~typesafe/jev-latest` | 0.042 | 262k | text+image |
+| `typesafe/jev-1.14` | 0.042 | 262k | text+image |
+| `cloudflare/clef-flash` | 0.038 | 24k | text+image |
+| `~perplexity/pplx-decider-flash-latest` | 0.010 | 262k | text+image |
+| `respan/span-01-lite:free` | 0 | 4k | text |
+| `openai/gpt-6-luna-decisions` | 0.10 | 1.05M | text+image |
+
+Local llama.cpp decision models (`/v1/systemone`) are free and appear as classifiers when the router
+reports `architecture.output_modalities` containing `decisions`:
+
+```bash
+curl -s http://127.0.0.1:8080/models | \
+  jq '.data[] | select(.architecture.output_modalities[]? == "decisions") | .id'
+```
+
+Cost of triage, realistically: 20 candidates × ~350 input tokens = 7k tokens.
+Jev ≈ $0.0003 per search; PPLX Decider Flash ≈ $0.00007; Respan/local = $0. 1 000 searches with Jev
+≈ $0.30. This is why "use OpenRouter for System 1" is compatible with the "free search" requirement —
+it is not free, but it is noise, and it is optional (`reflex.localOnly: true`).
+
+Caveats: remote classifiers add 100–600 ms per call; one call per candidate means 20 calls per triage.
+Run with concurrency 4, set a deadline, and skip triage for plain `n=5` single-engine searches. If the
+bench shows the latency is too high, either batch 10–20 candidates into one cheap chat call
+(`ctx.modelRegistry.complete()` with strict JSON) or stay on rules.
+
+## 9. How pi itself uses classifiers (why they look "off by default")
+
+Nothing in pi's normal chat loop calls a classifier. The capability is built in, but only two surfaces
+reach it:
+
+1. **`codemode`** — scripts call `models.classify(model, { state, questions })`. Codemode is off by
+   default (`defaultTools` does not include it); enable with `"defaultTools": ["+codemode"]` or
+   `--tools +codemode`. This is the intended home for "filter/rank/judge inside a script" (exactly our
+   triage use case).
+2. **Virtual models** — an extension registers `pi.registerVirtualModel({ route })`, and `route()` may
+   call `ctx.modelRegistry.classify()` to pick the physical chat model per request. The shipped example
+   is `examples/extensions/jev-router.ts`: Jev rates the first user message, planning goes to a strong
+   model, implementation switches to a cheap one after the first successful edit. It only works if the
+   extension is loaded and the virtual model is selected (`/model jev/auto`).
+
+llama.cpp decision models are listed as classifiers and can be used by either surface. Image-capable
+classifiers (Jev, Clef, Luna) can also judge screenshots — relevant for "is this page a captcha / a
+layout change / the right answer".
+
+Classifier usage is reported with token counts and cost; `classify()` returns `usage`, and codemode adds
+it to the tool result/session cost. Direct extension calls through `ctx.modelRegistry.classify()` get the
+same `usage` field.
+
+## 10. Caveats
 
 - One IP, one day, few runs. Google/Yandex behaviour is A/B and reputation-dependent.
 - The AI Overview/Neuro/Search Assist presence is query- and experiment-dependent; `ai:no` is normal.

@@ -27,8 +27,11 @@ The window being visible is **desired**, not a bug.
    in `attach` mode. Raw CDP only in production code.
 2. **Never restart, kill, or close the user's Chrome.** Never close tabs the extension did not open.
    Never touch `~/.config/google-chrome/**` (no cookie copying, no deleting, no editing `Local State`).
-3. **No paid APIs and no API keys.** No SerpApi/Serper/Brave/Tavily/Exa/Perplexity. Keyless HTTP tricks
-   only as a degraded fallback, clearly marked `degraded: true`.
+3. **No paid search APIs and no search keys.** No SerpApi/Serper/Brave/Tavily/Exa/Kagi. Keyless HTTP
+   tricks only as a degraded fallback, clearly marked `degraded: true`.
+   **Exception (D8):** System 1 classifiers may use the user's existing OpenRouter balance (very cheap)
+   or local llama.cpp. Search traffic never goes through OpenRouter; classifier calls are capped, logged
+   and can be disabled with `reflex.localOnly: true`.
 4. **No headless.** The whole point is a real headed browser on a real profile.
 5. **No fingerprint spoofing.** Do not override UA, locale, timezone, screen, WebGL, `navigator.*`.
    No `Page.addScriptToEvaluateOnNewDocument`. One-off `Runtime.evaluate` for extraction is fine.
@@ -50,6 +53,8 @@ The window being visible is **desired**, not a bug.
 - Profile: `~/.config/google-chrome` (currently running), logged into Google, 423 `.yandex.ru` cookies.
 - IP: RU residential (Kaluga, Rostelecom) — good for Yandex/Google; exact address intentionally omitted.
 - Node `26.13.0` (native TS type-stripping: `node --test tests/*.test.ts` works), pi `1.5.0`.
+- OpenRouter is authenticated in pi (`~/.pi/agent/auth.json`, provider `openrouter`) — classifiers only.
+- Local llama.cpp is configured as provider `ik-llama` (`http://127.0.0.1:8080/v1`), may be down.
 - CDP is **not enabled yet**: no `DevToolsActivePort`, `127.0.0.1:9222` closed.
 
 ### Enable CDP (one-time, user action)
@@ -166,10 +171,17 @@ To inspect one: `npm pack <name> && tar xzf <name>-*.tgz` (do not add them as de
 ## 10. System 1 (only after M4)
 
 The user asked whether a fast decision model can make search/navigation more effective. Yes — but it is
-**M5, behind `reflex.enabled: false`**, and only after `bench/` proves a win. Pi classifiers are called
-via `ctx.modelRegistry.classify()`; local llama.cpp decision models (`/v1/systemone`) are free and
-preferred (no API keys). The decision points, fallbacks, abstain thresholds and benchmark gate are in
-SPEC §9. Do not put a classifier on the critical path before that.
+**M5, behind `reflex.enabled: false`**, and only after `bench/` proves a win.
+
+Backends, in order: local llama.cpp decision model (`/v1/systemone`, free) → OpenRouter classifier
+(user's balance; e.g. `openrouter` + `~typesafe/jev-latest`, $0.042/1M input tokens) → `rules.ts`.
+Use `ctx.modelRegistry.getAvailableOfType("classifier", "openrouter")`; never read `auth.json` or
+`OPENROUTER_API_KEY` yourself. Check `stopReason` — `classify()` does not throw on provider errors.
+Respect `maxCallsPerSearch`, `maxCallsPerSession`, `maxUsdPerSession`; log `usage`/`costUsd` to
+`decisions.jsonl`. Set `reflex.localOnly: true` to forbid remote calls entirely.
+
+The decision points (triage, read gate, coverage, routing), fallbacks, abstain thresholds, batching
+experiment and benchmark gate are in SPEC §9. Do not put a classifier on the critical path before that.
 
 ---
 
