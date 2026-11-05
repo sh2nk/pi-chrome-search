@@ -176,12 +176,28 @@ The user asked whether a fast decision model can make search/navigation more eff
 Backends, in order: local llama.cpp decision model (`/v1/systemone`, free) → OpenRouter classifier
 (user's balance; e.g. `openrouter` + `~typesafe/jev-latest`, $0.042/1M input tokens) → `rules.ts`.
 Use `ctx.modelRegistry.getAvailableOfType("classifier", "openrouter")`; never read `auth.json` or
-`OPENROUTER_API_KEY` yourself. Check `stopReason` — `classify()` does not throw on provider errors.
+`OPENROUTER_API_KEY` yourself. There is **no custom key handling**: the user is already logged into
+OpenRouter in pi, and `classify()` uses that session credential. Classifier models do not appear in
+`/model` — that is expected. Check `stopReason` — `classify()` does not throw on provider errors.
 Respect `maxCallsPerSearch`, `maxCallsPerSession`, `maxUsdPerSession`; log `usage`/`costUsd` to
 `decisions.jsonl`. Set `reflex.localOnly: true` to forbid remote calls entirely.
 
 The decision points (triage, read gate, coverage, routing), fallbacks, abstain thresholds, batching
 experiment and benchmark gate are in SPEC §9. Do not put a classifier on the critical path before that.
+
+### Codemode: optional, per research session
+
+`codemode` is **not required** for this extension (our code calls `ctx.modelRegistry.classify()` directly).
+It only lets the main agent write scripts that call `tools.web_search` / `tools.web_read` in parallel and
+filter before the model sees the output. Do not enable it in global settings; use it per project:
+
+```json
+{ "defaultTools": ["+codemode"], "codemode": { "mode": "on", "inlineBudget": 1200 } }
+```
+
+`mode: "on"` keeps normal tools declared; `"only"` hides them and forces everything through scripts (avoid).
+Nested calls go through `tool_call` / `tool_result`, so guardrails still apply. Bench direct vs codemode vs
+`web_research` before recommending it to the user (M6).
 
 ---
 

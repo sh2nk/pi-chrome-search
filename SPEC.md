@@ -339,6 +339,27 @@ answer. Budget: quick = 1 search + 2 reads; normal = 2 searches + 4 reads; deep 
   `codemode`). This keeps the prompt at ~1 tool instead of 4.
 - Total description budget for all tools ≤ 900 chars (≈230 tokens). Measure it in a test.
 
+### 7.6 Codemode compatibility
+
+The extension must work with `codemode` **off** and be better with it **on**:
+
+- `web_search` is `direct`; `web_read` / `image_search` / `web_research` are `deferred` — callable from
+  scripts via `tools.web_read(...)`, findable with `searchTools()` / `describeTool()`, and absent from
+  the prompt until needed.
+- Nested calls (`ctx.executeTool`, and therefore `codemode` scripts) go through argument validation and
+  the `tool_call` / `tool_result` handlers — permission/approval extensions still see them. This is not a
+  sandbox escape hatch.
+- `codemode` is the ad-hoc power path: `Promise.allSettled` over 2–3 engines, filter/sort in JS, return
+  only the compact bundle. `web_research` is the reliable one-call path for the same job; prefer it, and
+  let the bench decide which wins.
+- When enabled, use `codemode.mode: "on"` (declared tools stay declared, only undeclared tools are listed)
+  and a small `codemode.inlineBudget` (e.g. 1200). `mode: "only"` hides every direct tool and forces all
+  work through scripts — not recommended for a coding agent.
+
+**Recommendation:** do not enable `codemode` globally by default. Enable it per research project/session
+(`.pi/settings.json` or `pi --tools +codemode`) and measure the three paths in `bench/`:
+direct `web_search` calls vs a `codemode` script vs `web_research`. Keep the winner.
+
 ---
 
 ## 8. Token efficiency
@@ -406,7 +427,9 @@ with PPLX Decider Flash, **$0** with Respan/local. Even 1 000 multi-engine searc
 `reflex.maxUsdPerSession` as a safety net, not as the primary control.
 
 Do **not** read `auth.json` or `OPENROUTER_API_KEY` directly: use the pi model registry, which resolves
-credentials and reports usage into the session.
+credentials and reports usage into the session. There is no custom key handling to build: the user is
+already logged into `openrouter` in pi (`auth.json`, provider `openrouter`), and `ctx.modelRegistry.classify()`
+uses that session credential. Classifier models do not appear in `/model` — that is normal, not a bug.
 
 ### 9.2 Where it is worth it (ranked)
 
@@ -574,6 +597,23 @@ Strict JSON; unknown keys are an error (`E_CONFIG`). Env overrides in brackets.
 Env: `PI_CHROME_CDP_WS`, `PI_CHROME_CDP_PORTS`, `PI_CHROME_SEARCH_DEBUG=1`,
 `PI_CHROME_SEARCH_PROFILE` (launch mode only).
 
+### 11.1 Recommended pi settings (optional, per research project)
+
+```json
+{
+  "defaultTools": ["+codemode"],
+  "codemode": { "mode": "on", "inlineBudget": 1200 }
+}
+```
+Only for sessions that do multi-step research; keep it out of the global settings. `mode: "on"` keeps
+normal tools declared. The extension must not require this.
+
+### 11.2 Classifiers
+
+No extra config for OpenRouter: `pi` resolves the existing `openrouter` login. The reflex config only
+names the provider/model and budgets. `reflex.localOnly: true` forbids remote calls; with `backend:
+"auto"` and no local decision model, it silently falls back to `rules.ts`.
+
 ---
 
 ## 12. Privacy, security, ToS
@@ -621,7 +661,7 @@ Env: `PI_CHROME_CDP_WS`, `PI_CHROME_CDP_PORTS`, `PI_CHROME_SEARCH_DEBUG=1`,
 | **M3** | `web_read` (readability → Markdown, caps, SSRF guard) | Any docs page returns clean Markdown ≤6000 chars; offset works; private URL blocked |
 | **M4** | `image_search` (Google/Yandex), artifacts/screenshot, doctor probes for all engines | Image query returns ≥4 items; `--json` doctor is schema-valid; selectors canaried |
 | **M5** | System 1 reflex layer behind flag: local llama.cpp + OpenRouter classifiers, cost guard, decision log, bench | Both backends pass the bench (recall within 2 points, tokens/reads down); disabled by default |
-| **M6** | `web_research` loop (optional) | Quick/normal/deep budgets respected; citations resolve; one tool call returns an evidence bundle |
+| **M6** | `web_research` loop (optional) + codemode bench | Budgets respected; citations resolve; bench compares direct vs codemode vs `web_research` and records the winner |
 | **M7** | Packaging, README, publish dry-run | `npm pack` contents correct; `pi install npm:pi-chrome-search` works from tarball; docs complete |
 
 Effort estimate: M0–M3 ≈ 4–6 focused days; M4–M7 ≈ 1–2 weeks. Selector maintenance is ongoing.

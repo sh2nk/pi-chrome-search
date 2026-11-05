@@ -212,7 +212,9 @@ reach it:
 1. **`codemode`** — scripts call `models.classify(model, { state, questions })`. Codemode is off by
    default (`defaultTools` does not include it); enable with `"defaultTools": ["+codemode"]` or
    `--tools +codemode`. This is the intended home for "filter/rank/judge inside a script" (exactly our
-   triage use case).
+   triage use case). With `codemode.mode: "on"` (default) declared tools stay declared and only
+   undeclared tools are listed, within a 3000-token `inlineBudget`; `"only"` hides all direct tools and
+   forces every call through a script. Nested calls still go through `tool_call`/`tool_result`.
 2. **Virtual models** — an extension registers `pi.registerVirtualModel({ route })`, and `route()` may
    call `ctx.modelRegistry.classify()` to pick the physical chat model per request. The shipped example
    is `examples/extensions/jev-router.ts`: Jev rates the first user message, planning goes to a strong
