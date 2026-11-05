@@ -19,6 +19,7 @@
  */
 
 import type { Config } from "../config.ts";
+import { duckduckgoEngine } from "./duckduckgo.ts";
 import { WebSearchError } from "../runtime/error-codes.ts";
 import {
   ENGINE_IDS,
@@ -46,7 +47,9 @@ export type EngineMap = Partial<Record<EngineId, Engine>>;
  * Frozen so a runtime bug cannot inject an adapter behind a live registry's
  * back; tests build their own maps with `createEngineRegistry(map, config)`.
  */
-export const DEFAULT_ENGINES: EngineMap = Object.freeze({});
+export const DEFAULT_ENGINES: EngineMap = Object.freeze({
+  duckduckgo: duckduckgoEngine,
+});
 
 /**
  * Pure append: returns a *new* map with `engine` stored under its own id.
