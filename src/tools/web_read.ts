@@ -10,6 +10,9 @@
  * - the guard runs before `acquirePage`, so a private URL causes no navigation;
  * - it runs again on `page.url()`, because the first check cannot see redirects.
  *
+ * When `config.reflex.enabled` is true, an optional read gate (P5-D) may decline
+ * the page before a tab is spent; a disabled reflex is not consulted at all.
+ *
  * Output is Markdown (or plain text) produced by `extract/read.ts`; raw HTML is
  * never returned. The audit log records `host + path` only — a read URL may
  * carry a session token or a personal query, and the log is not the place for
@@ -29,6 +32,7 @@ import {
   type ReadInline,
   type ReadableDocument,
 } from "../extract/read.ts";
+import type { Reflex } from "../reflex/types.ts";
 import type { Stage } from "../runtime/error-codes.ts";
 import { isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, renderToolFailure, toFailure } from "../runtime/errors.ts";
@@ -121,6 +125,16 @@ const INPUT_HINT =
   "check the web_read arguments: url (public http/https), offset >= 0, maxChars >= 1, format md|text";
 
 const UNSUPPORTED_HINT = "the page produced no readable text; try a different URL";
+
+/**
+ * `E_UNSUPPORTED` is the least misleading code in the frozen taxonomy for a
+ * declined read: the page was not refused as private (`E_BLOCKED_URL`), not
+ * walled, not unparseable — the reflex simply judged it not worth a page load.
+ * The hint names the escape hatch so a wrong verdict is actionable.
+ */
+const READ_GATE_HINT =
+  "the reflex read gate declined this page (spam/ad host, login or checkout, or unlikely to answer); " +
+  "read another URL or set reflex.enabled=false to turn the gate off";
 
 /**
  * Reads get their own work tab (`PageKey` in `src/cdp/types.ts`): a long article
@@ -320,6 +334,22 @@ function auditDomain(finalUrl: URL): string {
   return value.length > 300 ? `${value.slice(0, 299)}…` : value;
 }
 
+/**
+ * The read gate (P5-D). `web_read` has no query, so the URL itself is the only
+ * honest subject: a rules gate screens spam/ad hosts, login and binary paths,
+ * and a classifier judges the URL/title pair (SPEC §9.3 gateRead).
+ *
+ * Fail-open: a reflex that throws is a reflex problem, never a reason to refuse
+ * a page the caller explicitly asked for.
+ */
+async function readGateAllows(reflex: Reflex, url: string): Promise<boolean> {
+  try {
+    return await reflex.gateRead(url, { title: url, url, snippet: "", engine: "read" });
+  } catch {
+    return true;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -371,6 +401,18 @@ export function createWebReadTool(
       input.url,
       options.resolve === undefined ? {} : { resolve: options.resolve },
     );
+
+    // Reflex read gate (P5-D): after the SSRF guard, before a tab is acquired, so
+    // a refused page costs nothing and a private URL still reports E_BLOCKED_URL.
+    if (deps.config.reflex.enabled && deps.reflex !== undefined) {
+      const allowed = await readGateAllows(deps.reflex, requested.href);
+      if (!allowed) {
+        throw fail("E_UNSUPPORTED", "read", {
+          hint: READ_GATE_HINT,
+          message: "the reflex read gate declined this URL",
+        });
+      }
+    }
 
     let page: CdpPage;
     try {

@@ -10,7 +10,11 @@ export interface Candidate {
   title: string;
   url: string;
   snippet: string;
-  engine: EngineId;
+  /**
+   * `"read"` describes a bare URL handed to the read gate by `web_read`: that
+   * tool has no SERP and no engine, and pretending otherwise would log a lie.
+   */
+  engine: EngineId | "read";
 }
 
 export interface TriageResult {
@@ -48,4 +52,10 @@ export interface Reflex {
   gateRead(query: string, item: Candidate): Promise<boolean>;
   coverage(query: string, evidence: Evidence[]): Promise<CoverageVerdict>;
   route(query: string): Promise<Route>;
+  /**
+   * Optional per-search reset of the model budget (P5 policy). Tools call it
+   * once at the start of a user search; a `Reflex` without budgets (rules,
+   * test doubles) simply omits it.
+   */
+  beginSearch?(): void;
 }

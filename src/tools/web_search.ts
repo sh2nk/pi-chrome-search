@@ -33,7 +33,7 @@ import type { CdpPage } from "../cdp/types.ts";
 import type { Config } from "../config.ts";
 import { compactSerps } from "../extract/compact.ts";
 import { createGotoResolver } from "../extract/goto.ts";
-import { parseLink } from "../extract/urls.ts";
+import { isHttpUrl, normalizeUrl, parseLink } from "../extract/urls.ts";
 import {
   ENGINE_IDS,
   type Engine,
@@ -44,6 +44,7 @@ import {
   type RawSerp,
   type Wall,
 } from "../engines/types.ts";
+import type { Candidate, Reflex, Route } from "../reflex/types.ts";
 import { serpKey } from "../runtime/cache.ts";
 import type { ErrorCode, FailureDetails, Stage } from "../runtime/error-codes.ts";
 import { isWebSearchError } from "../runtime/error-codes.ts";
@@ -178,6 +179,11 @@ interface NormalizedInput {
   freshness?: Freshness;
   page: number;
   format: "md" | "json";
+  /**
+   * Locale suggested by a reflex route. Applied per engine only when the config
+   * did not pin one; absent when the caller has no reflex or the flag is off.
+   */
+  routed?: { lang?: string; region?: string };
 }
 
 type Validation = { ok: true; value: NormalizedInput } | { ok: false; message: string };
@@ -293,27 +299,34 @@ function resolveLocale(value: string): string | undefined {
  * `page` is Google/Yandex-only per the `Query` contract; passing it to
  * DuckDuckGo would ask for a page the adapter cannot build (and would key page 2
  * separately while returning page 1).
+ *
+ * A routed locale (P5-D) is a *suggestion*: `config.engines.*` is the user's own
+ * pinning, so a route may only fill a locale the config left as `auto`. A config
+ * value always wins — a model must not silently change the user's UI language.
  */
 function buildQuery(engine: EngineId, input: NormalizedInput, config: Config): Query {
   const query: Query = { text: input.q, n: input.n, summary: input.summary };
   if (input.freshness !== undefined) query.freshness = input.freshness;
   if (engine !== "duckduckgo") query.page = input.page;
 
+  const routedLang = resolveLocale(input.routed?.lang ?? "");
+  const routedRegion = resolveLocale(input.routed?.region ?? "");
+
   switch (engine) {
     case "google": {
-      const lang = resolveLocale(config.engines.google.lang);
-      const region = resolveLocale(config.engines.google.gl);
+      const lang = resolveLocale(config.engines.google.lang) ?? routedLang;
+      const region = resolveLocale(config.engines.google.gl) ?? routedRegion;
       if (lang !== undefined) query.lang = lang;
       if (region !== undefined) query.region = region;
       break;
     }
     case "duckduckgo": {
-      const region = resolveLocale(config.engines.duckduckgo.kl);
+      const region = resolveLocale(config.engines.duckduckgo.kl) ?? routedRegion;
       if (region !== undefined) query.region = region;
       break;
     }
     case "yandex": {
-      const region = resolveLocale(config.engines.yandex.lr);
+      const region = resolveLocale(config.engines.yandex.lr) ?? routedRegion;
       if (region !== undefined) query.region = region;
       break;
     }
@@ -678,6 +691,206 @@ async function notifySearching(update: UpdateFn | undefined, engine: EngineId): 
 }
 
 // ---------------------------------------------------------------------------
+// Reflex hooks (P5-D)
+// ---------------------------------------------------------------------------
+
+/**
+ * SPEC §9.3 triage trigger: `multi-engine-or-n>10`. A single-engine `n=5` search
+ * must not pay classifier latency; `n` above the schema ceiling is unreachable
+ * through `execute` today but the predicate stays honest for codemode callers
+ * and for `reflex.triage.when` staying a config expression.
+ */
+export const TRIAGE_N_THRESHOLD = 10;
+
+export function triageWanted(multiEngine: boolean, n: number): boolean {
+  return multiEngine || n > TRIAGE_N_THRESHOLD;
+}
+
+/**
+ * A swallowed reflex error must still be visible; the search itself is unaffected.
+ * `kind: "reflex_error"` keeps these rows out of the decision schema (a decision
+ * row must carry verdict/confidence/model/usage/costUsd, which a throw has none of).
+ */
+function logReflexFailure(deps: ToolDeps, decision: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  try {
+    void Promise.resolve(
+      deps.log.write({ kind: "reflex_error", decision, message: message.slice(0, 200) }),
+    ).catch(() => undefined);
+  } catch {
+    // Observability must never fail the search that triggered it.
+  }
+}
+
+/**
+ * `Yandex` is last by policy (D10) because a captcha wall costs the user a manual
+ * solve. A route may list it anywhere; the tool caps the damage here rather than
+ * trusting the model with the ordering rule.
+ */
+function yandexLast(order: readonly EngineId[]): EngineId[] {
+  const rest = order.filter((id) => id !== "yandex");
+  return order.includes("yandex") ? [...rest, "yandex"] : rest;
+}
+
+function clampN(value: number, config: Config): number {
+  const requested = Number.isFinite(value) ? Math.floor(value) : config.search.n;
+  return Math.min(Math.max(1, requested), effectiveMaxN(config));
+}
+
+interface RoutePlan {
+  input: NormalizedInput;
+  order: EngineId[];
+  /**
+   * True when the route asked for several engines, i.e. a coverage set the tool
+   * merges (explicit-list semantics). A single-engine route keeps D10 semantics:
+   * try it, fall back on failure, stop at the first success.
+   */
+  merge: boolean;
+}
+
+/**
+ * Apply a routed preference to the request. Only `"auto"` is routed (the caller
+ * who named engines already decided), and only fields the caller left unset are
+ * filled: `n: 3` from the agent beats `n: 5` from a classifier.
+ */
+function planRoute(route: Route, input: NormalizedInput, raw: WebSearchInput, deps: ToolDeps): RoutePlan | undefined {
+  const usable = deps.engines.select(yandexLast(route.engines));
+  if (usable.length === 0) return undefined;
+
+  const next: NormalizedInput = { ...input };
+  const routed: { lang?: string; region?: string } = {};
+  if (typeof route.lang === "string" && route.lang !== "") routed.lang = route.lang;
+  if (typeof route.region === "string" && route.region !== "") routed.region = route.region;
+  if (routed.lang !== undefined || routed.region !== undefined) next.routed = routed;
+
+  if (route.freshness !== undefined && raw.freshness === undefined) next.freshness = route.freshness;
+  if (typeof route.n === "number" && raw.n === undefined) next.n = clampN(route.n, deps.config);
+  if (typeof route.summary === "boolean" && raw.summary === undefined) next.summary = route.summary;
+
+  // A single-engine route is a *preference*, not a restriction: keep the other
+  // enabled engines behind it so one wall cannot turn a routed search into a
+  // failure. A multi-engine route is a coverage set and is used as given.
+  let order = usable;
+  if (usable.length === 1) {
+    const primary = usable[0]!;
+    order = [primary, ...deps.engines.select("auto").filter((id) => id !== primary)];
+  }
+
+  return { input: next, order, merge: usable.length > 1 };
+}
+
+/**
+ * Route + plan in one guarded step. A reflex can only ever *suggest*: any throw,
+ * malformed route or unusable engine list leaves the canonical D10 order intact.
+ */
+async function routedPlan(
+  reflex: Reflex,
+  input: NormalizedInput,
+  raw: WebSearchInput,
+  deps: ToolDeps,
+): Promise<RoutePlan | undefined> {
+  try {
+    const route = await reflex.route(input.q);
+    // A route crosses a model boundary: anything but a usable engine list means
+    // "no opinion", and the canonical order applies.
+    if (typeof route !== "object" || route === null || !Array.isArray(route.engines)) return undefined;
+    return planRoute(route, input, raw, deps);
+  } catch (error) {
+    logReflexFailure(deps, "route", error);
+    return undefined;
+  }
+}
+
+/**
+ * The merged candidate list, mirroring `compact.ts`'s merge key (normalised URL,
+ * ads and non-http hrefs dropped) so triage indices address what will actually
+ * be shown. First occurrence wins, exactly like the compactor.
+ */
+function mergedCandidates(serps: readonly RawSerp[]): Candidate[] {
+  const seen = new Set<string>();
+  const items: Candidate[] = [];
+  for (const serp of serps) {
+    for (const raw of serp.results) {
+      if (raw.isAd === true) continue;
+      const href = typeof raw.url === "string" ? raw.url.trim() : "";
+      if (!href || !isHttpUrl(href)) continue;
+      const normalized = normalizeUrl(href);
+      if (normalized === null || seen.has(normalized)) continue;
+      seen.add(normalized);
+      items.push({
+        title: typeof raw.title === "string" ? raw.title : "",
+        url: normalized,
+        snippet: typeof raw.snippet === "string" ? raw.snippet : "",
+        engine: raw.engine ?? serp.engine,
+      });
+    }
+  }
+  return items;
+}
+
+/** URLs selected by triage; null when the verdict cannot be applied safely. */
+function keptUrls(candidates: readonly Candidate[], keep: unknown): Set<string> | null {
+  if (!Array.isArray(keep)) return null;
+  const urls = new Set<string>();
+  for (const index of keep) {
+    if (typeof index !== "number" || !Number.isInteger(index)) continue;
+    const candidate = candidates[index];
+    if (candidate === undefined) continue;
+    urls.add(candidate.url);
+  }
+  return urls.size === 0 ? null : urls;
+}
+
+/**
+ * Keep only the selected candidates. Engine order inside a SERP is preserved:
+ * `compact.ts` owns display order (D10 merge order), and a model must not
+ * reshuffle the user's engines. Dropping the unselected tail is the whole
+ * token-saving point.
+ */
+function triagedSerps(serps: readonly RawSerp[], urls: ReadonlySet<string>): RawSerp[] {
+  const out: RawSerp[] = [];
+  for (const serp of serps) {
+    const results = serp.results.filter((item) => {
+      const href = typeof item.url === "string" ? item.url.trim() : "";
+      if (!href) return false;
+      const normalized = normalizeUrl(href);
+      return normalized !== null && urls.has(normalized);
+    });
+    // A SERP that lost every result still carries the AI summary; keep it for
+    // that, but do not claim an engine that contributes nothing else.
+    if (results.length === 0 && serp.ai === undefined) continue;
+    out.push({ ...serp, results });
+  }
+  return out;
+}
+
+/**
+ * Triage is advisory but applied: an exception, an unusable verdict or an empty
+ * keep list returns the unrefined SERPs. Recall loss is the expensive mistake,
+ * so the input is never replaced with nothing.
+ */
+async function refineSerps(
+  reflex: Reflex,
+  query: string,
+  serps: readonly RawSerp[],
+  deps: ToolDeps,
+): Promise<readonly RawSerp[]> {
+  try {
+    const candidates = mergedCandidates(serps);
+    if (candidates.length === 0) return serps;
+    const triage = await reflex.triage(query, candidates);
+    const urls = keptUrls(candidates, triage?.keep);
+    if (urls === null) return serps;
+    const filtered = triagedSerps(serps, urls);
+    if (filtered.length === 0 || filtered.every((serp) => serp.results.length === 0)) return serps;
+    return filtered;
+  } catch (error) {
+    logReflexFailure(deps, "triage", error);
+    return serps;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // One engine attempt
 // ---------------------------------------------------------------------------
 
@@ -928,16 +1141,33 @@ export function createWebSearchTool(
     if (!validation.ok) {
       return failureResult(fail("E_CONFIG", "config", { hint: INPUT_HINT, message: validation.message }));
     }
-    const input = validation.value;
+    let input = validation.value;
     if (signal?.aborted === true) {
       return failureResult(fail("E_CANCELLED", "navigate", { message: "aborted by the caller" }));
     }
 
+    // One user search = one budget. The policy also resets on a query change,
+    // but an explicit reset keeps two identical searches independent.
+    const reflex = deps.reflex;
+    reflex?.beginSearch?.();
+    const reflexOn = deps.config.reflex.enabled && reflex !== undefined;
+
     let order: EngineId[];
+    let merge = Array.isArray(input.engines);
     try {
       order = deps.engines.select(input.engines);
     } catch (error) {
       return failureResult(asFailure(error, "resolve"));
+    }
+    if (reflexOn && reflex !== undefined && input.engines === "auto") {
+      // `auto` is the only routable mode: a caller who named engines already
+      // decided, and their order is the contract (D9).
+      const plan = await routedPlan(reflex, input, params, deps);
+      if (plan !== undefined) {
+        input = plan.input;
+        order = plan.order;
+        merge = plan.merge;
+      }
     }
     if (order.length === 0) {
       return failureResult(
@@ -984,15 +1214,16 @@ export function createWebSearchTool(
         cachedAny = true;
         serps.push(hit);
         // D10: `auto` means "first enabled engine that works", not a merge.
-        if (input.engines === "auto") break;
+        if (!merge) break;
         continue;
       }
 
       await notifySearching(update, id);
       try {
         serps.push(await runEngine(engine, query, key, deps, firstUse, signal));
-        // D10: stop at the first success in auto mode; only an explicit list merges.
-        if (input.engines === "auto") break;
+        // D10: stop at the first success in auto mode; only an explicit list (or
+        // a multi-engine route) merges.
+        if (!merge) break;
       } catch (error) {
         const failure = asFailure(error, "extract", id, signal);
         firstFailure ??= failure;
@@ -1004,8 +1235,17 @@ export function createWebSearchTool(
       return failureResult(firstFailure ?? fail("E_EMPTY", "extract"));
     }
 
+    // Triage (SPEC §9.3) only for a merged or wide request: a plain single-engine
+    // search must not pay classifier latency. A thrown reflex is logged and the
+    // unrefined SERPs are returned, so the model can never break a working search.
+    const multiEngine = merge && order.length >= 2;
+    const refined =
+      reflexOn && reflex !== undefined && triageWanted(multiEngine, input.n)
+        ? await refineSerps(reflex, input.q, serps, deps)
+        : serps;
+
     const elapsedMs = deps.clock.now() - startedAt;
-    const compact = compactSerps(serps, {
+    const compact = compactSerps(refined, {
       n: input.n,
       summaryMaxChars: deps.config.search.summaryMaxChars,
       snippetMaxChars: deps.config.search.snippetMaxChars,
@@ -1025,7 +1265,7 @@ export function createWebSearchTool(
         ? serializeJsonWithin(compact.data, deps.config.search.outputMaxChars)
         : null;
     const text = json === null ? compact.text : json.text;
-    const contributed = [...new Set(serps.map((serp) => serp.engine))];
+    const contributed = [...new Set(refined.map((serp) => serp.engine))];
     const rendered = json === null ? compact.items.length : json.results;
     const truncated = json === null ? compact.truncated : json.truncated;
     const hasAi = json === null ? compact.ai !== undefined : json.ai;
