@@ -684,6 +684,8 @@ const SECRET_SCAN_EXCLUDED_PREFIXES = ["node_modules/", ".git/", "research/"];
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24}/g;
 const IPV4_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
 const PARAM_RE = /\b(sxsrf|reqid|sessionid)\s*=\s*([^\s&"'<>;]+)/gi;
+/** Profile identity fields a signed-in SERP bootstraps into the page. */
+const PERSONAL_FIELD_RE = /"(displayUserName|userName|userLogin|avatarId|yandexUid|userUid)"\s*:\s*"([^"]*)"/g;
 const COOKIE_RE = /\bcookie\s*:/gi;
 const LONG_BASE64_RE = /[A-Za-z0-9+/=_-]{200,}/g;
 
@@ -965,6 +967,12 @@ function runAudit(root) {
           if (classifyIpv4(m[0]) !== "violation") continue;
           push(rel, lineNo, "IPv4 address (redacted)",
             "replace with 127.0.0.1, 0.0.0.0, or a 192.0.2.x / 198.51.100.x / 203.0.113.x documentation address");
+        }
+
+        for (const m of line.matchAll(new RegExp(PERSONAL_FIELD_RE.source, "g"))) {
+          if (isPlaceholderValue(m[2])) continue;
+          push(rel, lineNo, `${m[1]}=<redacted>`,
+            "strip profile identity (display name, avatar id, user id) from the fixture");
         }
 
         for (const m of line.matchAll(new RegExp(PARAM_RE.source, "gi"))) {

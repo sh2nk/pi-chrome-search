@@ -102,6 +102,15 @@ const JSON_SECRET_FIELDS = [
   "token",
   "sessionid",
   "sessionId",
+  // Profile identity a signed-in SERP embeds in its bootstrap JSON. The Yandex
+  // captures shipped a display name, an avatar id and a stable user id because
+  // these keys were not in the list.
+  "displayUserName",
+  "userName",
+  "userLogin",
+  "avatarId",
+  "yandexUid",
+  "userUid",
   "csrf",
   "csrfToken",
   "csrf_token",

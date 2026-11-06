@@ -1210,3 +1210,21 @@ test("load-fixture reports a truncated or non-gzip html.gz without crashing", (t
   writeFixture(dir, "empty-html", "", meta);
   assert.equal(loadFixture("empty-html", { dir }).html, "");
 });
+
+test("sanitizer removes profile identity from SERP bootstrap JSON", () => {
+  // A signed-in Yandex SERP embeds the account in its JSON: the live captures
+  // shipped a display name, an avatar id and a stable user id, none of which the
+  // earlier field list covered.
+  const dirty = [
+    '<script>window.cfg={"displayUserName":"Test Name","userName":"Tester",',
+    '"userLogin":"tester","avatarId":"6218514/abcdef","yandexUid":"3509591631759753405"};</script>',
+  ].join("");
+
+  const clean = sanitizeFixture(dirty);
+  for (const secret of ["Test Name", "Tester", "tester", "6218514/abcdef", "3509591631759753405"]) {
+    assert.equal(clean.includes(secret), false, `sanitizer left ${secret}`);
+  }
+  assert.ok(clean.includes("displayUserName"), "the key must survive for debugging");
+  assert.ok(findUnsafe(dirty).length > 0);
+  assert.deepEqual(findUnsafe(clean), []);
+});
