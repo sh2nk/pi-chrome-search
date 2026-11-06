@@ -223,7 +223,9 @@ function unwrap(raw: unknown): BackendResult<unknown> {
   }
   return {
     value: raw,
-    meta: { confidence: 1, stopReason: "stop", model: UNKNOWN_MODEL, usage: zeroUsage(), costUsd: 0 },
+    // A bare Reflex passed as `backend` IS the rules layer; labelling those rows
+    // "unknown" made the bench baseline indistinguishable from a broken model.
+    meta: { confidence: 1, stopReason: "stop", model: RULES_MODEL, usage: zeroUsage(), costUsd: 0 },
   };
 }
 
