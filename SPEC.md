@@ -501,8 +501,26 @@ interface Reflex {
   gateRead(q: string, item: Candidate): Promise<boolean>;
   coverage(q: string, evidence: Evidence[]): Promise<{ enough: boolean; next: "refine" | "read_more" | "stop" }>;
   route(q: string): Promise<Route>;   // engines, lang, freshness, n, summary
+  /** P14, additive: optional — a `Reflex` without it behaves as before. */
+  judgePages?(q: string, pages: readonly PageSubject[]): Promise<PageVerdict[] | null>;
 }
 ```
+
+```ts
+// PLAN-v2 P14 (contract: reflex page gate)
+type PageKind = "original" | "aggregator" | "forum" | "slop" | "unsafe" | "unknown";
+interface PageSubject { url: string; title?: string; snippet?: string; excerpt?: string }
+interface PageVerdict { worth: boolean; trust: number | null; kind: PageKind; reasons: string[] }
+const PAGE_BATCH_MAX = 10;
+```
+- **Page gate:** `judgePages` answers "is this page worth a browser read, and can the source be trusted?"
+  One decision covers up to `PAGE_BATCH_MAX` pages, so a SERP-sized gate costs one budget slot. `null`
+  means no verdict. `web_read` gates before a tab is acquired; `web_research` drops refused sources and
+  ranks the rest by `trust`.
+- **Rules are the floor.** The rules layer answers offline and owns `unsafe`; a model verdict may add a
+  skip but never rescue an `unsafe` rules verdict. Classifier batches are one `classify()` call with two
+  typed questions per page (`worth` bool, `kind` choice); a missing or malformed answer fails open on that
+  page only, and the policy abstains on low confidence/error exactly as for the other decisions.
 - **Off by default:** `reflex.enabled: false`. When off, `rules.ts` is used for routing/dedup and no model
   runs.
 - **Backends:** `auto` = local decision model → OpenRouter classifier → rules. `localOnly: true` forbids

@@ -47,11 +47,52 @@ export interface Route {
   summary?: boolean;
 }
 
+/**
+ * P14 contract: what a page is, as far as a cheap judge can tell from the SERP
+ * snapshot (and, after a read, from an excerpt).
+ */
+export type PageKind = "original" | "aggregator" | "forum" | "slop" | "unsafe" | "unknown";
+
+/** One page the gate is asked about. Only `url` is mandatory; a read has nothing else. */
+export interface PageSubject {
+  url: string;
+  title?: string;
+  snippet?: string;
+  /** Read text window, when the caller already has one. Never required. */
+  excerpt?: string;
+}
+
+/**
+ * `worth` is the only decision a caller acts on; `trust` is advisory (0..1, or
+ * null when the judge abstained on quality) and `reasons` is a short, printable
+ * list a tool may show instead of the page.
+ */
+export interface PageVerdict {
+  worth: boolean;
+  trust: number | null;
+  kind: PageKind;
+  reasons: string[];
+}
+
+/**
+ * Most candidates one page-gate decision may cover. The budget is a *call*
+ * budget, so a batch of ten must cost what a batch of one costs.
+ */
+export const PAGE_BATCH_MAX = 10;
+
 export interface Reflex {
   triage(query: string, items: Candidate[]): Promise<TriageResult>;
   gateRead(query: string, item: Candidate): Promise<boolean>;
   coverage(query: string, evidence: Evidence[]): Promise<CoverageVerdict>;
   route(query: string): Promise<Route>;
+  /**
+   * P14 (additive): is this page worth spending a read on? Returns one verdict
+   * per subject, in input order, for at most `PAGE_BATCH_MAX` subjects. `null`
+   * means "no verdict" (disabled reflex, no backend, abstention); callers then
+   * fall back to `gateRead` or to their fixed order. A `Reflex` without this
+   * method behaves exactly as it did before P14.
+   */
+  judgePages?(query: string, subjects: readonly PageSubject[]): Promise<PageVerdict[] | null>;
   /**
    * Optional per-search reset of the model budget (P5 policy). Tools call it
    * once at the start of a user search; a `Reflex` without budgets (rules,
