@@ -85,7 +85,10 @@ export const ERROR_HINTS: Record<ErrorCode, string> = {
   E_CONFIG:
     "fix the named key in web-search.json (or $PI_CODING_AGENT_DIR/web-search.json); unknown keys are rejected",
   E_CDP_UNAVAILABLE:
-    "open chrome://inspect/#remote-debugging, tick \"Discover network targets\" and click Allow, then retry; or set PI_CHROME_CDP_WS=ws://127.0.0.1:<port><path>",
+    "open the browser's remote-debugging page (chrome://inspect/#remote-debugging for Chrome; " +
+    "edge://, brave:// or chromium:// for the other Chromium-family browsers), tick " +
+    "\"Discover network targets\" and click Allow, then retry; or set " +
+    "PI_CHROME_CDP_WS=ws://127.0.0.1:<port><path>",
   E_CDP_DISCONNECTED: "the CDP socket dropped; retry once — if it repeats, run /web-doctor and check the lock file",
   E_TARGET_LOST: "the owned tab was closed or navigated away; retry to reopen it",
   E_WALL: "solve the captcha/consent in the visible browser window, then retry — never automate it",

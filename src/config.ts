@@ -8,10 +8,10 @@
  */
 
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 
 import { ENGINE_IDS, type EngineId } from "./engines/types.ts";
+import { agentDir, expandHome } from "./runtime/host.ts";
 import { WebSearchError, type FailureDetails } from "./runtime/error-codes.ts";
 
 export type FocusPolicy = "session" | "always" | "never";
@@ -472,15 +472,7 @@ function assertCrossField(config: Config, source: string): void {
 }
 
 export function resolveConfigPath(env: NodeJS.ProcessEnv = process.env): string {
-  const rawDir = env.PI_CODING_AGENT_DIR?.trim();
-  const dir = rawDir && rawDir.length > 0 ? expandHome(rawDir) : join(homedir(), ".pi", "agent");
-  return join(dir, "web-search.json");
-}
-
-function expandHome(path: string): string {
-  if (path === "~") return homedir();
-  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
-  return isAbsolute(path) ? path : join(homedir(), path);
+  return join(agentDir(env), "web-search.json");
 }
 
 /** Apply env overrides after file parsing (SPEC §11). */

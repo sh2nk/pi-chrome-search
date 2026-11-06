@@ -39,6 +39,7 @@ import type { EngineId, EngineRegistry, Query, WallKind } from "../engines/types
 import { ENGINE_IDS } from "../engines/types.ts";
 import { ERROR_HINTS, type FailureDetails } from "./error-codes.ts";
 import { fail, toFailure } from "./errors.ts";
+import { browserBrandFor, inspectUrl, tildify } from "./host.ts";
 import type { Artifacts, Cache, Clock, Limiter } from "./types.ts";
 import { EXTENSION_NAME, EXTENSION_VERSION } from "../version.ts";
 
@@ -398,7 +399,7 @@ async function withDeadline<T>(task: Promise<T>, timeoutMs: number): Promise<T> 
 // ---------------------------------------------------------------------------
 
 export interface DoctorFixOptions {
-  /** Test seam; defaults to the signal-free `/proc` liveness check. */
+  /** Test seam; defaults to the host layer's signal-free liveness check. */
   alive?: (pid: number) => boolean;
   /** Test seam; defaults to `fs.unlink`. */
   remove?: (path: string) => Promise<void>;
@@ -614,12 +615,13 @@ async function collectCdp(deps: DoctorDeps): Promise<DoctorCdp> {
   if (info.webdriver === true) {
     // browser.ts refuses this at connect time, but the doctor also covers a
     // connector built elsewhere: an automation browser is never a usable attach.
+    const brand = browserBrandFor(info.endpoint.profileDir);
     const details = fail("E_CDP_UNAVAILABLE", "connect", {
       message: "navigator.webdriver is true on the attached browser",
       hint:
-        "navigator.webdriver is true: this Chrome was started by an automation tool; close it and " +
-        "attach to your normal profile via chrome://inspect → Allow — the extension never starts a " +
-        "browser itself",
+        "navigator.webdriver is true: this browser was started by an automation tool; close it and " +
+        `attach to your normal profile via ${inspectUrl(brand)} → Allow — the extension never ` +
+        "starts a browser itself",
     }).details;
     return {
       status: "error",
@@ -951,13 +953,6 @@ export async function buildDoctorReport(
 // ---------------------------------------------------------------------------
 // Text renderer
 // ---------------------------------------------------------------------------
-
-function tildify(path: string): string {
-  const home = process.env.HOME;
-  if (home === undefined || home === "") return path;
-  if (path === home) return "~";
-  return path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
-}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

@@ -29,9 +29,10 @@
  *    empty file, call it corrupt and reclaim a lock that is being written.
  *
  *  - **PID liveness without signalling.** The lock holder may be another pi
- *    process. We only stat `/proc/<pid>` on Linux and let the heartbeat decide
- *    everywhere else; sending a signal to check liveness would be a
- *    kill-adjacent operation against the user's session (AGENTS §2, rule 2).
+ *    process. `isProcessAlive()` (host layer, PO4) calls `kill(pid, 0)` — a
+ *    signal-free existence check that is portable across Linux/macOS/Windows —
+ *    and the heartbeat remains the authority for anything it cannot classify.
+ *    No code here ever sends a real signal (AGENTS §2, rule 2).
  *
  * Everything is serialized through this connector: at most one live session,
  * at most one work tab per engine, and tabs are closed only when their target
@@ -39,16 +40,21 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import { chmod, link, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { homedir, platform } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { Config, FocusPolicy } from "../config.ts";
 import type { EngineId } from "../engines/types.ts";
 import { WebSearchError, isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, toFailure } from "../runtime/errors.ts";
+import {
+  agentDir,
+  browserBrandFor,
+  inspectUrl,
+  isProcessAlive,
+  type ProcessProbe,
+} from "../runtime/host.ts";
 import type { Clock, Logger } from "../runtime/types.ts";
 import { CdpSession, createCdpPage } from "./session.ts";
 import type {
@@ -184,25 +190,16 @@ export function parseLockRecord(text: string): LockRecord | null {
 }
 
 /**
- * A PID is alive when its `/proc` entry exists. On other platforms we assume it
- * is alive and let the heartbeat expire the lock, because probing a process
- * without signalling it is not portable.
+ * Portable PID liveness, kept as the browser layer's public name because the
+ * doctor and the lock both used it before P15. The implementation (and the only
+ * `kill(pid, 0)` in the tree) lives in the host layer.
  */
-export function pidAlive(pid: number): boolean {
-  if (platform() !== "linux") return true;
-  return existsSync(`/proc/${pid}`);
-}
-
-function expandHome(path: string): string {
-  if (path === "~") return homedir();
-  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
-  return isAbsolute(path) ? path : join(homedir(), path);
+export function pidAlive(pid: number, probe?: ProcessProbe): boolean {
+  return isProcessAlive(pid, probe);
 }
 
 export function defaultLockPath(env: NodeJS.ProcessEnv = process.env): string {
-  const rawDir = env.PI_CODING_AGENT_DIR?.trim();
-  const dir = rawDir !== undefined && rawDir !== "" ? expandHome(rawDir) : join(homedir(), ".pi", "agent");
-  return join(dir, "web-search.lock");
+  return join(agentDir(env), "web-search.lock");
 }
 
 function asConnectorError(error: unknown): WebSearchError {
@@ -320,11 +317,12 @@ class BrowserConnector implements Connector {
 
       const webdriver = await bootstrapPage.evaluate<unknown>("navigator.webdriver");
       if (webdriver === true) {
+        const brand = browserBrandFor(endpoint.profileDir);
         throw fail("E_CDP_UNAVAILABLE", "connect", {
           message: "navigator.webdriver is true on the CDP-attached bootstrap tab",
           hint:
-            "this Chrome was started by an automation tool; close it and attach to your normal " +
-            "profile via chrome://inspect → Allow — the extension never starts a browser itself",
+            "this browser was started by an automation tool; close it and attach to your normal " +
+            `profile via ${inspectUrl(brand)} → Allow — the extension never starts a browser itself`,
         });
       }
 

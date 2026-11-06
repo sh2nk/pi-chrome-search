@@ -436,6 +436,30 @@ test("every /json/version probe is bounded by the injected timeout", async () =>
   assert.match(error.details.message ?? "", /timed out after 25ms/);
 });
 
+test("PO5 the failure hint names the browser family discovery observed", async () => {
+  const edge = await expectError(
+    discoverEndpoint(baseOptions({ profileDirs: ["/home/test/.config/microsoft-edge"], ports: [] })),
+    "E_CDP_UNAVAILABLE",
+  );
+  assert.ok(
+    edge.details.hint.includes("edge://inspect/#remote-debugging"),
+    `edge hint lacks the edge scheme: ${edge.details.hint}`,
+  );
+  assert.ok(!edge.details.hint.includes("open chrome://inspect"), edge.details.hint);
+
+  const mixed = await expectError(
+    discoverEndpoint(
+      baseOptions({
+        profileDirs: ["/home/test/.config/google-chrome", "/home/test/.config/microsoft-edge"],
+        ports: [],
+      }),
+    ),
+    "E_CDP_UNAVAILABLE",
+  );
+  assert.ok(mixed.details.hint.includes("chrome://inspect/#remote-debugging"), mixed.details.hint);
+  assert.ok(mixed.details.hint.includes("edge://"), "a mixed set must stay generic");
+});
+
 test("a hanging DevToolsActivePort read is bounded by the timeout", async () => {
   const readFile: ReadTextFile = () => new Promise<string>(() => {});
   const started = Date.now();

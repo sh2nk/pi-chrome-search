@@ -173,6 +173,10 @@ Artifacts: `~/.pi/agent/web-search/artifacts/<ts>-<engine>-<hash>/` (`page.html`
 - Comments explain **why** (the non-obvious browser behaviour), not what.
 - New dependency: justify in the commit/PR. Prefer `ws` + hand-rolled CDP over Playwright.
 - Tests are offline by default; live tests are opt-in and rate-limited.
+- **Host access lives in `src/runtime/host.ts`** (platform, home/config paths, browser-profile tables,
+  `capability()`, `isProcessAlive`). Nothing else in `src/` imports `node:os`, reads `$HOME`/`PATH`/
+  `LOCALAPPDATA`, hardcodes `/proc/` or `.config/`, does `~/` string surgery, or spawns to probe a binary;
+  audit rule R13 enforces it (PLAN v2 §2.1, PO1–PO4).
 - One writer per file. Shared files (`src/index.ts`, `src/config.ts`, `src/engines/types.ts`,
   `src/engines/index.ts`, `package.json`, `scripts/audit.mjs`, `evidence/`, `PLAN.md`) are
   orchestrator-owned; workers request changes in the handoff block instead of editing them.

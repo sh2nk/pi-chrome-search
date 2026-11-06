@@ -161,7 +161,8 @@ a partial file is deep-merged over the defaults.
 Environment variables (override the file, not persisted): `PI_CHROME_CDP_WS` (full CDP URL, e.g.
 `ws://127.0.0.1:9222/devtools/browser/<uuid>`), `PI_CHROME_CDP_PORTS` (comma-separated fallback ports),
 `PI_CHROME_SEARCH_DEBUG` (`1`/`true`), `PI_CHROME_SEARCH_PROFILE` (launch mode), `PI_CODING_AGENT_DIR`
-(agent dir; the config is `$PI_CODING_AGENT_DIR/web-search.json`, default `~/.pi/agent/web-search.json`).
+(agent dir; the config is `$PI_CODING_AGENT_DIR/web-search.json`, default `~/.pi/agent/web-search.json`),
+`PI_CHROME_SEARCH_HOST_PLATFORM` (diagnostic only: stub `linux`/`darwin`/`win32` for the offline suite).
 
 Example `~/.pi/agent/web-search.json`:
 

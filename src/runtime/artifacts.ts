@@ -27,8 +27,7 @@
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
 import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 
 import type { Config } from "../config.ts";
 import { ENGINE_IDS } from "../engines/types.ts";
@@ -36,6 +35,7 @@ import type { EngineId, SerpTimings } from "../engines/types.ts";
 import { isWebSearchError } from "./error-codes.ts";
 import type { WebSearchError } from "./error-codes.ts";
 import { fail } from "./errors.ts";
+import { agentDir } from "./host.ts";
 import type { ArtifactInput, Artifacts, Clock, PruneResult } from "./types.ts";
 
 /** Meta shape version; bump when a field is added/renamed. */
@@ -301,12 +301,6 @@ function errnoOf(error: unknown): string | undefined {
   return typeof error.code === "string" ? error.code : undefined;
 }
 
-function expandHome(path: string): string {
-  if (path === "~") return homedir();
-  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
-  return isAbsolute(path) ? path : join(homedir(), path);
-}
-
 /**
  * UTC, not local time: the stamp is part of the directory name and prune orders
  * by that name, so a DST jump must not be able to reorder evidence. Tests are
@@ -420,9 +414,7 @@ function buildMeta(
 
 /** `$PI_CODING_AGENT_DIR/web-search/artifacts`, else `~/.pi/agent/web-search/artifacts`. */
 export function resolveArtifactsRoot(env: NodeJS.ProcessEnv = process.env): string {
-  const raw = env.PI_CODING_AGENT_DIR?.trim();
-  const dir = raw !== undefined && raw.length > 0 ? expandHome(raw) : join(homedir(), ".pi", "agent");
-  return join(dir, "web-search", "artifacts");
+  return join(agentDir(env), "web-search", "artifacts");
 }
 
 export interface ArtifactsOptions {

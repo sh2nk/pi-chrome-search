@@ -16,10 +16,16 @@
  */
 
 import { readFile as fsReadFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { ERROR_HINTS, RETRYABLE, WebSearchError } from "../runtime/error-codes.ts";
+import {
+  browserBrandFor,
+  cdpAllowHint,
+  profileCandidates,
+  tildify,
+  type BrowserBrand,
+} from "../runtime/host.ts";
 import type { CdpEndpoint, CdpSource } from "./types.ts";
 
 /** Chrome answers `/json/version` instantly on loopback or not at all. */
@@ -88,20 +94,6 @@ export interface DiscoverOptions {
   timeoutMs?: number;
 }
 
-/**
- * Linux profile dirs from SPEC §5.1, in precedence order. Only Chrome is
- * officially supported; the other Chromium-family dirs are best-effort.
- */
-const PROFILE_SUFFIXES = [
-  ".config/google-chrome",
-  ".config/google-chrome-beta",
-  ".config/google-chrome-unstable",
-  ".config/chromium",
-  ".config/chromium-browser",
-  ".config/BraveSoftware/Brave-Browser",
-  ".config/microsoft-edge",
-] as const;
-
 export function parseDevToolsActivePort(text: string): DevToolsActivePortResult {
   const lines = text
     .split(/\r\n|\n|\r/)
@@ -161,16 +153,29 @@ export async function discoverEndpoint(options: DiscoverOptions = {}): Promise<C
     notes.push("PI_CHROME_CDP_PORTS is unset");
   }
 
-  // 3. DevToolsActivePort files. No HTTP probe: see the module comment.
-  const dirs = options.profileDirs ?? defaultProfileDirs();
+  // 3. DevToolsActivePort files. No HTTP probe: see the module comment. The
+  // profile table is the host layer's job (PO2); this module only reads the
+  // file it is handed.
+  const dirs = options.profileDirs ?? profileCandidates();
   const profileNotes: string[] = [];
+  // A profile dir that exists (or is unreadable) tells us which browser family
+  // the user actually has, so the failure hint does not say "chrome" to an Edge
+  // user (PO5). ENOENT is absence, not a family.
+  const observedBrands = new Set<BrowserBrand["id"]>();
+  const noteBrand = (dir: string): void => {
+    const brand = browserBrandFor(dir);
+    if (brand !== null) observedBrands.add(brand.id);
+  };
   for (const dir of dirs) {
     const file = join(dir, "DevToolsActivePort");
     let text: string;
     try {
       text = await withDeadline(readFile(file), `reading ${file}`, timeoutMs);
+      noteBrand(dir);
     } catch (error) {
-      profileNotes.push(`${tildify(file)}: ${describeReadMiss(error)}`);
+      const reason = describeReadMiss(error);
+      if (reason !== "no file") noteBrand(dir);
+      profileNotes.push(`${tildify(file)}: ${reason}`);
       continue;
     }
 
@@ -203,14 +208,32 @@ export async function discoverEndpoint(options: DiscoverOptions = {}): Promise<C
     notes.push("port scan: no unprobed candidate ports");
   }
 
+  // One observed family → name its inspect page. Nothing observed but a list
+  // that only contains one family (the tests, a hand-set profile) → that family.
+  // Mixed or unknown → stay generic instead of guessing Chrome.
+  const observed = [...observedBrands];
+  const listed = new Set(
+    dirs.map((dir) => browserBrandFor(dir)?.id).filter((id): id is BrowserBrand["id"] => id !== undefined),
+  );
+  const single =
+    observed.length === 1
+      ? observed[0]
+      : observed.length === 0 && listed.size === 1
+        ? [...listed][0]
+        : null;
+  const brand =
+    single === undefined || single === null
+      ? null
+      : (browserBrandFor(dirs.find((dir) => browserBrandFor(dir)?.id === single) ?? "") ?? null);
+
   throw new WebSearchError({
     code: "E_CDP_UNAVAILABLE",
     stage: "discover",
     retryable: RETRYABLE.E_CDP_UNAVAILABLE,
     hint:
-      `${ERROR_HINTS.E_CDP_UNAVAILABLE}; Chrome 136+ ignores --remote-debugging-port on the ` +
-      "default profile, so the chrome://inspect toggle is the only way in; this extension " +
-      "never launches Chrome for you.",
+      `${cdpAllowHint(brand)}. Chrome 136+ ignores --remote-debugging-port on the default ` +
+      "profile, so the inspect toggle is the only way in; this extension never launches a " +
+      "browser for you.",
     message: `no CDP endpoint found; ${notes.join("; ")}`,
   });
 }
@@ -420,17 +443,6 @@ function configError(message: string, hint: string): WebSearchError {
     hint,
     message,
   });
-}
-
-function defaultProfileDirs(): string[] {
-  const home = homedir();
-  return PROFILE_SUFFIXES.map((suffix) => join(home, suffix));
-}
-
-function tildify(path: string): string {
-  const home = homedir();
-  if (path === home) return "~";
-  return path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
 }
 
 /**

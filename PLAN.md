@@ -505,6 +505,7 @@ hard rules were broken along the way.
 | P5 reflex | `[x]` | `evidence/P5.md`, `bench/RESULTS.md` | built and wired; bench says keep `enabled:false` (tokens −0.2% at honest keep) |
 | P6 research | `[x]` | `evidence/P6.md`, `bench/RESULTS-CODEMODE.md` | V6.1–V6.5 pass; three-path comparison recorded |
 | P7 packaging | `[x]` | `evidence/P7.md` | V7.1–V7.6 pass; tarball 46 files, install + load verified, final live smoke recorded |
+| P15 host layer | `[x]` | `evidence/P15.md` | V15.1–V15.6 pass; host seam + audit R13, suite green under `darwin`/`win32` stubs, live capability probe recorded |
 
 Status values: `[ ]` not started · `[~]` in progress · `[x]` gates pass · `[!]` blocked (reason
 required) · `[-]` waived (orchestrator + user approve, reason required).

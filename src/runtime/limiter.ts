@@ -17,12 +17,12 @@
  */
 
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { Config } from "../config.ts";
 import { ENGINE_IDS, type EngineId } from "../engines/types.ts";
 import { ERROR_HINTS, WebSearchError } from "./error-codes.ts";
+import { agentDir } from "./host.ts";
 import type { Clock, Limiter, LimiterStats } from "./types.ts";
 
 const STATE_VERSION = 1 as const;
@@ -58,15 +58,7 @@ export interface LimiterWithStats extends Limiter {
  * user-editable config.
  */
 export function resolveStatePath(env: NodeJS.ProcessEnv = process.env): string {
-  const raw = env.PI_CODING_AGENT_DIR?.trim();
-  const dir = raw && raw.length > 0 ? expandHome(raw) : join(homedir(), ".pi", "agent");
-  return join(dir, "web-search", "state.json");
-}
-
-function expandHome(path: string): string {
-  if (path === "~") return homedir();
-  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
-  return isAbsolute(path) ? path : join(homedir(), path);
+  return join(agentDir(env), "web-search", "state.json");
 }
 
 function emptyEngines(): Record<EngineId, EngineCounters> {

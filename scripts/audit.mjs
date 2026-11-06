@@ -24,12 +24,14 @@
  *   R11 evidence completeness: every phase the status table claims has an evidence file with a
  *       recorded command and a verdict
  *   R12 packaging sanity: package.json metadata, no install hooks, `files` limited to shipped paths
+ *   R13 host confinement: platform facts, OS paths, executable probes and process liveness live only
+ *       in src/runtime/host.ts (PO1–PO4)
  *
  * Scope (also printed with the report, so the deliberate exclusions are never a mystery):
  *   R1 = src/ + tests/   R2–R5 = src/   R6 = everything except node_modules/, .git/, research/
  *   R7 = tests/fixtures/**   R8 = repo hygiene   R9 = approximate
  *   R10 = SPEC.md, PLAN.md, AGENTS.md (+ package.json scripts)   R11 = PLAN.md §5 + evidence/
- *   R12 = package.json
+ *   R12 = package.json   R13 = src/ except src/runtime/host.ts
  * `playwright-core` is allowed in research/ and bench/ for comparison (SPEC §4), so those trees are
  * intentionally outside R1; bench/ does not exist yet and is not scanned until it does.
  *
@@ -91,9 +93,9 @@ function usage() {
   return [
     "usage: node scripts/audit.mjs [--json] [--self-test]",
     "",
-    "  default     readable report per rule (R1..R12)",
+    "  default     readable report per rule (R1..R13)",
     "  --json      machine-readable report on stdout",
-    "  --self-test run the R1/R2/R3 launch-detection, R10, R11 and R12 rules against",
+    "  --self-test run the R1/R2/R3 launch-detection and the R10–R13 rules against",
     "              throwaway fixtures in /tmp/opencode and assert that each one fires",
     "              (and stays quiet on a clean fixture); exits 1 if a rule is not live",
     "",
@@ -688,7 +690,17 @@ const R2_PATTERNS = [
 ];
 
 const R3_PATTERNS = [
-  { re: /\bprocess\.kill\b/, hint: "never kill the user's Chrome or its process tree; ask the user" },
+  // `kill(pid, 0)` is the portable liveness probe (PO4), and it lives only in
+  // src/runtime/host.ts. Every other call, and any signal other than 0, is a
+  // kill-adjacent operation against the user's session.
+  {
+    re: /\bprocess\.kill\s*\((?!\s*[^)\n]*,\s*0\s*\))/,
+    hint: "only kill(pid, 0) (liveness, host layer) is allowed; never signal the user's Chrome",
+  },
+  {
+    re: /\bprocess\s*\[\s*["'`]kill["'`]\s*\]/,
+    hint: "a computed process.kill is still a signal; liveness lives in src/runtime/host.ts",
+  },
   // src/ never needs to spawn a process: CDP is a WebSocket, not a subprocess. `child_process` is
   // therefore forbidden wholesale (this also covers `node:child_process` and require() forms).
   {
@@ -703,6 +715,63 @@ const R3_PATTERNS = [
   { re: /\bpkill\b/, hint: "never kill the user's Chrome; ask the user" },
   { re: /\btaskkill\b/, hint: "never kill the user's Chrome; ask the user" },
   { re: /chrome[^\n]*--restart/i, hint: "never restart Chrome; attach to the running instance" },
+];
+
+/**
+ * R13 — host confinement (PLAN v2 §2.1, PO1–PO4).
+ *
+ * The only allowed module is src/runtime/host.ts. Everything else is a leak:
+ * importing `node:os`, reading `$HOME`/`PATH`/`LOCALAPPDATA`, naming an OS path,
+ * spawning an executable, or checking a pid. Patterns run on comment-blanked
+ * code, so the doctrine can be documented anywhere without tripping the rule.
+ */
+const HOST_MODULE = "src/runtime/host.ts";
+
+const R13_PATTERNS = [
+  {
+    re: /["'`]node:os["'`]/,
+    hint: "platform/home facts live in src/runtime/host.ts; import them from there",
+  },
+  {
+    re: /\bprocess\s*\.\s*env\s*\.\s*(?:HOME|PATH|PATHEXT|LOCALAPPDATA|APPDATA|USERPROFILE|XDG_[A-Z0-9_]+)\b/,
+    hint: "read host environment only through src/runtime/host.ts (home, PATH, capability)",
+  },
+  {
+    re: /\bprocess\s*\.\s*env\s*\[\s*["'`](?:HOME|PATH|PATHEXT|LOCALAPPDATA|APPDATA|USERPROFILE|XDG_[A-Z0-9_]+)["'`]\s*\]/,
+    hint: "a computed host env read is still a host read; use src/runtime/host.ts",
+  },
+  {
+    re: /["'`][^"'`\n]*\/proc\/[^"'`\n]*["'`]/,
+    hint: "no /proc parsing; liveness is process.kill(pid, 0) in src/runtime/host.ts (PO4)",
+  },
+  {
+    re: /["'`][^"'`\n]*\/(?:usr\/)?(?:s?bin|etc)\/[^"'`\n]*["'`]/,
+    hint: "no hardcoded system binary/config directories; resolve capabilities through src/runtime/host.ts",
+  },
+  {
+    re: /["'`][^"'`\n]*\.config\/[^"'`\n]*["'`]/,
+    hint: "profile paths are a host table (src/runtime/host.ts); no .config/ literals elsewhere (PO2)",
+  },
+  {
+    re: /Library\/Application Support/,
+    hint: "macOS profile paths live in the src/runtime/host.ts table",
+  },
+  {
+    re: /\bstartsWith\s*\(\s*["'`]~[\\/]/,
+    hint: "use expandHome() from src/runtime/host.ts instead of ~/ string surgery",
+  },
+  {
+    re: /\bprocess\.kill\b/,
+    hint: "process facts live in src/runtime/host.ts (isProcessAlive, signal 0 only)",
+  },
+  {
+    re: /\bchild_process\b/,
+    hint: "src/ never spawns; a capability is probed with access(X_OK), never executed (PO1)",
+  },
+  {
+    re: /\b(?:execFileSync|execSync|spawnSync)\s*\(/,
+    hint: "no synchronous process spawn outside a declared capability fallback (PO1)",
+  },
 ];
 
 const R4_PATTERNS = [
@@ -771,6 +840,7 @@ const SCOPE_NOTES = [
   "R10 = SPEC.md + PLAN.md + AGENTS.md (commands, config paths, tool exposure) cross-checked with package.json scripts",
   "R11 = PLAN.md §5 status table + the evidence files it cites (a missing file or a file with no command/verdict fails)",
   "R12 = package.json (metadata, install hooks, `files` allowlist); the real tarball listing is gate V7.1",
+  "R13 = src/ except src/runtime/host.ts (node:os, $HOME/PATH/LOCALAPPDATA, /proc/, .config/, app-support/LOCALAPPDATA tables, process.kill, child_process)",
   "research/ and bench/ may use playwright-core for comparison (SPEC §4) and are never scanned by R1",
   "R1–R5 match code with comments blanked; string, template and regex bodies are kept (they are code)",
 ];
@@ -1407,6 +1477,31 @@ function checkPackaging(root, store, files) {
   return { findings, files: 1, notes };
 }
 
+/**
+ * R13 — host confinement. A custom check rather than `addCodeCheck` because the
+ * allowlist is per file: src/runtime/host.ts is the one module allowed to own
+ * these facts. R3 also runs on src/ and permits exactly `kill(pid, 0)` there.
+ */
+function hostConfinementCheck(store, files) {
+  const scoped = filesUnder(files, ["src/"]).filter(hasCodeExtension).filter((rel) => rel !== HOST_MODULE);
+  const scan = scanPatterns(store, scoped, R13_PATTERNS, { stripComments: true });
+  return {
+    id: "R13",
+    title: "host access is confined to the host layer",
+    scope: "src/ except src/runtime/host.ts",
+    files: readableCount(store, scoped),
+    findings: scan.findings,
+    total: scan.total,
+    truncated: scan.truncated,
+    capped: scan.capped,
+    notes: [
+      "allowed module: src/runtime/host.ts (platform, paths, profile tables, capability(), isProcessAlive)",
+      "forbidden elsewhere: node:os, $HOME/PATH/PATHEXT/LOCALAPPDATA, /proc/, /usr/bin|/bin|/etc, .config/, ~/ string surgery, process.kill, child_process",
+      "PO1: a capability is probed with access(X_OK) and never spawned; a missing one is null plus a hint",
+    ],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Audit
 // ---------------------------------------------------------------------------
@@ -1467,7 +1562,10 @@ function runAudit(root) {
     "src/",
     ["src/"],
     R3_PATTERNS,
-    ["patterns: process.kill, child_process (any spawn/kill form), pkill, taskkill, chrome…--restart"],
+    [
+      "patterns: process.kill with a real signal, child_process (any spawn/kill form), pkill, taskkill, chrome…--restart",
+      "allowed: signal-free `process.kill(pid, 0)` (the liveness probe); R13 confines it to src/runtime/host.ts",
+    ],
   );
 
   // R4 — no captcha solving. A bare "captcha" is legitimate (E_WALL vocabulary).
@@ -1821,6 +1919,9 @@ function runAudit(root) {
     });
   }
 
+  // R13 — host confinement.
+  checks.push(hostConfinementCheck(store, files));
+
   const shown = checks.reduce((sum, check) => sum + check.findings.length, 0);
   const total = checks.reduce((sum, check) => sum + (check.total ?? check.findings.length), 0);
   return {
@@ -1975,6 +2076,7 @@ const SELF_TEST_CASES = [
       { check: "R1", max: 0, label: "comment-only mention of a launcher" },
       { check: "R2", max: 0, label: "reading navigator.webdriver" },
       { check: "R3", max: 0, label: "comment-only mention of process.kill" },
+      { check: "R13", max: 0, label: "no host access in clean src" },
     ],
   },
   {
@@ -1995,6 +2097,56 @@ const SELF_TEST_CASES = [
       { check: "R1", min: 2, label: "variable launcher key + split flag" },
       { check: "R2", min: 1, label: "computed defineProperty on globalThis.navigator" },
       { check: "R3", min: 1, label: "split child_process import" },
+    ],
+  },
+  {
+    name: "host access leaks",
+    files: {
+      "src/cdp/leak.ts": [
+        'import { homedir } from "node:os";',
+        'import { spawnSync } from "node:child_process";',
+        'export const signal = () => process.kill(1, "SIGKILL");',
+        "export const home = process.env.HOME;",
+        'export const proc = "/proc/1/status";',
+        'export const bin = "/usr/bin/chromium";',
+        'export const cfg = ".config/google-chrome";',
+        'export const tilde = (p: string) => p.startsWith("~/");',
+        "export const pid = () => process.kill(8000, 0);",
+        'export const mac = "Library/Application Support/Google/Chrome";',
+        "",
+      ].join("\n"),
+      // The allowlist file itself may own these facts; it must never be reported.
+      "src/runtime/host.ts": [
+        'import { homedir } from "node:os";',
+        'export const home = process.env.HOME;',
+        'export const proc = "/proc/1/status";',
+        "export const live = (pid: number) => process.kill(pid, 0);",
+        "",
+      ].join("\n"),
+    },
+    expect: [
+      { check: "R13", min: 8, label: "node:os, $HOME, /proc/, /usr/bin/, .config/, ~/ surgery, kill, child_process, app support" },
+      { check: "R3", min: 1, label: "a real signal outside the host layer" },
+    ],
+    guards: [
+      {
+        label: "src/runtime/host.ts is the allowlist even when it owns the same tokens",
+        run: (report) =>
+          !report.checks
+            .find((check) => check.id === "R13")
+            .findings.some((finding) => finding.file === "src/runtime/host.ts"),
+      },
+      {
+        label: "signal-free kill(pid, 0) in host.ts is not an R3 finding",
+        run: (report) => !report.checks.find((check) => check.id === "R3").findings.some((f) => f.file === "src/runtime/host.ts"),
+      },
+      {
+        label: "a real SIGKILL outside host.ts is an R3 finding",
+        run: (report) =>
+          report.checks
+            .find((check) => check.id === "R3")
+            .findings.some((finding) => finding.file === "src/cdp/leak.ts" && /process\.kill/.test(finding.match)),
+      },
     ],
   },
   {
@@ -2277,7 +2429,7 @@ function printHuman(report) {
   );
   out.push(
     "note: R12 is static (`npm pack` is not spawned) — gate V7.1 runs the real pack listing; " +
-      "`node scripts/audit.mjs --self-test` proves the launch, docs, evidence and packaging rules fire",
+      "`node scripts/audit.mjs --self-test` proves the launch, docs, evidence, packaging and host rules fire",
   );
 
   process.stdout.write(`${out.join("\n")}\n`);

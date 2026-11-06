@@ -26,8 +26,7 @@
  * by `cdp.connectTimeoutMs` plus the discovery budget (PLAN V1.5).
  */
 
-import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { createConnector } from "../cdp/browser.ts";
@@ -51,22 +50,15 @@ import type { DoctorDeps, DoctorReport, EngineProbe } from "../runtime/doctor.ts
 import { isWebSearchError } from "../runtime/error-codes.ts";
 import type { FailureDetails } from "../runtime/error-codes.ts";
 import { fail, renderFailureText, toFailure } from "../runtime/errors.ts";
+import { agentDir } from "../runtime/host.ts";
 import { createLimiter } from "../runtime/limiter.ts";
 import { createLogger } from "../runtime/log.ts";
 import type { Artifacts, Cache, Clock, Limiter, Logger } from "../runtime/types.ts";
 import { STATE_DIR_NAME } from "../version.ts";
 
-/** Same shape as `resolveConfigPath`; kept local so the CLI owns no config logic. */
+/** Same resolution as `resolveConfigPath`; the host layer owns the agent dir. */
 function stateDir(env: NodeJS.ProcessEnv): string {
-  const raw = env.PI_CODING_AGENT_DIR?.trim();
-  const base = raw !== undefined && raw !== "" ? expandHome(raw) : join(homedir(), ".pi", "agent");
-  return join(base, STATE_DIR_NAME);
-}
-
-function expandHome(path: string): string {
-  if (path === "~") return homedir();
-  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
-  return isAbsolute(path) ? path : join(homedir(), path);
+  return join(agentDir(env), STATE_DIR_NAME);
 }
 
 export interface DoctorCliArgs {
@@ -102,8 +94,8 @@ export interface DoctorCliDeps {
   limiter?: Limiter;
   /**
    * Test seams for the safe `--fix` stale-lock reclaim. Production leaves both
-   * unset and gets `/proc` liveness plus `fs.unlink`; no code here ever signals
-   * a process.
+   * unset and gets the host layer's signal-free liveness check plus `fs.unlink`;
+   * no code here ever signals a process.
    */
   alive?: (pid: number) => boolean;
   removeLock?: (path: string) => Promise<void>;

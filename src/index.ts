@@ -6,7 +6,6 @@
  * keeps `pi --print` and `pi --list-models` from touching Chrome or the disk.
  */
 
-import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -26,6 +25,7 @@ import { createSystemClock } from "./runtime/clock.ts";
 import { createLimiter } from "./runtime/limiter.ts";
 import { createEngineProbe } from "./runtime/doctor.ts";
 import type { DoctorDeps } from "./runtime/doctor.ts";
+import { agentDir } from "./runtime/host.ts";
 import { createLogger } from "./runtime/log.ts";
 import type { Artifacts, Cache, Clock, Limiter, Logger } from "./runtime/types.ts";
 import { createTools } from "./tools/index.ts";
@@ -46,12 +46,6 @@ export interface Runtime {
 }
 
 let runtimePromise: Promise<Runtime> | null = null;
-
-function agentDir(env: NodeJS.ProcessEnv): string {
-  const raw = env.PI_CODING_AGENT_DIR?.trim();
-  if (raw && raw.length > 0) return raw.startsWith("~") ? join(homedir(), raw.slice(1)) : raw;
-  return join(homedir(), ".pi", "agent");
-}
 
 function createRuntime(): Runtime {
   const env = process.env;
