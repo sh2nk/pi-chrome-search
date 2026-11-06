@@ -1228,3 +1228,13 @@ test("sanitizer removes profile identity from SERP bootstrap JSON", () => {
   assert.ok(findUnsafe(dirty).length > 0);
   assert.deepEqual(findUnsafe(clean), []);
 });
+
+test("sanitizer removes the Yandex avatar asset path", () => {
+  // The signed-in header embeds `avatars.mds.yandex.net/get-yapic/<uid>/…`; the
+  // uid is stable and identifies the profile even when every JSON key is gone.
+  const dirty = '<img src="https://avatars.mds.yandex.net/get-yapic/6218514/wm9S4XEsTKcTl8Wg2Olh/50">';
+  const clean = sanitizeFixture(dirty);
+  assert.equal(clean.includes("6218514"), false);
+  assert.match(clean, /\[redacted-avatar\]/);
+  assert.deepEqual(findUnsafe(clean), []);
+});

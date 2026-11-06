@@ -685,6 +685,7 @@ const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{
 const IPV4_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
 const PARAM_RE = /\b(sxsrf|reqid|sessionid)\s*=\s*([^\s&"'<>;]+)/gi;
 /** Profile identity fields a signed-in SERP bootstraps into the page. */
+const AVATAR_URL_RE = /avatars\.mds\.yandex\.net\/get-yapic\/[^\s"'<>]*/gi;
 const PERSONAL_FIELD_RE = /"(displayUserName|userName|userLogin|avatarId|yandexUid|userUid)"\s*:\s*"([^"]*)"/g;
 const COOKIE_RE = /\bcookie\s*:/gi;
 const LONG_BASE64_RE = /[A-Za-z0-9+/=_-]{200,}/g;
@@ -967,6 +968,11 @@ function runAudit(root) {
           if (classifyIpv4(m[0]) !== "violation") continue;
           push(rel, lineNo, "IPv4 address (redacted)",
             "replace with 127.0.0.1, 0.0.0.0, or a 192.0.2.x / 198.51.100.x / 203.0.113.x documentation address");
+        }
+
+        for (const _m of line.matchAll(new RegExp(AVATAR_URL_RE.source, "gi"))) {
+          push(rel, lineNo, "profile avatar asset (redacted)",
+            "strip the avatar asset path: it encodes the account identity");
         }
 
         for (const m of line.matchAll(new RegExp(PERSONAL_FIELD_RE.source, "g"))) {

@@ -1,0 +1,10 @@
+{
+  "engine": "google",
+  "urlPathShape": "https://www.google.com/search?q=%3Cquery%3E&tbm=isch&hl=ru",
+  "queryClass": "images",
+  "capturedAt": "2026-11-06T00:27:36.363Z",
+  "ai": "no",
+  "results": 0,
+  "notes": "results = marker census in the HTML; ai = text heuristic (adapter detection is authoritative)",
+  "capturedWith": "research/probes/06-capture-fixtures.mjs"
+}

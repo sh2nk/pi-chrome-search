@@ -299,6 +299,14 @@ export function builtinRules(): SanitizeRule[] {
       replace: (_match, ...groups) => `${String(groups[0] ?? "")}${REDACTED_SECRET}`,
     },
     {
+      name: "yandex-avatar-url",
+      // The signed-in Yandex header embeds the account avatar as
+      // `avatars.mds.yandex.net/get-yapic/<uid>/<hash>/…`; the uid is stable and
+      // identifies the profile, so the whole asset path is replaced.
+      pattern: /(?:https?:)?\/\/avatars\.mds\.yandex\.net\/get-yapic\/[^\s"'<>]*/gi,
+      replace: "[redacted-avatar]",
+    },
+    {
       name: "long-token",
       // Opaque capability payloads (protobuf `url=` in /goto, signed `fbs=`,
       // inline data URIs) carry no value for an adapter test and cannot be
