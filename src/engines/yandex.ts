@@ -70,7 +70,12 @@ const BOX_SELECTORS: readonly string[] = Object.freeze([
 ]);
 
 const INTERACTION: EngineInteraction = Object.freeze({
-  homeUrl: "https://yandex.ru/",
+  // P10-D: `yandex.ru` warm-up redirects to Dzen often enough that the typed
+  // path landed on a page with no search box. `ya.ru` is the same account/region
+  // warm-up without the portal redirect; `homeHosts` keeps the redirect honest
+  // if it happens anyway (the SERP host is unchanged).
+  homeUrl: "https://ya.ru/",
+  homeHosts: Object.freeze(["ya.ru", "yandex.ru"]),
   boxSelectors: BOX_SELECTORS,
   /**
    * Empty on purpose; `waitForMarker` supports "selector only" and the selector
@@ -79,6 +84,13 @@ const INTERACTION: EngineInteraction = Object.freeze({
   marker: "",
   selector: YANDEX_READY_SELECTOR,
   minCount: 1,
+  // P10-C: `#text` is the live box on both ya.ru and the SERP; the delay is the
+  // slowest of the three (Yandex autocompletes while you type).
+  typeProfile: Object.freeze({
+    box: "#text",
+    maxChars: 300,
+    keyDelayMs: Object.freeze([25, 60] as const),
+  }),
 });
 
 /**

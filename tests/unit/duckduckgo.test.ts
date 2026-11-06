@@ -195,6 +195,10 @@ test("interaction: DDG home box, and a marker that cannot settle on the home pag
   assert.deepEqual([...interaction.boxSelectors], ['input[name="q"]', "#searchbox_input"]);
   assert.ok(interaction.selector, "a bare text marker would match the home page");
   assert.ok((interaction.minCount ?? 0) >= 1);
+  // P10-C: the home page has no usable input, so typing starts on the SERP.
+  assert.equal(interaction.typeOn, "serp");
+  assert.equal(interaction.typeProfile?.box, 'input[name="q"]');
+  assert.equal(interaction.typeProfile?.maxChars, 200);
 
   // The marker is proven against both live captures (and not localized).
   for (const name of LIVE_FIXTURES) {

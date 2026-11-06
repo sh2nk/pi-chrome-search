@@ -180,6 +180,8 @@ test("first search of a session types into the box and presses Enter", async () 
     settleMs: 0,
     scrollPx: 540,
     fellBackToSerp: false,
+    homeMs: 0,
+    typeMs: 715,
   });
 
   // The scroll happens after the query was submitted, i.e. before extraction.
@@ -212,6 +214,8 @@ test("later searches navigate the SERP URL directly and do not focus or type", a
     settleMs: 0,
     scrollPx: 540,
     fellBackToSerp: false,
+    homeMs: 0,
+    typeMs: 0,
   });
 });
 
@@ -807,4 +811,254 @@ test("humanize consumes only the frozen CdpPage surface", async () => {
   // No rng injected here: the scroll must still land in the SPEC window.
   assert.ok(result.scrollPx >= 300 && result.scrollPx <= 900, `scroll ${result.scrollPx} px`);
   assert.deepEqual(fake.scrolls(), [result.scrollPx]);
+});
+
+// ---------------------------------------------------------------------------
+// P10-C: typing everywhere, per-engine profile
+// ---------------------------------------------------------------------------
+
+const PROFILE = {
+  box: "#profile-box",
+  maxChars: 40,
+  keyDelayMs: [10, 20] as const,
+};
+
+test('mode "typing" types every search and prefers the profile box', async () => {
+  const clock = new FakeClock();
+  const page = new FakePage({
+    url: HOME,
+    text: MARKER,
+    clock,
+    random: () => 0.5,
+    evaluate: domEvaluate({ boxes: ["#profile-box", "input[name=q]"] }),
+  });
+
+  const result = await humanSearch(
+    makeOptions(page, clock, {
+      mode: "typing",
+      firstInSession: false,
+      typeProfile: PROFILE,
+    }),
+  );
+
+  assert.equal(result.typed, true, '"typing" means every search, not just the first');
+  assert.equal(result.typedPath, true);
+  assert.deepEqual(page.navigations(), [HOME]);
+  assert.deepEqual(page.clicks(), ["#profile-box"], "the profile box wins over the generic list");
+  assert.deepEqual(page.typedTexts(), ["example query"]);
+  // 0.5 → 10 + floor(0.5 * 11) = 15 ms per character, 13 characters.
+  assert.deepEqual(page.typeDelays(), Array(13).fill(15));
+  assert.equal(result.typeMs, 195);
+  assert.equal(result.fellBackToSerp, false);
+});
+
+test("a query longer than the profile allows is navigated, never typed truncated", async () => {
+  const clock = new FakeClock();
+  const page = new FakePage({
+    url: HOME,
+    text: MARKER,
+    clock,
+    evaluate: domEvaluate({ boxes: ["#profile-box"] }),
+  });
+  const query = "x".repeat(41); // one code point over the profile ceiling
+
+  const result = await humanSearch(makeOptions(page, clock, { query, mode: "typing", typeProfile: PROFILE }));
+
+  assert.equal(result.typed, false);
+  assert.equal(result.typedPath, true);
+  assert.equal(result.fellBackToSerp, true);
+  assert.equal(result.fellBackReason, "query-too-long");
+  assert.deepEqual(page.navigations(), [SERP], "the pinned SERP is the honest fallback");
+  assert.deepEqual(page.typedTexts(), [], "the box must never receive a cut query");
+  assert.deepEqual(page.clicks(), []);
+});
+
+test("exactly maxChars still types: the ceiling is inclusive", async () => {
+  const clock = new FakeClock();
+  const page = new FakePage({
+    url: HOME,
+    text: MARKER,
+    clock,
+    evaluate: domEvaluate({ boxes: ["#profile-box"] }),
+  });
+
+  const result = await humanSearch(
+    makeOptions(page, clock, { query: "y".repeat(40), mode: "typing", typeProfile: PROFILE }),
+  );
+
+  assert.equal(result.typed, true);
+  assert.equal(result.fellBackToSerp, false);
+});
+
+test("a home redirect outside homeHosts falls back to the SERP (ya.ru → dzen)", async () => {
+  const clock = new FakeClock();
+  const page = new FakePage({
+    url: "about:blank",
+    text: MARKER,
+    clock,
+    evaluate: domEvaluate({ boxes: ["#text"] }),
+    onNavigate: async (url, p) => {
+      // Yandex warm-up redirect: the home URL lands on Dzen.
+      if (url.startsWith("https://ya.example.test/")) p.setUrl("https://dzen.example.test/portal");
+    },
+  });
+
+  const result = await humanSearch(
+    makeOptions(page, clock, {
+      homeUrl: "https://ya.example.test/",
+      homeHosts: ["ya.example.test", "yandex.example.test"],
+      mode: "typing",
+      typeProfile: { box: "#text", maxChars: 200, keyDelayMs: [10, 20] },
+    }),
+  );
+
+  assert.equal(result.typed, false);
+  assert.equal(result.fellBackToSerp, true);
+  assert.equal(result.fellBackReason, "home-redirect");
+  assert.equal(result.homeRedirectHost, "dzen.example.test");
+  assert.deepEqual(page.navigations(), ["https://ya.example.test/", SERP]);
+  assert.deepEqual(page.typedTexts(), []);
+});
+
+test("a redirect to another allowed host still types (ya.ru → yandex.ru)", async () => {
+  const clock = new FakeClock();
+  const page = new FakePage({
+    url: "about:blank",
+    text: MARKER,
+    clock,
+    evaluate: domEvaluate({ boxes: ["#text"] }),
+    onNavigate: async (url, p) => {
+      if (url.startsWith("https://ya.example.test/")) p.setUrl("https://yandex.example.test/search");
+    },
+  });
+
+  const result = await humanSearch(
+    makeOptions(page, clock, {
+      homeUrl: "https://ya.example.test/",
+      homeHosts: ["ya.example.test", "yandex.example.test"],
+      mode: "typing",
+      typeProfile: { box: "#text", maxChars: 200, keyDelayMs: [10, 20] },
+    }),
+  );
+
+  assert.equal(result.typed, true);
+  assert.equal(result.fellBackToSerp, false);
+  assert.equal(result.homeRedirectHost, undefined);
+  assert.deepEqual(page.clicks(), ["#text"]);
+});
+
+test("without homeHosts the landing host is not judged at all (pre-P10 behaviour)", async () => {
+  const clock = new FakeClock();
+  const page = new FakePage({
+    url: "about:blank",
+    text: MARKER,
+    clock,
+    evaluate: domEvaluate({ boxes: ["#text"] }),
+    onNavigate: async (url, p) => {
+      if (url.startsWith("https://ya.example.test/")) p.setUrl("https://dzen.example.test/portal");
+    },
+  });
+
+  const result = await humanSearch(
+    makeOptions(page, clock, {
+      homeUrl: "https://ya.example.test/",
+      mode: "typing",
+      typeProfile: { box: "#text", maxChars: 200, keyDelayMs: [10, 20] },
+    }),
+  );
+
+  assert.equal(result.typed, true);
+  assert.equal(result.fellBackToSerp, false);
+});
+
+// ---------------------------------------------------------------------------
+// P10-C: typing on the SERP (engines without a usable home box)
+// ---------------------------------------------------------------------------
+
+/** FakePage evaluate model for the SERP box: exists + either prefilled length. */
+function serpBoxModel(prefilled: number): EvaluateHandler {
+  return (expression) => {
+    if (expression.includes("typeof el.value")) return prefilled;
+    return domEvaluate({ boxes: ['input[name="q"]'] })(expression);
+  };
+}
+
+test('typeOn "serp" clears the prefilled SERP box and retypes the query', async () => {
+  const clock = new FakeClock();
+  const page = new FakePage({
+    url: "about:blank",
+    text: MARKER,
+    clock,
+    random: () => 0.5,
+    evaluate: serpBoxModel(16), // the SERP URL already carries the 16-char query
+  });
+
+  const result = await humanSearch(
+    makeOptions(page, clock, {
+      mode: "typing",
+      firstInSession: false,
+      typeOn: "serp",
+      typeProfile: { box: 'input[name="q"]', maxChars: 200, keyDelayMs: [10, 20] },
+    }),
+  );
+
+  assert.deepEqual(page.navigations(), [SERP], "no home-page load on the serp path");
+  assert.deepEqual(page.clicks(), ['input[name="q"]'], "the click comes after the navigation");
+  const kinds = callKinds(page);
+  assert.ok(kinds.indexOf("navigate") < kinds.indexOf("click"));
+  assert.equal(page.presses().filter((key) => key === "Backspace").length, 16);
+  assert.equal(page.presses().at(-1), "Enter");
+  assert.deepEqual(page.typedTexts(), ["example query"]);
+  assert.equal(result.typed, true);
+  assert.equal(result.typedPath, true);
+  assert.equal(result.fellBackToSerp, false);
+  assert.equal(result.homeMs, 0, "there is no home navigation to pay for");
+  // 13 characters at 15 ms + 16 backspace presses (no sleep) = 195 ms.
+  assert.equal(result.typeMs, 195);
+});
+
+test('typeOn "serp" with no box stays on the SERP and reports box-missing', async () => {
+  const clock = new FakeClock();
+  const page = new FakePage({
+    url: "about:blank",
+    text: MARKER,
+    clock,
+    evaluate: domEvaluate({ boxes: [] }),
+  });
+
+  const result = await humanSearch(
+    makeOptions(page, clock, {
+      mode: "typing",
+      firstInSession: false,
+      typeOn: "serp",
+      typeProfile: { box: 'input[name="q"]', maxChars: 200, keyDelayMs: [10, 20] },
+    }),
+  );
+
+  assert.deepEqual(page.navigations(), [SERP], "one navigation only");
+  assert.equal(result.typed, false);
+  assert.equal(result.fellBackToSerp, true);
+  assert.equal(result.fellBackReason, "box-missing");
+  assert.deepEqual(page.typedTexts(), []);
+});
+
+test("a prefilled box is never cleared by more than 500 backspaces", async () => {
+  const clock = new FakeClock();
+  const page = new FakePage({
+    url: "about:blank",
+    text: MARKER,
+    clock,
+    evaluate: serpBoxModel(100_000),
+  });
+
+  await humanSearch(
+    makeOptions(page, clock, {
+      mode: "typing",
+      firstInSession: false,
+      typeOn: "serp",
+      typeProfile: { box: 'input[name="q"]', maxChars: 200, keyDelayMs: [10, 20] },
+    }),
+  );
+
+  assert.equal(page.presses().filter((key) => key === "Backspace").length, 500);
 });

@@ -130,9 +130,35 @@ export interface Wall {
   markers: string[];
 }
 
+/**
+ * Per-engine typing profile (PLAN-v2 P10-C).
+ *
+ * `humanize: "typing"` types every search of every engine, so each adapter must
+ * say which box it accepts input in, how long a query that box handles without
+ * truncating, and at what pace the keystrokes should land. A query longer than
+ * `maxChars` is *not* typed: a truncated query would search for something the
+ * user did not ask, so the caller falls back to the pinned SERP URL instead.
+ */
+export interface EngineTypeProfile {
+  /** The box this engine accepts typed input in; tried before `boxSelectors`. */
+  box: string;
+  /** Longest query this box accepts without truncating or reformatting. */
+  maxChars: number;
+  /** Per-keystroke delay window in ms, inclusive. */
+  keyDelayMs: readonly [number, number];
+}
+
 export interface EngineInteraction {
   /** Engine home page for the typed first search of a session. */
   homeUrl: string;
+  /**
+   * Hosts the *home* navigation may legitimately land on (P10-D). Yandex
+   * redirects `yandex.ru` to `dzen.ru` often enough that treating the landing as
+   * the search box is a lie; a host outside this list means "the warm-up was
+   * redirected" and the caller navigates the pinned SERP instead of failing.
+   * Absent means "do not check" (the pre-P10 behaviour).
+   */
+  homeHosts?: readonly string[];
   /** Search-box candidates, tried in order. */
   boxSelectors: readonly string[];
   /** Text marker that means "SERP is ready" (prefer a stable text marker). */
@@ -140,6 +166,17 @@ export interface EngineInteraction {
   /** Optional structural marker; pairs with minCount to avoid a stale home-page match. */
   selector?: string;
   minCount?: number;
+  /** Optional typing profile; without it `humanize: "typing"` uses the generic delays. */
+  typeProfile?: EngineTypeProfile;
+  /**
+   * Where the typed path starts (P10-C). `home` (default) opens the engine home
+   * page and types into its box. `serp` navigates the SERP URL first and types
+   * into the SERP box after clearing its prefilled value — for engines whose
+   * home page no longer renders a usable `<input>` (measured on DuckDuckGo
+   * 2026-11-06), so "type everywhere" stays honest instead of silently falling
+   * back on every search.
+   */
+  typeOn?: "home" | "serp";
 }
 
 export interface Engine {

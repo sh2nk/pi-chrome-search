@@ -6,12 +6,12 @@
  *
  *  - **One window, created by us.** `Target.createTarget` without `newWindow`
  *    puts a tab in whichever window was last focused, which may be a window the
- *    user is working in. We create an `about:blank` bootstrap tab with
- *    `newWindow: true` and keep it as the window anchor, then verify every work
- *    tab's placement with `Browser.getWindowForTarget`. A tab that landed in a
- *    foreign window is closed (it is ours, we just created it) and recreated in
- *    a dedicated window; `windowDegraded` records that the compositor refused
- *    the first attempt.
+ *    user is working in. We create a bootstrap tab with `newWindow: true` and
+ *    keep it as the window anchor, then verify every work tab's placement with
+ *    `Browser.getWindowForTarget`. A tab that landed in a foreign window is
+ *    closed (it is ours, we just created it) and recreated in a dedicated
+ *    window; `windowDegraded` records that the compositor refused the first
+ *    attempt.
  *
  *    A forced `newWindow: true` tab *defines* the owned window: its id is
  *    re-read with `Browser.getWindowForTarget` and kept, and the placement check
@@ -19,9 +19,18 @@
  *    engine tab foreign, so each acquire would close and recreate a tab in yet
  *    another window (one misplacement would leave three windows on screen).
  *
- *  - **The bootstrap tab stays open.** Closing the last tab of a Chrome window
- *    closes the window, so the anchor keeps the dedicated window alive between
- *    searches. It appears as `engine: null` in the doctor output.
+ *  - **The bootstrap tab stays open, and it is not blank (P10).** Closing the
+ *    last tab of a Chrome window closes the window, so the anchor keeps the
+ *    dedicated window alive between searches. With `window.panel: true` it is
+ *    the local `assets/anchor.html` control panel, painted through
+ *    `Runtime.evaluate`; `window.panel: false` restores the historic
+ *    `about:blank` tab byte for byte.
+ *
+ *  - **Focus follows stages, not timers (P10-B).** `window.follow: "work"`
+ *    raises the engine tab when a stage begins and hands the screen back to the
+ *    anchor `window.idleMs` later; `"anchor"` keeps the panel visible;
+ *    `"never"` adds no raise at all, which is exactly the pre-P10 behaviour.
+ *    `window.focus: "never"` still dominates every follow value.
  *
  *  - **The lock is published with `link(2)`.** A fully written and fsynced
  *    temporary file is linked into place, which fails with EEXIST for the loser.
@@ -49,6 +58,15 @@ import type { EngineId } from "../engines/types.ts";
 import { WebSearchError, isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, toFailure } from "../runtime/errors.ts";
 import {
+  PanelChannel,
+  applyAnnouncement,
+  initialPanelState,
+  panelFileUrl,
+  renderPanelExpression,
+  type PanelState,
+  type WorkAnnouncement,
+} from "../runtime/panel.ts";
+import {
   agentDir,
   browserBrandFor,
   cdpAllowHint,
@@ -74,7 +92,7 @@ export const LOCK_VERSION = 1;
 export const DEFAULT_HEARTBEAT_MS = 20_000;
 export const DEFAULT_STALE_MS = 60_000;
 
-/** Every tab we create starts blank: the engine adapter owns the actual URL. */
+/** Every tab we create starts on a local page: the anchor is the panel (P10). */
 const BLANK_PAGE = "about:blank";
 /** Owner-only: the lock names a PID and a session id, not a secret, but nothing else needs it. */
 const LOCK_MODE = 0o600;
@@ -138,6 +156,15 @@ export type Connector = CdpConnector & {
   lockPath(): string;
   /** Bring the owned window forward on demand (`/web-focus`). Never navigates or opens a tab. */
   focus(): Promise<void>;
+  /**
+   * P10-A: the owned anchor (panel) tab, or null before `connect()` / after
+   * teardown. Read-only introspection for the doctor and the live gate; the
+   * extension never navigates it after creation. Optional so an offline fake
+   * connector does not have to model a tab it will never paint.
+   */
+  anchorPage?(): CdpPage | null;
+  /** P10: the live page for a key, without acquiring/creating anything. */
+  pageFor?(engine: PageKey): CdpPage | null;
 };
 
 interface LockRecord {
@@ -266,6 +293,13 @@ class BrowserConnector implements Connector {
   readonly #owned = new Set<string>();
   readonly #focusedOnce = new Set<PageKey>();
 
+  /** P10-A: panel writes, throttled; undefined when `window.panel` is false. */
+  readonly #panel: PanelChannel | undefined;
+  #panelState: PanelState | undefined;
+  #panelWarned = false;
+  /** Incremented on every cancel so a stale idle hand-back is a no-op. */
+  #idleGeneration = 0;
+
   #windowId: number | null = null;
   #windowDegraded = false;
 
@@ -280,6 +314,12 @@ class BrowserConnector implements Connector {
     this.#lockPath = options.lockPath ?? defaultLockPath(process.env);
     this.#heartbeatMs = positiveInt(options.heartbeatMs, DEFAULT_HEARTBEAT_MS);
     this.#staleMs = positiveInt(options.staleMs, DEFAULT_STALE_MS);
+    this.#panel = this.#config.window.panel
+      ? new PanelChannel({
+          clock: this.#clock,
+          sink: { write: (state) => this.#paintPanel(state) },
+        })
+      : undefined;
   }
 
   // --- CdpConnector --------------------------------------------------------
@@ -322,17 +362,10 @@ class BrowserConnector implements Connector {
       for (const targetId of orphans) await this.#closeTargetQuietly(session, targetId);
 
       // Bootstrap: the one window this extension owns. `newWindow: true` is the
-      // only way to guarantee the window is not the user's.
-      const bootstrapId = await session.createTarget(BLANK_PAGE, { newWindow: true });
-      this.#owned.add(bootstrapId);
-      // Attach before the page exists: every page command needs the flattened
-      // session id, and a page built on an unattached target fails on first use.
-      await session.attach(bootstrapId);
-      const bootstrapPage = createCdpPage(session, bootstrapId, {
-        clock: this.#clock,
-        initialUrl: BLANK_PAGE,
-      });
-      this.#bootstrap = { targetId: bootstrapId, engine: null, page: bootstrapPage };
+      // only way to guarantee the window is not the user's. With
+      // `window.panel: true` this tab is the local anchor control panel (P10-A).
+      await this.#createBootstrap(session);
+      const bootstrapPage = this.#requireBootstrapPage();
 
       const webdriver = await bootstrapPage.evaluate<unknown>("navigator.webdriver");
       if (webdriver === true) {
@@ -345,7 +378,6 @@ class BrowserConnector implements Connector {
         });
       }
 
-      this.#windowId = await this.#windowForTarget(session, bootstrapId);
       this.#state = { endpoint, browser, webdriver: false };
       return this.#connection();
     } catch (error) {
@@ -500,6 +532,12 @@ class BrowserConnector implements Connector {
     this.#windowId = null;
     this.#windowDegraded = false;
 
+    // P10: a hand-back scheduled by the last search must not fire against a
+    // closed window, and the panel channel is done for this connector.
+    this.#cancelIdleHandback();
+    this.#panel?.close();
+    this.#panelState = undefined;
+
     await this.#releaseLock();
 
     if (session !== undefined) {
@@ -542,6 +580,135 @@ class BrowserConnector implements Connector {
 
   lockPath(): string {
     return this.#lockPath;
+  }
+
+  anchorPage(): CdpPage | null {
+    return this.#bootstrap?.page ?? null;
+  }
+
+  pageFor(engine: PageKey): CdpPage | null {
+    return this.#enginePages.get(engine)?.page ?? null;
+  }
+
+  // --- P10: anchor panel and follow-focus --------------------------------
+
+  /**
+   * One stage announcement: paint the anchor and apply `window.follow`.
+   *
+   * The announcement is a patch, so a tool sends only what changed. Painting
+   * happens even when follow is `never` (the panel is information, not focus),
+   * and nothing here throws into a search: a dead anchor tab costs a log line.
+   */
+  async announce(update: WorkAnnouncement): Promise<void> {
+    // Cosmetics must never trigger a connect: no search is running yet.
+    if (!this.isConnected()) return;
+
+    if (this.#panel !== undefined) {
+      const previous =
+        this.#panelState ?? initialPanelState({ sessionId: this.#sessionId, now: this.#clock.now() });
+      this.#panelState = applyAnnouncement(previous, update, {
+        sessionId: this.#sessionId,
+        now: this.#clock.now(),
+      });
+      await this.#panel.publish(this.#panelState);
+    }
+
+    await this.#applyFollow(update);
+  }
+
+  async #paintPanel(state: PanelState): Promise<boolean> {
+    const bootstrap = this.#bootstrap;
+    if (bootstrap === undefined) return false;
+    try {
+      const painted = await bootstrap.page.evaluate<unknown>(renderPanelExpression(state));
+      // A fake CDP transport returns a number for every expression; only an
+      // explicit `false` means "the panel script is not there (yet)".
+      return painted !== false;
+    } catch (error) {
+      // A closed/not-yet-loaded anchor is not a search failure; warn once per
+      // connector so a broken asset cannot fill decisions.jsonl.
+      if (!this.#panelWarned) {
+        this.#panelWarned = true;
+        this.#warn("panel_paint_failed", `could not paint the anchor panel: ${describeError(error)}`);
+      }
+      return false;
+    }
+  }
+
+  /**
+   * P10-B. `window.focus: "never"` always wins (the pre-P10 passive mode), and
+   * `follow: "never"` adds nothing on top of the legacy `focus` policy, so a
+   * user who is presenting sees exactly the old window behaviour.
+   */
+  async #applyFollow(update: WorkAnnouncement): Promise<void> {
+    const policy = this.#config.window.follow;
+    if (this.#config.window.focus === "never" || policy === "never") return;
+
+    if (policy === "anchor") {
+      this.#cancelIdleHandback();
+      await this.#raiseAnchor();
+      return;
+    }
+
+    const working =
+      update.stage === "navigate" ||
+      update.stage === "settle" ||
+      update.stage === "extract" ||
+      update.stage === "read";
+    if (working) {
+      this.#cancelIdleHandback();
+      await this.#raiseWork(update.engine ?? null);
+      return;
+    }
+
+    // Only `done` hands the screen back. An `error` may be a captcha wall that
+    // the user has to solve in the work tab (`surface()` just raised it), and
+    // stealing focus back to the anchor 1.5 s later would fight the user.
+    if (update.stage === "done") this.#scheduleIdleHandback();
+  }
+
+  async #raiseWork(engine: EngineId | null): Promise<void> {
+    const owned = engine === null ? undefined : this.#enginePages.get(engine);
+    if (owned === undefined || !this.#owned.has(owned.targetId)) return;
+    try {
+      await owned.page.bringToFront();
+    } catch (error) {
+      this.#warn("focus_failed", `could not raise the ${engine} tab: ${describeError(error)}`);
+    }
+  }
+
+  async #raiseAnchor(): Promise<void> {
+    const bootstrap = this.#bootstrap;
+    if (bootstrap === undefined || !this.isConnected()) return;
+    try {
+      await bootstrap.page.bringToFront();
+    } catch (error) {
+      // The user may have closed the anchor; that is allowed, and it must not
+      // turn the next search into a failure or a reconnect loop.
+      this.#warn("focus_failed", `could not raise the anchor tab: ${describeError(error)}`);
+    }
+  }
+
+  /** Cancel any pending hand-back (a new stage started, or we are tearing down). */
+  #cancelIdleHandback(): void {
+    this.#idleGeneration += 1;
+  }
+
+  /**
+   * Hand the screen back to the anchor after `window.idleMs`. A generation
+   * counter makes a newer stage cancel this without a timer handle: the sleep
+   * still resolves, but it is a no-op.
+   */
+  #scheduleIdleHandback(): void {
+    const generation = ++this.#idleGeneration;
+    const idleMs = Math.max(0, Math.floor(this.#config.window.idleMs));
+    void this.#clock
+      .sleep(idleMs)
+      .then(async () => {
+        if (generation !== this.#idleGeneration) return;
+        await this.#raiseAnchor();
+      })
+      .catch(() => undefined);
   }
 
   async focus(): Promise<void> {
@@ -825,14 +992,58 @@ class BrowserConnector implements Connector {
       this.#warn("bootstrap_lost", `the anchor tab ${bootstrap.targetId} is gone; creating a new window`);
     }
 
-    const targetId = await session.createTarget(BLANK_PAGE, { newWindow: true });
+    await this.#createBootstrap(session);
+  }
+
+  /**
+   * Create the anchor tab: the local control panel (P10-A) or, when the panel
+   * is disabled, the historic blank page. A browser that refuses the `file://`
+   * target falls back to `about:blank` with a log line instead of failing the
+   * search: the anchor is an instrument, not a dependency.
+   */
+  async #createBootstrap(session: CdpSession): Promise<void> {
+    const wantsPanel = this.#config.window.panel;
+    let url = wantsPanel ? panelFileUrl() : BLANK_PAGE;
+    let targetId: string;
+    try {
+      targetId = await session.createTarget(url, { newWindow: true });
+    } catch (error) {
+      if (!wantsPanel) throw error;
+      this.#warn(
+        "panel_unavailable",
+        `the local anchor panel was refused (${describeError(error)}); falling back to about:blank`,
+      );
+      url = BLANK_PAGE;
+      targetId = await session.createTarget(BLANK_PAGE, { newWindow: true });
+    }
+
     this.#owned.add(targetId);
+    // Attach before building the page: `createCdpPage` binds every later command
+    // to the flattened session id and must never observe a bare target.
     await session.attach(targetId);
-    const page = createCdpPage(session, targetId, { clock: this.#clock, initialUrl: BLANK_PAGE });
+    const page = createCdpPage(session, targetId, { clock: this.#clock, initialUrl: url });
     this.#bootstrap = { targetId, engine: null, page };
 
     const windowId = await this.#windowForTarget(session, targetId);
     if (windowId !== null) this.#windowId = windowId;
+
+    if (wantsPanel && url !== BLANK_PAGE) {
+      // Seed the merge state only. The asset renders its own empty shell until
+      // the first stage announcement, which then paints immediately (leading
+      // edge): a cosmetic initial write would eat that window (V10.1).
+      this.#panelState = initialPanelState({ sessionId: this.#sessionId, now: this.#clock.now() });
+    }
+  }
+
+  #requireBootstrapPage(): CdpPage {
+    const bootstrap = this.#bootstrap;
+    if (bootstrap === undefined) {
+      throw fail("E_CDP_DISCONNECTED", "connect", {
+        message: "the owned anchor tab is missing after connect",
+        hint: "run /web-doctor; the connector could not create the bootstrap window",
+      });
+    }
+    return bootstrap.page;
   }
 
   /**
@@ -982,6 +1193,8 @@ class BrowserConnector implements Connector {
     this.#state = undefined;
     this.#windowId = null;
     this.#windowDegraded = false;
+    this.#cancelIdleHandback();
+    this.#panelState = undefined;
 
     if (session !== undefined) {
       try {
@@ -1018,6 +1231,8 @@ class BrowserConnector implements Connector {
     this.#state = undefined;
     this.#windowId = null;
     this.#windowDegraded = false;
+    this.#cancelIdleHandback();
+    this.#panelState = undefined;
 
     // A failed connect must not leave a lock that blocks every later attempt.
     await this.#releaseLock();

@@ -18,6 +18,7 @@ import { test } from "node:test";
 import { Value } from "typebox/value";
 
 import type { CdpConnector, CdpPage } from "../../src/cdp/types.ts";
+import type { WorkAnnouncement } from "../../src/runtime/panel.ts";
 import { DEFAULT_CONFIG, type Config } from "../../src/config.ts";
 import type {
   AiProbe,
@@ -211,6 +212,10 @@ interface Harness {
   limiterCalls: EngineId[];
   saved: ArtifactInput[];
   pageRequests: EngineId[];
+  /** P10: every stage announcement the tool sent. */
+  announcements: WorkAnnouncement[];
+  /** P10: every decisions.jsonl-shaped row the tool wrote. */
+  rows: Array<Record<string, unknown>>;
 }
 
 function makeHarness(options: HarnessOptions): Harness {
@@ -256,9 +261,16 @@ function makeHarness(options: HarnessOptions): Harness {
       },
     };
 
-  const log: Logger = { async write() {}, path: () => "/dev/null" };
+  const rows: Array<Record<string, unknown>> = [];
+  const log: Logger = {
+    async write(row: Record<string, unknown>): Promise<void> {
+      rows.push({ ...row });
+    },
+    path: () => "/dev/null",
+  };
   const pages = new Map<EngineId, CdpPage>(options.engines.map((engine) => [engine.id, page]));
   const pageRequests: EngineId[] = [];
+  const announcements: WorkAnnouncement[] = [];
   const cdp: CdpConnector = {
     async connect() {
       throw new Error("connect() is not used by web_search unit tests");
@@ -272,6 +284,9 @@ function makeHarness(options: HarnessOptions): Harness {
     async releaseAll() {},
     isConnected: () => true,
     endpoint: () => null,
+    async announce(update: WorkAnnouncement): Promise<void> {
+      announcements.push({ ...update });
+    },
   };
 
   const engineMap = Object.fromEntries(options.engines.map((engine) => [engine.id, engine]));
@@ -292,7 +307,7 @@ function makeHarness(options: HarnessOptions): Harness {
     fetchImpl,
   };
 
-  return { config, clock, page, deps, cache, limiterCalls, saved, pageRequests };
+  return { config, clock, page, deps, cache, limiterCalls, saved, pageRequests, announcements, rows };
 }
 
 function makeTool(harness: Harness) {
@@ -692,6 +707,95 @@ test("first search types into the engine box; the second navigates the SERP dire
   assert.deepEqual(harness.page.typedTexts(), ["first query"], "the box is not typed twice");
   assert.equal(engine.settles, 1, "the fast path uses the adapter's settle");
   assert.equal(harness.page.lastNavigation(), engine.urls.at(-1));
+});
+
+test("P10: the typed-path facts reach details and the log, and stages are announced", async () => {
+  const engine = new StubEngine({ id: "google", interaction: INTERACTION });
+  const harness = makeHarness({ engines: [engine] });
+  const tool = makeTool(harness);
+
+  const result = expectSuccess(await tool.execute("call-1", { q: "first query" } as WebSearchInput, undefined, undefined));
+
+  assert.equal(result.details.human?.engine, "google");
+  assert.equal(result.details.human?.typed, true);
+  assert.equal(result.details.human?.typedPath, true);
+  assert.equal(result.details.human?.fellBackToSerp, false);
+
+  const rows = harness.rows.filter((row) => row.kind === "human_search");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.typed, true);
+  assert.equal(rows[0]?.typedPath, true);
+  assert.equal(typeof rows[0]?.typeMs, "number");
+
+  const stages = harness.announcements.map((update) => update.stage);
+  assert.deepEqual(stages, ["pace", "navigate", "extract", "done"]);
+  assert.equal(harness.announcements[0]?.query, "first query", "the panel shows the query before pacing");
+  assert.equal(harness.announcements[0]?.engine, "google");
+  assert.deepEqual(harness.announcements[0]?.pace, harness.config.pacing.google);
+});
+
+test("P10: the measured settle time is exposed and matches the human record", async () => {
+  let reads = 0;
+  const clock = new FakeClock();
+  const page = new FakePage({
+    url: INTERACTION.homeUrl,
+    clock,
+    text: () => (++reads > 2 ? MARKER_TEXT : "loading…"),
+    evaluate: domHandlers([BOX], { [RESULT_CONTAINER]: 1, [RESULT_EXTRA]: 1 }),
+  });
+  const engine = new StubEngine({ id: "google", interaction: INTERACTION });
+  const harness = makeHarness({ engines: [engine], page, clock });
+  const tool = makeTool(harness);
+
+  const result = expectSuccess(await tool.execute("call-1", { q: "settle time" } as WebSearchInput, undefined, undefined));
+
+  assert.ok((result.details.settleMs ?? 0) > 0, "the marker wait must be measured");
+  assert.equal(result.details.settleMs, result.details.human?.settleMs);
+});
+
+test('P10: humanize "typing" types the second search too and reports it', async () => {
+  const engine = new StubEngine({ id: "google", interaction: INTERACTION });
+  const harness = makeHarness({
+    engines: [engine],
+    config: (config) => {
+      config.humanize = "typing";
+    },
+  });
+  const tool = makeTool(harness);
+
+  expectSuccess(await tool.execute("call-1", { q: "one" } as WebSearchInput, undefined, undefined));
+  const second = expectSuccess(
+    await tool.execute("call-2", { q: "two" } as WebSearchInput, undefined, undefined),
+  );
+
+  assert.deepEqual(harness.page.typedTexts(), ["one", "two"]);
+  assert.equal(second.details.human?.typed, true);
+  assert.equal(second.details.human?.typedPath, true);
+});
+
+test("P10: a wall announces error and never 'done' — the work tab stays up for the user", async () => {
+  const engine = new StubEngine({ id: "google", interaction: INTERACTION, walls: [WALL] });
+  const harness = makeHarness({ engines: [engine] });
+  const tool = makeTool(harness);
+
+  const result = await tool.execute("call-1", { q: "walled" } as WebSearchInput, undefined, undefined);
+  assert.equal("isError" in result && result.isError, true);
+  const stages = harness.announcements.map((update) => update.stage);
+  assert.deepEqual(stages, ["pace", "navigate", "error"]);
+  assert.equal(harness.announcements.at(-1)?.error?.code, "E_WALL");
+});
+
+test("P10: a failed search announces error then done, so the panel never sticks on 'navigate'", async () => {
+  const engine = new StubEngine({ id: "google", interaction: INTERACTION, extractError: fail("E_PARSE", "extract") });
+  const harness = makeHarness({ engines: [engine] });
+  const tool = makeTool(harness);
+
+  const result = await tool.execute("call-1", { q: "broken" } as WebSearchInput, undefined, undefined);
+  assert.equal("isError" in result && result.isError, true);
+  const stages = harness.announcements.map((update) => update.stage);
+  assert.ok(stages.includes("error"));
+  assert.equal(stages.at(-1), "done");
+  assert.equal(harness.announcements.find((update) => update.stage === "error")?.error?.code, "E_PARSE");
 });
 
 test("a failed engine does not consume first use: the next call still types", async () => {

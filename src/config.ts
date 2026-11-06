@@ -15,7 +15,20 @@ import { agentDir, expandHome } from "./runtime/host.ts";
 import { WebSearchError, type FailureDetails } from "./runtime/error-codes.ts";
 
 export type FocusPolicy = "session" | "always" | "never";
-export type HumanizeMode = "auto" | "always";
+/**
+ * P10-B: which owned tab is raised during work and after it.
+ *
+ * - `work`   — raise the engine tab when a stage begins, hand the screen back
+ *              to the anchor `window.idleMs` after the stage ends (default).
+ * - `anchor` — keep the anchor visible; useful while explaining the run.
+ * - `never`  — no extra raising at all: exactly the pre-P10 behaviour, which is
+ *              the only safe setting while the user is presenting.
+ *
+ * `window.focus: "never"` still dominates every value here: with it the
+ * extension never moves focus, whatever `follow` says.
+ */
+export type FollowPolicy = "work" | "anchor" | "never";
+export type HumanizeMode = "auto" | "always" | "typing";
 export type Mode = "attach" | "launch";
 export type ReflexBackend = "auto" | "local" | "openrouter" | "rules";
 export type BatchBackend = "classifier" | "chat-small";
@@ -42,6 +55,16 @@ export interface WindowConfig {
    * adapter-based). `never` keeps the session fully passive.
    */
   raiseOnPrompt: "auto" | "never";
+  /**
+   * P10-A: the bootstrap tab is the local anchor control panel instead of
+   * `about:blank`. `false` restores the old blank anchor exactly (and stops all
+   * panel painting).
+   */
+  panel: boolean;
+  /** P10-B: which tab is raised during and after a stage. */
+  follow: FollowPolicy;
+  /** P10-B: ms after the last stage before the anchor is raised again. */
+  idleMs: number;
 }
 
 export interface GoogleConfig {
@@ -164,7 +187,7 @@ export interface Config {
 export const DEFAULT_CONFIG: Config = {
   mode: "attach",
   cdp: { ports: [9222], ws: null, connectTimeoutMs: 5000, profileDir: null, attachWaitMs: 60000 },
-  window: { focus: "session", reuse: true, raiseOnPrompt: "auto" },
+  window: { focus: "session", reuse: true, raiseOnPrompt: "auto", panel: true, follow: "work", idleMs: 1500 },
   humanize: "auto",
   engines: {
     google: { enabled: true, lang: "auto", gl: "auto", dailyCap: 300 },
@@ -252,9 +275,12 @@ const CONFIG_SPEC: Spec = {
         focus: { kind: "enum", values: ["session", "always", "never"] },
         reuse: BOOL,
         raiseOnPrompt: { kind: "enum", values: ["auto", "never"] },
+        panel: BOOL,
+        follow: { kind: "enum", values: ["work", "anchor", "never"] },
+        idleMs: NUM(0, true, 60_000),
       },
     },
-    humanize: { kind: "enum", values: ["auto", "always"] },
+    humanize: { kind: "enum", values: ["auto", "always", "typing"] },
     engines: {
       kind: "object",
       fields: {

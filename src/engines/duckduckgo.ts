@@ -97,6 +97,20 @@ export const DUCKDUCKGO_INTERACTION: EngineInteraction = Object.freeze({
   marker: SETTLE_MARKER,
   selector: RESULT_TITLE_SELECTOR,
   minCount: SETTLE_MIN_RESULTS,
+  // P10-C: measured live — the homepage box takes the typed path and the SERP
+  // still settles. The delay is the fastest of the three engines (a small page
+  // with no autocomplete round trips).
+  // Measured 2026-11-06: the homepage renders no usable search `<input>` (the
+  // only real field is an `aria-hidden` AI-drawer trap; the form carries hidden
+  // metadata), so the typed path starts on the SERP and edits its box. The box
+  // is prefilled by the navigation; `humanize` clears it with Backspace before
+  // typing, which is what a person refining a query does.
+  typeOn: "serp",
+  typeProfile: Object.freeze({
+    box: 'input[name="q"]',
+    maxChars: 200,
+    keyDelayMs: Object.freeze([20, 45] as const),
+  }),
 });
 
 // ---------------------------------------------------------------------------

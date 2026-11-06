@@ -161,23 +161,35 @@ Notes:
 - Never restart, kill, or close the user's Chrome. Never close tabs the extension did not open.
 
 ### 5.3 Window and tab
-- Use **one dedicated window** owned by the extension; reuse it across the session.
+- Use **one dedicated window** owned by the extension; reuse it across the session. Its anchor tab is a
+  local `assets/anchor.html` control panel (engine, query, stage, pace, daily counters, last error,
+  session id) painted through one-off `Runtime.evaluate` — no network, no cookies, no extra file on
+  disk. `window.panel: false` restores the historic `about:blank` anchor.
 - One "work tab" per engine at most; reuse and re-navigate. Never open a second tab to parallelize the
   same engine.
-- Visible by design. Do not call `Page.bringToFront` on every query.
-  `focus: "session" | "always" | "never"` (default `session`: bring forward on the first search of the
-  session, then leave the user alone). `/web-focus` command brings it forward on demand.
+- Visible by design. `focus: "session" | "always" | "never"` (default `session`: bring forward on the
+  first search of the session, then leave the user alone) gates *whether* the window may be raised, and
+  `window.follow: "work" | "anchor" | "never"` (default `work`) chooses *which* tab: the work tab rises
+  when a stage begins and the anchor comes back `window.idleMs` (default 1500 ms) after it ends.
+  `follow: "never"` adds no raise at all (the pre-P10 behaviour, for presenting), and `focus: "never"`
+  dominates both. `/web-focus` command brings the work window forward on demand.
 - Window bounds: remember in config after first placement; do not fight the compositor.
 
 ### 5.4 Human-like interaction
 - First search of a session per engine: open the engine home page, click the search box, type the query
   with `Input.dispatchKeyEvent` at 30–80 ms/char (jitter), press Enter.
 - Later searches: direct SERP URL is acceptable (people share and open SERP URLs). `humanize: "always"`
-  forces typing every time.
+  forces typing every time; `humanize: "typing"` does the same through each engine's `typeProfile`
+  (box selector, `maxChars`, per-engine key delay). A query longer than the profile allows is **not**
+  typed: the pinned SERP URL is used instead, because a truncated query would search for something the
+  user did not ask.
+- Yandex warm-up opens `https://ya.ru/` (the `yandex.ru` portal redirects to Dzen); a landing on a host
+  the adapter does not own is reported as `fellBackReason: "home-redirect"` and served from the SERP URL.
+  The SERP host itself is unchanged.
 - After navigation: wait for the result marker (text marker, not a fixed sleep), then a small random
   scroll (300–900 px) before extracting, to trigger lazy blocks and look alive.
 - Never inject scripts via `Page.addScriptToEvaluateOnNewDocument`; use one-off `Runtime.evaluate` for
-  extraction only.
+  extraction and panel painting only.
 - Never override UA, locale, timezone, screen, WebGL, or `navigator.*`.
 
 ### 5.5 Pacing and caps (defaults, configurable)
@@ -601,7 +613,7 @@ Strict JSON; unknown keys are an error (`E_CONFIG`). Env overrides in brackets.
 {
   "mode": "attach",
   "cdp": { "ports": [9222], "ws": null, "connectTimeoutMs": 5000 },
-  "window": { "focus": "session", "reuse": true, "raiseOnPrompt": "auto" },
+  "window": { "focus": "session", "reuse": true, "raiseOnPrompt": "auto", "panel": true, "follow": "work", "idleMs": 1500 },
   "humanize": "auto",
   "engines": {
     "google":     { "enabled": true, "lang": "auto", "gl": "auto", "dailyCap": 300 },

@@ -1168,6 +1168,14 @@ const GOOGLE_INTERACTION: EngineInteraction = Object.freeze({
   marker: SERP_MARKER,
   selector: READY_SELECTOR,
   minCount: SERP_MIN_COUNT,
+  // P10-C: the box accepts long queries, but 200 code points is where the URL
+  // length starts to be rewritten by Google; above it the pinned SERP is safer
+  // than typing a query the engine silently edits.
+  typeProfile: Object.freeze({
+    box: 'textarea[name="q"]',
+    maxChars: 200,
+    keyDelayMs: Object.freeze([25, 55] as const),
+  }),
 });
 
 /**

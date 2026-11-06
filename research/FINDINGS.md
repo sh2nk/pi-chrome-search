@@ -374,3 +374,42 @@ Findings:
    second would leave the user's session unusable mid-run. The waiting state machine is therefore proven
    offline (FakeSession) and against a live silent endpoint; the real-prompt case is the one P9 already
    observed twice.
+
+## 15. P10 measurements — the managed window (2026-11-06)
+
+One session through the CDP broker (`07-cdp-broker.mjs`, single Chrome connection): six live searches
+(typed + direct per engine), fixed 1 s pacing, five free `file://` spike cases. No wall appeared.
+
+1. **`file://` is a first-class anchor.** `Target.createTarget(fileUrl, {newWindow:true})` on Chrome 157
+   returns a target already at `readyState === "complete"` with its inline script executed, so the panel can
+   be painted on the first `Runtime.evaluate`. `about:blank` + `navigate(file://…)` also works (fallback
+   shape). A `data:` URL is **not** refused (the S1 assumption was wrong) but is not used: no stable URL
+   for the doctor, different CSP semantics.
+2. **The panel paint is cheap; the throttle is what costs time.** One `Runtime.evaluate` calling
+   `window.__wcsPanel.render(state)` took 0–16 ms over the broker. The first version painted the initial
+   "session id only" state at bootstrap, which spent the 500 ms throttle window; the first search's query
+   then appeared at **561 ms**. Removing that cosmetic paint (the asset renders its own empty shell) made
+   the first stage the leading edge: **126–141 ms** to the query, measured by polling the panel from the
+   test (limit 300 ms).
+3. **The new DuckDuckGo home page has no usable search input.** `duckduckgo.com/` renders a checkbox, an
+   `aria-hidden`, zero-opacity AI-drawer trap, and five `type=hidden` metadata inputs; there is no visible
+   text field until the page turns into a SERP. `input[name="q"]`/`#searchbox_input` exist only on the
+   SERP, so the old "type on the home page" path silently fell back to the direct SERP URL on every DDG
+   search. Fix: `typeOn:"serp"` — navigate the SERP, read the prefilled box length once, clear it with
+   Backspace, retype, Enter. Live: `typed:true`, 1080 ms of keystrokes, SERP ready 936 ms.
+4. **`ya.ru` is the right warm-up; the typed landing is `ya.ru/search`, not `yandex.ru`.** Final document:
+   `https://ya.ru/search/?text=…&lr=…&search_source=yaru_desktop_common`. No `dzen.ru` landing occurred in
+   this run (the redirect branch is covered offline with a fake `dzen.example.test`). Home load 807 ms;
+   `homeHosts:["ya.ru","yandex.ru"]` keeps a redirect honest instead of typing into a portal page.
+5. **Per-engine typed cost (16-char technical query):** google home 645 ms + typing 1057 ms; ddg typing
+   1080 ms (no home load); yandex home 807 ms + typing 996 ms. SERP readiness vs the direct path:
+   +338 / +588 / +642 ms (limit 1200). The keystrokes are the deliberate part of the latency: total wall
+   delta is +1.4–2.8 s and is recorded, not gated (see `evidence/P10.md` §Deviations).
+6. **Follow `work` behaves as specified under a real compositor.** During the google search at least one
+   sample saw the engine tab `visible` and the anchor `hidden`; after `done` + 1.5 s the anchor was
+   visible again. With `follow:"never"` every 120 ms sample kept the anchor visible — no focus call. A
+   captcha wall is the one error that must **not** hand focus back: `E_WALL` announces `error` but never
+   `done`, so the surfaced wall stays in front of the user.
+7. **Yandex again needed no second navigation trick.** Settle is structural (`.OrganicTitle, .Misspell,
+   .SmartCaptcha`); both the typed `ya.ru/search` and the direct `yandex.ru/search` SERPs satisfied it, so
+   moving the warm-up host did not change extraction.

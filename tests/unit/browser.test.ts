@@ -19,10 +19,11 @@ import type { ConnectorInfo, ConnectorOptions } from "../../src/cdp/browser.ts";
 import type { CdpSession } from "../../src/cdp/session.ts";
 import type { BrowserInfo, CdpEndpoint, CdpTarget } from "../../src/cdp/types.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
-import type { Config, FocusPolicy } from "../../src/config.ts";
+import type { Config, FocusPolicy, FollowPolicy } from "../../src/config.ts";
 import type { EngineId } from "../../src/engines/types.ts";
 import { isWebSearchError, WebSearchError } from "../../src/runtime/error-codes.ts";
 import { fail } from "../../src/runtime/errors.ts";
+import { panelFileUrl } from "../../src/runtime/panel.ts";
 import type { Clock, Logger } from "../../src/runtime/types.ts";
 import { FakeClock } from "../helpers/clock.ts";
 
@@ -230,9 +231,10 @@ after(() => {
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
 });
 
-function testConfig(focus: FocusPolicy = "session"): Config {
+function testConfig(focus: FocusPolicy = "session", follow: FollowPolicy = "work"): Config {
   const config = structuredClone(DEFAULT_CONFIG);
   config.window.focus = focus;
+  config.window.follow = follow;
   return config;
 }
 
@@ -246,6 +248,12 @@ interface Rig {
 
 interface RigOptions {
   focus?: FocusPolicy;
+  /** P10-B: default `work` (the shipped default). */
+  follow?: FollowPolicy;
+  /** P10-A: default true (the shipped default). */
+  panel?: boolean;
+  /** P10-B idle hand-back, default 1500. */
+  idleMs?: number;
   session?: FakeSession;
   /** Sessions handed out in order, one per `connectSession` call (the last repeats). */
   sessions?: FakeSession[];
@@ -282,7 +290,9 @@ function rig(t: TestContext, options: RigOptions = {}): Rig {
     return picked;
   };
 
-  const config = testConfig(options.focus);
+  const config = testConfig(options.focus, options.follow);
+  if (options.panel !== undefined) config.window.panel = options.panel;
+  if (options.idleMs !== undefined) config.window.idleMs = options.idleMs;
   if (options.attachWaitMs !== undefined) config.cdp.attachWaitMs = options.attachWaitMs;
   const connectorOptions: ConnectorOptions = {
     config,
@@ -378,7 +388,7 @@ test("connect creates the lock, exactly one dedicated window and honest info", a
   assert.equal(created[0].newWindow, true);
   const bootstrapId = created[0].targetId;
   assert.ok(bootstrapId);
-  assert.equal(session.targetsById.get(bootstrapId)?.url, "about:blank");
+  assert.equal(session.targetsById.get(bootstrapId)?.url, panelFileUrl());
 
   assert.equal(statSync(lockPath).mode & 0o777, 0o600);
   const lock = readJson(lockPath);
@@ -399,7 +409,7 @@ test("connect creates the lock, exactly one dedicated window and honest info", a
   assert.deepEqual(info.ownedTargets[0], {
     targetId: bootstrapId,
     engine: null,
-    url: "about:blank",
+    url: panelFileUrl(),
   });
   assert.deepEqual(connector.ownedTargets(), [bootstrapId]);
   assert.equal(connector.lockPath(), lockPath);
@@ -1187,4 +1197,165 @@ test("P11: the awaiting hint names the detected browser family, not always Chrom
   const error = await rejectsWithCode(connector.connect(), "E_CDP_UNAVAILABLE");
   assert.match(error.details.hint, /brave:\/\/inspect/);
   assert.doesNotMatch(error.details.hint, /chrome:\/\/inspect/);
+});
+
+// ---------------------------------------------------------------------------
+// P10: anchor panel and follow-focus
+// ---------------------------------------------------------------------------
+
+/** `announce` is optional on the frozen connector; the browser one always has it. */
+function announcer(connector: ReturnType<typeof createConnector>) {
+  const announce = connector.announce;
+  assert.ok(announce !== undefined, "the browser connector announces stages");
+  return announce.bind(connector);
+}
+
+/** Let a `.then` scheduled by an auto-advancing sleep run. */
+async function settleMicrotasks(): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+test("P10-A: the anchor is the local panel and a stage paints the query into it", async (t) => {
+  const { connector, session } = rig(t);
+  const announce = announcer(connector);
+  await connector.connect();
+
+  const anchorId = createTargets(session)[0]?.targetId;
+  assert.ok(anchorId !== undefined);
+  assert.ok(anchorId);
+  const url = session.targetsById.get(anchorId)?.url ?? "";
+  assert.equal(url, panelFileUrl());
+  assert.match(url, /^file:\/\//, "a local asset, never a network page");
+  assert.match(url, /assets\/anchor\.html$/);
+
+  session.expressions.length = 0;
+  await announce({ engine: "google", query: "rust tokio select", stage: "pace", pace: [2500, 5000] });
+
+  const painted = session.expressions.filter((expression) => expression.includes("__wcsPanel"));
+  assert.equal(painted.length, 1, "one throttled paint for one stage");
+  const expression = painted[0] ?? "";
+  assert.ok(expression.includes("rust tokio select"), "the query is what the panel shows");
+  assert.ok(expression.includes("google"));
+  assert.ok(expression.includes("pace"));
+  assert.equal(connector.anchorPage?.()?.url(), panelFileUrl());
+});
+
+test("P10-A: window.panel:false keeps about:blank and paints nothing", async (t) => {
+  const { connector, session } = rig(t, { panel: false });
+  const announce = announcer(connector);
+  await connector.connect();
+
+  const anchorId = createTargets(session)[0]?.targetId;
+  assert.ok(anchorId !== undefined);
+  assert.equal(session.targetsById.get(anchorId)?.url, "about:blank");
+  await announce({ engine: "google", query: "q", stage: "navigate" });
+  assert.equal(
+    session.expressions.filter((expression) => expression.includes("__wcsPanel")).length,
+    0,
+    "the disabled panel is not even evaluated",
+  );
+});
+
+test("P10-B: follow 'work' raises the engine tab, then the anchor after idleMs", async (t) => {
+  const { connector, session } = rig(t, { idleMs: 1500 });
+  const announce = announcer(connector);
+  await connector.connect();
+  await connector.acquirePage("google");
+
+  const created = createTargets(session);
+  const anchorId = created[0]?.targetId;
+  const engineId = created[1]?.targetId;
+  assert.ok(anchorId && engineId);
+
+  session.focused.length = 0;
+  await announce({ engine: "google", query: "q", stage: "navigate" });
+  assert.deepEqual(session.focused, [engineId], "the work is what the user should watch");
+
+  await announce({ engine: "google", stage: "done" });
+  await settleMicrotasks();
+  assert.equal(session.focused.at(-1), anchorId, "the panel comes back after the idle window");
+  assert.equal(session.focused.filter((id) => id === anchorId).length, 1);
+});
+
+test("P10-B: follow 'never' adds no focus call at all (the pre-P10 behaviour)", async (t) => {
+  const { connector, session } = rig(t, { follow: "never" });
+  const announce = announcer(connector);
+  await connector.connect();
+  await connector.acquirePage("google");
+  session.focused.length = 0;
+
+  await announce({ engine: "google", query: "q", stage: "navigate" });
+  await announce({ engine: "google", stage: "done" });
+  await settleMicrotasks();
+
+  assert.deepEqual(session.focused, [], "a presenting user must never see the window move");
+  // The panel still updates: information is not focus.
+  assert.ok(session.expressions.some((expression) => expression.includes("__wcsPanel")));
+});
+
+test("P10-B: follow 'anchor' keeps the panel visible during work", async (t) => {
+  const { connector, session } = rig(t, { follow: "anchor" });
+  const announce = announcer(connector);
+  await connector.connect();
+  await connector.acquirePage("google");
+  const anchorId = createTargets(session)[0]?.targetId;
+  assert.ok(anchorId !== undefined);
+  session.focused.length = 0;
+
+  await announce({ engine: "google", query: "q", stage: "navigate" });
+  assert.deepEqual(session.focused, [anchorId], "an anchor-following run shows the panel");
+});
+
+test("P10-B: window.focus 'never' dominates follow, and announce never connects", async (t) => {
+  const { connector, session } = rig(t, { focus: "never", follow: "work" });
+  const announce = announcer(connector);
+
+  // Before connect the announcement must be a no-op, not a connection attempt.
+  await announce({ engine: "google", query: "q", stage: "navigate" });
+  assert.equal(createTargets(session).length, 0);
+
+  await connector.connect();
+  await connector.acquirePage("google");
+  session.focused.length = 0;
+  await announce({ engine: "google", query: "q", stage: "navigate" });
+  await announce({ engine: "google", stage: "done" });
+  await settleMicrotasks();
+  assert.deepEqual(session.focused, []);
+});
+
+test("P10-B: an error never steals focus back from a captcha wall", async (t) => {
+  const { connector, session } = rig(t, { idleMs: 0 });
+  const announce = announcer(connector);
+  await connector.connect();
+  await connector.acquirePage("google");
+  const created = createTargets(session);
+  const anchorId = created[0]?.targetId;
+  assert.ok(anchorId !== undefined);
+  session.focused.length = 0;
+
+  await announce({ engine: "google", query: "walled", stage: "navigate" });
+  await announce({ engine: "google", stage: "error", error: { code: "E_WALL" } });
+  await settleMicrotasks();
+
+  assert.ok(!session.focused.includes(anchorId), "the user must keep the walled tab");
+});
+
+test("P10-B: a newer stage cancels the pending idle hand-back", async (t) => {
+  const clock = new FakeClock({ autoAdvance: false });
+  const { connector, session } = rig(t, { clock, idleMs: 1500 });
+  const announce = announcer(connector);
+  await connector.connect();
+  await connector.acquirePage("google");
+  const created = createTargets(session);
+  const anchorId = created[0]?.targetId;
+  assert.ok(anchorId !== undefined);
+  session.focused.length = 0;
+
+  await announce({ engine: "google", query: "q", stage: "navigate" });
+  await announce({ engine: "google", stage: "done" });
+  await announce({ engine: "google", query: "q2", stage: "navigate" });
+
+  clock.advance(2000);
+  await settleMicrotasks();
+  assert.ok(!session.focused.includes(anchorId), "a new stage must keep the work tab up");
 });

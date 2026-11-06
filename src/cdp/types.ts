@@ -4,6 +4,7 @@
  */
 
 import type { EngineId } from "../engines/types.ts";
+import type { WorkAnnouncement } from "../runtime/panel.ts";
 
 export interface NavigateOptions {
   timeoutMs?: number;
@@ -109,4 +110,11 @@ export interface CdpConnector {
   releaseAll(): Promise<void>;
   isConnected(): boolean;
   endpoint(): CdpEndpoint | null;
+  /**
+   * P10-A/B: report a stage to the owned anchor and apply `window.follow`.
+   * Optional so offline fakes need nothing; a connector without it simply has no
+   * panel and no follow behaviour. Best effort by contract: it never throws a
+   * search failure for a cosmetic paint or a focus call.
+   */
+  announce?(update: WorkAnnouncement): Promise<void>;
 }

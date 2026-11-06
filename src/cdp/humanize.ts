@@ -15,7 +15,7 @@
  */
 
 import type { NavigateOptions, CdpPage } from "./types.ts";
-import type { EngineId } from "../engines/types.ts";
+import type { EngineId, EngineTypeProfile } from "../engines/types.ts";
 import type { Clock } from "../runtime/types.ts";
 import { fail, toFailure } from "../runtime/errors.ts";
 import { systemClock } from "../runtime/clock.ts";
@@ -77,9 +77,20 @@ export interface HumanSearchOptions {
   marker: string;
   selector?: string;
   engine: EngineId;
-  mode: "auto" | "always";
+  /**
+   * `typing` (P10-C) types every search of every engine, `always` keeps the
+   * pre-P10 "every search" meaning without a profile, and `auto` types only the
+   * first search of the session.
+   */
+  mode: "auto" | "always" | "typing";
   firstInSession: boolean;
   focus: "session" | "always" | "never";
+  /** Hosts a `homeUrl` navigation may land on; outside them means a redirect (P10-D). */
+  homeHosts?: readonly string[];
+  /** Per-engine box/delay/limit for `mode: "typing"` (P10-C). */
+  typeProfile?: EngineTypeProfile;
+  /** Start the typed path at the engine home (`home`, default) or on the SERP (`serp`). */
+  typeOn?: "home" | "serp";
   deadlineMs?: number;
   pollMs?: number;
   clock?: Clock;
@@ -95,8 +106,8 @@ export interface HumanSearchResult {
    */
   typed: boolean;
   /**
-   * Whether this call selected the typed path (`mode:"always"` or the first
-   * search of the session), even when it degraded to the SERP fallback.
+   * Whether this call selected the typed path (`mode:"typing"`, `"always"` or
+   * the first search of the session), even when it degraded to the SERP fallback.
    */
   typedPath: boolean;
   /** True only when this call actually called `bringToFront`. */
@@ -105,8 +116,16 @@ export interface HumanSearchResult {
   settleMs: number;
   /** Pixels scrolled before extraction. */
   scrollPx: number;
-  /** True when the box never appeared and we navigated the SERP URL instead. */
+  /** True when the box never appeared, the query was too long, or home redirected. */
   fellBackToSerp: boolean;
+  /** Why the typed path was not used, when it wasn't. */
+  fellBackReason?: "box-missing" | "query-too-long" | "home-redirect";
+  /** Host the home navigation actually landed on when it was the wrong one. */
+  homeRedirectHost?: string;
+  /** Time the home navigation cost (0 on the fast path). */
+  homeMs: number;
+  /** Time spent clicking, typing and submitting (0 when nothing was typed). */
+  typeMs: number;
 }
 
 export interface HumanScrollOptions {
@@ -321,13 +340,79 @@ function shouldFocus(policy: HumanSearchOptions["focus"], firstInSession: boolea
   }
 }
 
+/** Code points, not UTF-16 units: an emoji must not count as two characters. */
+function queryLength(query: string): number {
+  return [...query].length;
+}
+
+function hostOf(url: string): string | null {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === "" ? null : host;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is this landing one of the engine's own host names? A `dzen.ru` landing after
+ * `yandex.ru`/`ya.ru` is a redirect, not a home page (P10-D); a URL we cannot
+ * parse is accepted, because guessing a redirect from garbage would be a lie.
+ */
+function homeAccepted(url: string, hosts: readonly string[] | undefined): boolean {
+  if (hosts === undefined || hosts.length === 0) return true;
+  const host = hostOf(url);
+  if (host === null) return true;
+  return hosts.some((candidate) => host === candidate || host.endsWith(`.${candidate}`));
+}
+
+/** Profile delays, clamped to a pace a real keyboard could produce. */
+function typeDelays(profile: EngineTypeProfile | undefined): { minMs: number; maxMs: number } {
+  const raw = profile?.keyDelayMs;
+  if (raw === undefined) return { minMs: TYPE_MIN_MS, maxMs: TYPE_MAX_MS };
+  const min = Math.min(250, Math.max(5, Math.round(raw[0])));
+  const max = Math.max(min, Math.min(250, Math.round(raw[1])));
+  return { minMs: min, maxMs: max };
+}
+
+/** How many characters the engine prefilled into the SERP box (read-only). */
+async function boxValueLength(page: CdpPage, selector: string): Promise<number> {
+  try {
+    const raw = await page.evaluate<unknown>(
+      `(() => { const el = document.querySelector(${literal(selector)}); ` +
+        `return el && typeof el.value === "string" ? el.value.length : 0; })()`,
+    );
+    if (typeof raw !== "number" || !Number.isFinite(raw)) return 0;
+    // A hostile/odd value must not turn into a thousand key presses.
+    return Math.min(500, Math.max(0, Math.floor(raw)));
+  } catch {
+    return 0;
+  }
+}
+
+/** Box candidates in profile-first order, without duplicates. */
+function boxCandidates(selectors: readonly string[], profile: EngineTypeProfile | undefined): string[] {
+  const ordered: string[] = [];
+  for (const selector of [profile?.box, ...selectors]) {
+    if (typeof selector !== "string" || selector === "" || ordered.includes(selector)) continue;
+    ordered.push(selector);
+  }
+  return ordered;
+}
+
 /**
  * One search, human-shaped.
  *
- * Typed path (`mode:"always"` or the first search of the session): open the
- * engine home, click the box, type at 30–80 ms/char with jitter, press Enter.
+ * Typed path (`mode:"typing"`, `mode:"always"` or the first search of the
+ * session): open the engine home, click the box, type with jitter, press Enter.
  * Pressing Enter (rather than building a SERP URL) is why the browser sends the
  * same request a person would, from the same meaningful referrer chain.
+ *
+ * Three ways the typed path degrades — all honest, all reported in the result:
+ * the box never appeared (`box-missing`), the query is longer than the engine's
+ * box accepts (`query-too-long`; typing a truncated query would search for
+ * something the user did not ask), or the home navigation landed on a host the
+ * engine does not own (`home-redirect`, e.g. Yandex → Dzen, P10-D).
  *
  * Fast path: a direct SERP URL, which people share and reopen all the time.
  *
@@ -342,10 +427,14 @@ export async function humanSearch(opts: HumanSearchOptions): Promise<HumanSearch
   const signal = opts.signal;
   const deadlineMs = normalizeDeadline(opts.deadlineMs);
   const pollMs = normalizePoll(opts.pollMs);
-  const typedPath = opts.mode === "always" || opts.firstInSession;
+  const typedPath = opts.mode === "typing" || opts.mode === "always" || opts.firstInSession;
+  const profile = opts.typeProfile;
+  const tooLong = profile !== undefined && queryLength(opts.query) > profile.maxChars;
   // Actual keystrokes, set only once `typeText` ran: the fallback below must not
   // report a typed search it never typed.
   let typed = false;
+  let homeMs = 0;
+  let typeMs = 0;
   const focused = shouldFocus(opts.focus, opts.firstInSession);
   let stage: Stage = "navigate";
 
@@ -356,11 +445,25 @@ export async function humanSearch(opts: HumanSearchOptions): Promise<HumanSearch
     if (focused) await page.bringToFront();
 
     let fellBackToSerp = false;
-    if (typedPath) {
-      await page.navigate(opts.homeUrl, navigateOptions(signal));
+    let fellBackReason: HumanSearchResult["fellBackReason"];
+    let homeRedirectHost: string | undefined;
+
+    if (!typedPath) {
+      await page.navigate(opts.serpUrl, navigateOptions(signal));
+    } else if (tooLong) {
+      // The box would silently truncate (or the engine would rewrite) the query.
+      fellBackToSerp = true;
+      fellBackReason = "query-too-long";
+      await page.navigate(opts.serpUrl, navigateOptions(signal));
+    } else if (opts.typeOn === "serp") {
+      // The engine home page has no usable box (DuckDuckGo 2026-11): open the
+      // SERP the way the fast path would and retype its prefilled query. This is
+      // a person refining a search, and it keeps the typed path free of an extra
+      // home-page load.
+      await page.navigate(opts.serpUrl, navigateOptions(signal));
       const box = await waitForBox(
         page,
-        opts.boxSelectors,
+        boxCandidates(opts.boxSelectors, profile),
         Math.min(deadlineMs, BOX_DEADLINE_MS),
         pollMs,
         clock,
@@ -368,22 +471,72 @@ export async function humanSearch(opts: HumanSearchOptions): Promise<HumanSearch
         signal,
       );
       if (box === null) {
-        // Consent walls and layout changes keep the box away; the SERP URL is
-        // still a legitimate human entry point, and the tool layer logs the flag.
+        // Already on the SERP: nothing to navigate, and the direct page is usable.
         fellBackToSerp = true;
-        await page.navigate(opts.serpUrl, navigateOptions(signal));
+        fellBackReason = "box-missing";
       } else {
         throwIfAborted(signal, stage, engine);
+        const typingStart = clock.now();
         await page.click(box);
-        await page.typeText(opts.query, { minMs: TYPE_MIN_MS, maxMs: TYPE_MAX_MS });
+        const prefilled = await boxValueLength(page, box);
+        for (let index = 0; index < prefilled; index += 1) {
+          throwIfAborted(signal, stage, engine);
+          await page.press("Backspace");
+        }
+        const { minMs, maxMs } = typeDelays(profile);
+        await page.typeText(opts.query, { minMs, maxMs });
         typed = true;
-        // Typing is a page call without a signal; an abort that landed mid-query
-        // must not submit a half-typed search.
         throwIfAborted(signal, stage, engine);
         await page.press("Enter");
+        typeMs = Math.max(0, clock.now() - typingStart);
       }
     } else {
-      await page.navigate(opts.serpUrl, navigateOptions(signal));
+      const homeStart = clock.now();
+      await page.navigate(opts.homeUrl, navigateOptions(signal));
+      homeMs = Math.max(0, clock.now() - homeStart);
+
+      let landed = page.url();
+      try {
+        landed = await page.currentUrl();
+      } catch {
+        // The cached URL is the best available answer; a failed probe is not a redirect.
+      }
+      if (!homeAccepted(landed, opts.homeHosts)) {
+        // Yandex warm-up can land on Dzen; the SERP URL is still a human entry.
+        fellBackToSerp = true;
+        fellBackReason = "home-redirect";
+        homeRedirectHost = hostOf(landed) ?? undefined;
+        await page.navigate(opts.serpUrl, navigateOptions(signal));
+      } else {
+        const box = await waitForBox(
+          page,
+          boxCandidates(opts.boxSelectors, profile),
+          Math.min(deadlineMs, BOX_DEADLINE_MS),
+          pollMs,
+          clock,
+          rng,
+          signal,
+        );
+        if (box === null) {
+          // Consent walls and layout changes keep the box away; the SERP URL is
+          // still a legitimate human entry point, and the tool layer logs the flag.
+          fellBackToSerp = true;
+          fellBackReason = "box-missing";
+          await page.navigate(opts.serpUrl, navigateOptions(signal));
+        } else {
+          throwIfAborted(signal, stage, engine);
+          const typingStart = clock.now();
+          await page.click(box);
+          const { minMs, maxMs } = typeDelays(profile);
+          await page.typeText(opts.query, { minMs, maxMs });
+          typed = true;
+          // Typing is a page call without a signal; an abort that landed mid-query
+          // must not submit a half-typed search.
+          throwIfAborted(signal, stage, engine);
+          await page.press("Enter");
+          typeMs = Math.max(0, clock.now() - typingStart);
+        }
+      }
     }
 
     stage = "settle";
@@ -404,7 +557,18 @@ export async function humanSearch(opts: HumanSearchOptions): Promise<HumanSearch
       ...(signal === undefined ? {} : { signal }),
     });
 
-    return { typed, typedPath, focused, settleMs, scrollPx, fellBackToSerp };
+    return {
+      typed,
+      typedPath,
+      focused,
+      settleMs,
+      scrollPx,
+      fellBackToSerp,
+      ...(fellBackReason === undefined ? {} : { fellBackReason }),
+      ...(homeRedirectHost === undefined ? {} : { homeRedirectHost }),
+      homeMs,
+      typeMs,
+    };
   } catch (error) {
     throw asFailure(error, stage, engine);
   }

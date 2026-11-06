@@ -642,8 +642,15 @@ test("engine metadata: id, retryOnWall and the interaction contract", () => {
   assert.equal(yandexEngine.retryOnWall, true);
   const interaction = yandexEngine.interaction;
   assert.ok(interaction !== undefined);
-  assert.equal(interaction.homeUrl, "https://yandex.ru/");
+  assert.equal(interaction.homeUrl, "https://ya.ru/");
+  // P10-D: the warm-up may land on ya.ru or yandex.ru (a redirect to Dzen is a
+  // fallback signal, not an engine home).
+  assert.deepEqual([...interaction.homeHosts ?? []], ["ya.ru", "yandex.ru"]);
   assert.deepEqual([...interaction.boxSelectors], ["#text", 'input[name="text"]', 'textarea[name="text"]']);
+  // P10-C: the typing profile names the live box and the per-engine pace.
+  assert.equal(interaction.typeProfile?.box, "#text");
+  assert.equal(interaction.typeProfile?.maxChars, 300);
+  assert.deepEqual([...(interaction.typeProfile?.keyDelayMs ?? [])], [25, 60]);
   // Deliberate: see the YANDEX_READY_SELECTOR comment — no text is unique to a
   // settled SERP, so the structural gate carries settle and minCount protects it.
   assert.equal(interaction.marker, "");

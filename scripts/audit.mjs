@@ -1482,15 +1482,62 @@ function checkPackaging(root, store, files) {
     }
   }
 
+  // P10-A: the anchor panel is a shipped, local-only asset. It is loaded with
+  // `pathToFileURL(assets/anchor.html)`, so (a) the tarball must carry it, and
+  // (b) it must not reach the network — a panel that loads a tracker would put
+  // every stage in a third party's log. Checked only when the asset is tracked,
+  // so a pre-P10 fixture manifest is not failed for a file it never had.
+  const anchorAsset = "assets/anchor.html";
+  if (files.includes(anchorAsset)) {
+    const anchorText = readRepoText(root, store, anchorAsset);
+    const anchorLine = (match) => {
+      const index = anchorText == null ? -1 : anchorText.indexOf(match);
+      return index < 0 ? 0 : lineOf(anchorText, index);
+    };
+    if (anchorText == null) {
+      add(0, `tracked \`${anchorAsset}\` is unreadable`, "the anchor is loaded from the tarball; ship a readable asset");
+    } else {
+      if (!declared.some((entry) => typeof entry === "string" && filesEntryCovers(entry, anchorAsset))) {
+        add(packageKeyLine(text, "files"), `\`${anchorAsset}\` is not covered by \`files\``,
+          "the bootstrap tab navigates to this asset; a tarball without it leaves the anchor broken");
+      }
+      const network = /(?:https?:)?\/\/[a-z0-9.-]+\.[a-z]{2,}/i.exec(anchorText);
+      if (network !== null) {
+        findings.push({
+          file: anchorAsset,
+          line: anchorLine(network[0]),
+          match: network[0],
+          hint: "the anchor must work offline: no external URL, no remote font/script/image",
+        });
+      }
+      if (!/Content-Security-Policy/.test(anchorText) || !/default-src 'none'/.test(anchorText)) {
+        findings.push({
+          file: anchorAsset,
+          line: 1,
+          match: "missing CSP default-src 'none'",
+          hint: "the panel is a local document; its CSP is what keeps it local",
+        });
+      }
+      if (/\b(?:src|href)\s*=\s*["']?(?:\.\.?\/|[a-z0-9_-]+\/)/i.test(anchorText)) {
+        findings.push({
+          file: anchorAsset,
+          line: 1,
+          match: "relative resource reference",
+          hint: "a file:// panel resolves resources from the package tree; keep it self-contained",
+        });
+      }
+    }
+  }
+
   notes.push(
     "static check: `npm pack` is not spawned (it runs lifecycle scripts and walks the whole tree); " +
       "the model is the `files` allowlist, and V7.1's `npm pack --dry-run --json` is authoritative",
   );
   notes.push(
     `enforced: name, semver version, license, no preinstall/postinstall, files entries limited to shipped paths, ` +
-      `pi.extensions coverage; never shippable: ${PACK_FORBIDDEN_PREFIXES.join(", ")}, .env*, *fixture*, *.html.gz`,
+      `pi.extensions coverage, the local-only anchor asset; never shippable: ${PACK_FORBIDDEN_PREFIXES.join(", ")}, .env*, *fixture*, *.html.gz`,
   );
-  notes.push("exercised by `node scripts/audit.mjs --self-test` (sane/broken/wildcard/fixture-smuggling manifests)");
+  notes.push("exercised by `node scripts/audit.mjs --self-test` (sane/broken/wildcard/fixture-smuggling manifests, local-only anchor)");
 
   return { findings, files: 1, notes };
 }
@@ -2199,6 +2246,48 @@ const SELF_TEST_CASES = [
           report.checks
             .find((check) => check.id === "R3")
             .findings.some((finding) => finding.file === "src/cdp/leak.ts" && /process\.kill/.test(finding.match)),
+      },
+    ],
+  },
+  {
+    name: "packaging anchor is local-only",
+    files: {
+      "package.json": JSON.stringify({
+        name: "audit-pack-anchor",
+        version: "0.1.0",
+        license: "MIT",
+        files: ["src/", "assets/"],
+        pi: { extensions: ["./src/index.ts"] },
+      }, null, 2),
+      "src/index.ts": "export const ok = true;\n",
+      "assets/anchor.html": '<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'"><p id="q"></p>\n',
+    },
+    expect: [{ check: "R12", max: 0, label: "a shipped, offline, CSP-carrying anchor" }],
+  },
+  {
+    name: "packaging anchor reaches the network",
+    files: {
+      "package.json": JSON.stringify({
+        name: "audit-pack-anchor-bad",
+        version: "0.1.0",
+        license: "MIT",
+        files: ["src/"],
+        pi: { extensions: ["./src/index.ts"] },
+      }, null, 2),
+      "src/index.ts": "export const ok = true;\n",
+      "assets/anchor.html": '<html><body><img src="https://tracker.example/pixel.png"><link href="assets/x.css"></body></html>\n',
+    },
+    expect: [
+      { check: "R12", min: 2, label: "remote URL and a missing CSP" },
+      { check: "R12", min: 3, label: "the anchor is not covered by `files` either" },
+    ],
+    guards: [
+      {
+        label: "the network URL is named with its file and line",
+        run: (report) =>
+          report.checks
+            .find((check) => check.id === "R12")
+            .findings.some((finding) => finding.file === "assets/anchor.html" && finding.match.includes("tracker.example")),
       },
     ],
   },

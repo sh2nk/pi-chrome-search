@@ -28,7 +28,7 @@
 
 import { Type, type Static } from "typebox";
 
-import { humanSearch } from "../cdp/humanize.ts";
+import { humanSearch, type HumanSearchResult } from "../cdp/humanize.ts";
 import { waitForAi, type AiWaitResult } from "../cdp/ai-wait.ts";
 import type { CdpPage } from "../cdp/types.ts";
 import type { Config } from "../config.ts";
@@ -53,6 +53,8 @@ import { isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, renderToolFailure, toFailure } from "../runtime/errors.ts";
 import type { FailureFallback, FailureJson, ToolTextBlock } from "../runtime/errors.ts";
 import { saveFailureArtifact } from "../runtime/artifacts.ts";
+import type { PanelCounter, WorkAnnouncement } from "../runtime/panel.ts";
+import type { Clock } from "../runtime/types.ts";
 import type { ToolDeps } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -84,6 +86,22 @@ export const webSearchSchema = Type.Object({
 });
 
 export type WebSearchInput = Static<typeof webSearchSchema>;
+
+/**
+ * P10: what the human-shaped navigation actually did. Optional because a cache
+ * hit never navigates and a merged route has one answer per engine.
+ */
+export interface HumanRunDetails {
+  engine: EngineId;
+  typed: boolean;
+  typedPath: boolean;
+  fellBackToSerp: boolean;
+  fellBackReason?: HumanSearchResult["fellBackReason"];
+  homeRedirectHost?: string;
+  homeMs: number;
+  typeMs: number;
+  settleMs: number;
+}
 
 /** The serializable `details` object pi shows next to the text block. */
 export interface WebSearchDetails {
@@ -118,6 +136,14 @@ export interface WebSearchDetails {
    */
   perEngine?: Record<string, number>;
   failedEngines?: Partial<Record<EngineId, string>>;
+  /** P10: typed-path facts for a single-engine search; absent on cache hits. */
+  human?: HumanRunDetails;
+  /**
+   * Time from the SERP request to the result marker (summed across engines).
+   * P10 measures the typed path's *page* cost against the direct one with this:
+   * keystroke time is deliberate human work, not search latency.
+   */
+  settleMs?: number;
 }
 
 export interface WebSearchSuccess {
@@ -633,20 +659,48 @@ function serializeJsonWithin(data: Record<string, unknown>, maxChars: number): J
   };
 }
 
+/** P10: daily counters for the anchor panel. A limiter without stats must not fail a search. */
+function panelCounters(deps: ToolDeps): PanelCounter[] {
+  const counters: PanelCounter[] = [];
+  for (const id of ENGINE_IDS) {
+    try {
+      const stats = deps.limiter.stats(id);
+      counters.push({ engine: id, today: stats.today, cap: stats.dailyCap });
+    } catch {
+      // Observability only: the panel shows what it can.
+    }
+  }
+  return counters;
+}
+
+/** P10: announce a stage, swallowing transport-level surprises (the panel is an instrument). */
+async function announceStage(deps: ToolDeps, update: WorkAnnouncement): Promise<void> {
+  const announce = deps.cdp.announce;
+  if (announce === undefined) return;
+  try {
+    await announce.call(deps.cdp, update);
+  } catch {
+    // A dead anchor tab must never turn into a failed search.
+  }
+}
+
 async function navigateAndSettle(
   page: CdpPage,
   engine: Engine,
   query: Query,
   signal: AbortSignal | undefined,
-): Promise<void> {
+  clock?: Clock,
+): Promise<number> {
   const url = engine.buildUrl(query);
   try {
     await page.navigate(url, signal === undefined ? {} : { signal });
   } catch (error) {
     throw asFailure(error, "navigate", engine.id, signal);
   }
+  const settleStart = clock?.now();
   try {
     await engine.settle(page, signal);
+    return settleStart === undefined ? 0 : Math.max(0, (clock?.now() ?? settleStart) - settleStart);
   } catch (error) {
     throw asFailure(error, "settle", engine.id, signal);
   }
@@ -973,7 +1027,19 @@ async function runEngine(
   deps: ToolDeps,
   firstUse: Set<EngineId>,
   signal: AbortSignal | undefined,
+  onHuman?: (human: HumanSearchResult) => void,
 ): Promise<RawSerp> {
+  const pacing = deps.config.pacing[engine.id];
+  // P10-A: the query reaches the anchor before the pacing sleep, so the panel
+  // shows what is about to happen even when the limiter waits for seconds.
+  await announceStage(deps, {
+    engine: engine.id,
+    query: query.text,
+    stage: "pace",
+    pace: pacing,
+    counters: panelCounters(deps),
+  });
+
   try {
     await deps.limiter.acquire(engine.id, signal);
   } catch (error) {
@@ -989,7 +1055,17 @@ async function runEngine(
 
   const firstInSession = !firstUse.has(engine.id);
   const interaction = engine.interaction;
-  const useHuman = interaction !== undefined && (firstInSession || deps.config.humanize === "always");
+  const useHuman = interaction !== undefined && (firstInSession || deps.config.humanize !== "auto");
+
+  // The tab exists now: this is the first stage that can raise it under
+  // `window.follow: "work"`. The panel also gets the fresh daily counters.
+  await announceStage(deps, {
+    engine: engine.id,
+    query: query.text,
+    stage: "navigate",
+    pace: pacing,
+    counters: panelCounters(deps),
+  });
 
   /**
    * A wall page often does not satisfy the adapter's "results are ready" gate
@@ -1027,9 +1103,11 @@ async function runEngine(
     throw wallFailure(engine.id, wall, artifact);
   };
 
+  /** P10: measured page-ready time, from the request to the marker. */
+  let measuredSettleMs = 0;
   if (useHuman && interaction !== undefined) {
     try {
-      await humanSearch({
+      const human = await humanSearch({
         page,
         query: query.text,
         homeUrl: interaction.homeUrl,
@@ -1042,8 +1120,27 @@ async function runEngine(
         mode: deps.config.humanize,
         firstInSession,
         focus: deps.config.window.focus,
+        ...(interaction.homeHosts === undefined ? {} : { homeHosts: interaction.homeHosts }),
+        ...(interaction.typeProfile === undefined ? {} : { typeProfile: interaction.typeProfile }),
+        ...(interaction.typeOn === undefined ? {} : { typeOn: interaction.typeOn }),
         clock: deps.clock,
         ...(signal === undefined ? {} : { signal }),
+      });
+      onHuman?.(human);
+      measuredSettleMs = human.settleMs;
+      // P10: the typed-path facts belong in the log even when the live gate is
+      // not watching: `typed` is what proves the box path really ran.
+      void deps.log.write({
+        kind: "human_search",
+        engine: engine.id,
+        typed: human.typed,
+        typedPath: human.typedPath,
+        fellBackToSerp: human.fellBackToSerp,
+        ...(human.fellBackReason === undefined ? {} : { fellBackReason: human.fellBackReason }),
+        ...(human.homeRedirectHost === undefined ? {} : { homeRedirectHost: human.homeRedirectHost }),
+        homeMs: human.homeMs,
+        typeMs: human.typeMs,
+        settleMs: human.settleMs,
       });
     } catch (error) {
       const failure = asFailure(error, "navigate", engine.id, signal);
@@ -1053,7 +1150,7 @@ async function runEngine(
     }
   } else {
     try {
-      await navigateAndSettle(page, engine, query, signal);
+      measuredSettleMs = await navigateAndSettle(page, engine, query, signal, deps.clock);
     } catch (error) {
       const failure = asFailure(error, "navigate", engine.id, signal);
       const wall = await wallOnNavigationFailure(failure.details);
@@ -1116,6 +1213,7 @@ async function runEngine(
   // PLAN-v2 P8-A: wait for the native summary *before* extracting. Bounded by
   // `search.aiWaitMs`, and skipped entirely by `summary:false` and by adapters
   // without a probe — a wait nobody asked for is pure latency.
+  await announceStage(deps, { engine: engine.id, stage: "extract" });
   let aiWait: AiWaitResult | undefined;
   if (query.summary === true && engine.ai !== undefined) {
     // A visible expand is opt-in (`search.aiExpand`) because it is a real click
@@ -1195,6 +1293,7 @@ async function runEngine(
   if (aiWait !== undefined) {
     serp.timings = { ...serp.timings, aiWaitMs: aiWait.waitMs };
   }
+  if (measuredSettleMs > 0) serp.timings = { ...serp.timings, settleMs: measuredSettleMs };
   await resolveGotoResults(page, serp, deps, signal);
 
   // A SERP with zero organic results is a failed search, not an empty success:
@@ -1307,6 +1406,8 @@ export function createWebSearchTool(
     // Only engines that actually produced a SERP (fresh or cached) are reported.
     const serps: RawSerp[] = [];
     let cachedAny = false;
+    /** P10: only a single-engine search has one unambiguous typed-path record. */
+    let humanRun: HumanRunDetails | undefined;
     let firstFailure: ReturnType<typeof fail> | undefined;
     /** P9-D: failures inside a merged route are reported, not silently swallowed. */
     const failed: Partial<Record<EngineId, string>> = {};
@@ -1350,12 +1451,50 @@ export function createWebSearchTool(
 
       await notifySearching(update, id);
       try {
-        serps.push(await runEngine(engine, query, key, deps, firstUse, signal));
+        const single = order.length === 1;
+        serps.push(
+          await runEngine(
+            engine,
+            query,
+            key,
+            deps,
+            firstUse,
+            signal,
+            single
+              ? (human) => {
+                  humanRun = {
+                    engine: id,
+                    typed: human.typed,
+                    typedPath: human.typedPath,
+                    fellBackToSerp: human.fellBackToSerp,
+                    ...(human.fellBackReason === undefined
+                      ? {}
+                      : { fellBackReason: human.fellBackReason }),
+                    ...(human.homeRedirectHost === undefined
+                      ? {}
+                      : { homeRedirectHost: human.homeRedirectHost }),
+                    homeMs: human.homeMs,
+                    typeMs: human.typeMs,
+                    settleMs: human.settleMs,
+                  };
+                }
+              : undefined,
+          ),
+        );
+        await announceStage(deps, { engine: id, stage: "done" });
         // D10: stop at the first success in auto mode; only an explicit list (or
         // a multi-engine route) merges.
         if (!merge) break;
       } catch (error) {
         const failure = asFailure(error, "extract", id, signal);
+        await announceStage(deps, {
+          engine: id,
+          stage: "error",
+          error: { code: failure.details.code, ...(failure.details.hint === undefined ? {} : { hint: failure.details.hint }) },
+        });
+        // A wall keeps the work tab surfaced for the user to solve; every other
+        // failure hands the screen back to the panel.
+        if (failure.details.code !== "E_WALL") await announceStage(deps, { engine: id, stage: "done" });
         firstFailure ??= failure;
         if (!FALLBACK_CODES.has(failure.details.code)) return failureResult(failure);
         if (merge) failed[id] = failure.details.code;
@@ -1416,6 +1555,7 @@ export function createWebSearchTool(
           : "none";
     const aiChars = json === null ? compact.aiChars : json.aiChars;
     const aiWaitMs = refined.reduce((sum, serp) => sum + (serp.timings.aiWaitMs ?? 0), 0);
+    const settleMs = refined.reduce((sum, serp) => sum + (serp.timings.settleMs ?? 0), 0);
     const accounting =
       json === null ? compact.data.perEngine : json.perEngine;
     const details: WebSearchDetails = {
@@ -1434,6 +1574,8 @@ export function createWebSearchTool(
       ...(compact.degraded ? { degraded: true } : {}),
       ...(isPerEngineCounts(accounting) ? { perEngine: accounting } : {}),
       ...(Object.keys(failed).length === 0 ? {} : { failedEngines: { ...failed } }),
+      ...(humanRun === undefined ? {} : { human: humanRun }),
+      ...(settleMs <= 0 ? {} : { settleMs }),
     };
 
     // One row per search (SPEC §9.3 observability): the AI verdict and the wait

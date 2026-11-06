@@ -162,3 +162,30 @@ test("config path honours PI_CODING_AGENT_DIR", () => {
   );
   assert.match(resolveConfigPath({}), /\.pi\/agent\/web-search\.json$/);
 });
+
+// ---------------------------------------------------------------------------
+// P10 config (additive: panel, follow, idleMs, humanize "typing")
+// ---------------------------------------------------------------------------
+
+test("P10 defaults: the panel is on, focus follows the work, hand-back is 1.5 s", () => {
+  assert.equal(DEFAULT_CONFIG.window.panel, true);
+  assert.equal(DEFAULT_CONFIG.window.follow, "work");
+  assert.equal(DEFAULT_CONFIG.window.idleMs, 1500);
+  assert.equal(DEFAULT_CONFIG.humanize, "auto", "auto stays the compatibility default");
+});
+
+test('P10: humanize "typing" and every follow policy are valid', () => {
+  assert.equal(parseConfig({ humanize: "typing" }).humanize, "typing");
+  for (const follow of ["work", "anchor", "never"] as const) {
+    assert.equal(parseConfig({ window: { follow } }).window.follow, follow);
+  }
+  assert.equal(parseConfig({ window: { panel: false } }).window.panel, false);
+  assert.equal(parseConfig({ window: { idleMs: 0 } }).window.idleMs, 0);
+});
+
+test("P10: a bad follow policy or idleMs names the exact config key", () => {
+  expectConfigError(() => parseConfig({ window: { follow: "sometimes" } }), "config.window.follow");
+  expectConfigError(() => parseConfig({ window: { idleMs: -1 } }), "config.window.idleMs");
+  expectConfigError(() => parseConfig({ window: { idleMs: 60_001 } }), "config.window.idleMs");
+  expectConfigError(() => parseConfig({ humanize: "keyboard" }), "config.humanize");
+});

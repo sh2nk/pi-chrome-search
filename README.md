@@ -139,7 +139,8 @@ a partial file is deep-merged over the defaults.
 | `mode` | `"attach"` | `attach` drives your Chrome; `launch` is dev/test only, dedicated profile |
 | `cdp.ports`, `cdp.ws`, `cdp.connectTimeoutMs`, `cdp.profileDir` | `[9222]`, `null`, `5000`, `null` | Fallback ports (after the endpoint file), explicit WS URL (env overrides), connect deadline, profile dir for `launch` |
 | `window.focus`, `window.reuse` | `"session"`, `true` | `session` \| `always` \| `never` focus policy; reuse one dedicated window |
-| `humanize` | `"auto"` | `auto` types the first search per engine; `always` types every search |
+| `window.panel`, `window.follow`, `window.idleMs` | `true`, `"work"`, `1500` | Anchor is the local control panel (engine/query/stage/pace/counters); `work` raises the engine tab during a stage and returns to the anchor after `idleMs`; `anchor` keeps the panel visible; `never` adds no focus call at all |
+| `humanize` | `"auto"` | `auto` types the first search per engine; `always` types every search; `typing` types every search through each engine's box/delay/`maxChars` profile (a longer query uses the SERP URL instead of being truncated) |
 | `engines.google` | `{ enabled: true, lang: "auto", gl: "auto", dailyCap: 300 }` | On/off, `hl`/`gl`, daily soft cap |
 | `engines.duckduckgo` | `{ enabled: true, kl: "auto", dailyCap: 300 }` | On/off, region-lang, cap |
 | `engines.yandex` | `{ enabled: true, lr: "auto", dailyCap: 150 }` | On/off, region, cap; last in `auto` |

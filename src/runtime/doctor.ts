@@ -34,7 +34,7 @@ import { readFile, unlink } from "node:fs/promises";
 import type { Connector, ConnectorInfo } from "../cdp/browser.ts";
 import { defaultLockPath, parseLockRecord, pidAlive } from "../cdp/browser.ts";
 import type { CdpSource } from "../cdp/types.ts";
-import type { Config, FocusPolicy, HumanizeMode, Mode, ReflexBackend } from "../config.ts";
+import type { Config, FocusPolicy, FollowPolicy, HumanizeMode, Mode, ReflexBackend } from "../config.ts";
 import type { EngineId, EngineRegistry, Query, WallKind } from "../engines/types.ts";
 import { ENGINE_IDS } from "../engines/types.ts";
 import { ERROR_HINTS, type FailureDetails } from "./error-codes.ts";
@@ -258,6 +258,10 @@ export interface DoctorConfigInfo {
   mode: Mode;
   focus: FocusPolicy;
   humanize: HumanizeMode;
+  /** P10: the anchor panel and the follow-focus policy, so a report explains the window. */
+  panel: boolean;
+  follow: FollowPolicy;
+  idleMs: number;
   debug: boolean;
 }
 
@@ -1007,6 +1011,9 @@ export async function buildDoctorReport(
       mode: deps.config.mode,
       focus: deps.config.window.focus,
       humanize: deps.config.humanize,
+      panel: deps.config.window.panel,
+      follow: deps.config.window.follow,
+      idleMs: deps.config.window.idleMs,
       debug: deps.config.debug,
     },
     cdp,
@@ -1045,7 +1052,8 @@ export function renderDoctorText(
   lines.push(`generated ${report.generatedAt}`);
   lines.push(
     `config: ${tildify(report.config.path)} (${report.config.mode}, focus=${report.config.focus}, ` +
-      `humanize=${report.config.humanize}, debug=${report.config.debug ? "on" : "off"})`,
+      `humanize=${report.config.humanize}, panel=${report.config.panel ? "on" : "off"}, ` +
+      `follow=${report.config.follow}, debug=${report.config.debug ? "on" : "off"})`,
   );
 
   const { cdp } = report;
