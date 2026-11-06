@@ -682,7 +682,15 @@ test("read gate true reads the page normally", async () => {
 
 test("a disabled reflex is never consulted by web_read", async () => {
   const spy = new FakeReflex({ gateRead: () => false });
-  const harness = makeReadHarness({ reflex: spy });
+  // `pageGate` is a separate switch (default on); this test is about the whole
+  // reflex being off, so both flags are off.
+  const harness = makeReadHarness({
+    reflex: spy,
+    config: (config) => {
+      config.reflex.enabled = false;
+      config.reflex.pageGate = false;
+    },
+  });
 
   const result = (await read(harness, "https://example.test/article")) as WebReadSuccess;
 

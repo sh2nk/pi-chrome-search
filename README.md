@@ -156,7 +156,7 @@ a partial file is deep-merged over the defaults.
 | `captcha.waitMs`, `captcha.retryYandexOnce` | `0`, `true` | Extra grace after the one Yandex retry for you to solve a wall (0 = no extra wait); the retry waits ~3 s |
 | `artifacts.enabled`, `artifacts.keep`, `artifacts.maxBytes` | `true`, `30`, `52428800` | Save failure artifacts; retention in dirs / bytes (50 MB) |
 | `reflex.enabled`, `reflex.backend` | `false`, `"auto"` | Optional System 1 layer; `auto` \| `local` \| `openrouter` \| `rules` |
-| `reflex.pageGate` | `false` | P14 page-quality gate on `web_read`/`web_research` (farm/unsafe/off-topic pages are refused before a read). Rules-only and free with `enabled:false`; with `enabled:true` the classifier also judges/ranks pages |
+| `reflex.pageGate` | `true` | P14 page-quality gate, independent of `reflex.enabled`. `web_research` uses the classifier (one batched call per round, ≤10 pages) to drop/rank sources; `web_read` uses the free safety floor only (punycode, abused TLD, scam, login). Measured: 92.9 % slop/unsafe recall, 1.63 false skips per 20, $0.000077/decision |
 | `reflex.localOnly` | `false` | `true` forbids all remote classifier calls |
 | `reflex.provider`, `reflex.model`, `reflex.prefer` | `"auto"`, `null`, `["llama.cpp", "openrouter"]` | Classifier pinning and `auto` backend order |
 | `reflex.openrouter.primary`, `reflex.openrouter.fallback` | `"~typesafe/jev-latest"`; clef-flash, pplx-decider-flash, span-01-lite (full ids in `src/config.ts`) | Remote classifier and its fallback chain |
@@ -189,12 +189,14 @@ result did not clear that bar honestly, so the flag stayed off — see [`bench/R
 for the numbers and the reasoning. Turning it on is your call; the deterministic rules fallback always works,
 and `reflex.localOnly: true` forbids remote calls.
 
-**The page gate is a separate switch.** P14 measured a quality gate, not a compressor: it skipped 42/42
-labelled slop/unsafe sources with 0 false skips, and saved 50 % of the reads on the observed SERPs
-([`bench/RESULTS-P14.md`](bench/RESULTS-P14.md)). Because its classifier half is unmeasured offline and the
-rules carry hand-maintained lists, `reflex.pageGate` also defaults to `false`. `{"reflex":{"pageGate":true}}`
-turns on the offline rules gate alone — no model call, no cost; add `"enabled": true` to let the classifier
-judge and rank pages too.
+**The page gate is on by default and classifier-first.** P14 measured a quality gate, not a compressor:
+the recorded classifier skipped 39/42 labelled slop/unsafe sources with 7 false skips in 86 good ones
+(92.9 % recall, 1.63 per 20), refused 11/11 off-topic pages, and saved 41.7 % of the reads on the observed
+SERPs with every authoritative source kept ([`bench/RESULTS-P14.md`](bench/RESULTS-P14.md)). One batched
+call per research round costs ~$0.0001–0.0002; `web_read` uses the offline safety floor (µs, free) so a
+single page read pays no classifier latency. The hand-maintained farm/trusted lists were removed: quality
+is the model's judgement, safety is the rules'. Set `{"reflex":{"pageGate":false}}` to turn the gate off;
+`reflex.enabled` still controls triage/route/coverage, which stay off.
 
 ## Commands
 
@@ -204,7 +206,8 @@ npm test                          # node --test tests/unit/**/*.test.ts (offline
 npm run audit                     # hard rules, secrets, fixture data, tool budget
 node src/cli/doctor.ts --json     # headless doctor; --no-probe --fix --config <path>
 npm run bench                     # offline replay; --reflex rules / --compare are offline too
-node bench/run.ts --gate          # P14 page-gate bench on bench/slop.jsonl (offline)
+node bench/run.ts --gate          # P14 page-gate bench (offline replay of the recorded classifier)
+node bench/record.ts              # refresh that replay (live, paid, capped at $0.02)
 PI_CHROME_LIVE=1 npm run test:live   # opt-in live suite (tests/live/**), one query per engine
 ```
 
@@ -229,7 +232,9 @@ stop and ask — not retry.
   git.
 - **CDP is powerful.** Any local process that can reach the debugging port can drive the browser. It binds
   loopback only, and you enable it explicitly with the Allow flow above.
-- **Optional classifiers.** With the reflex layer on and a remote backend, the query plus candidate
+- **Optional classifiers.** The page gate always sends only URL/title/snippet of up to 10 sources —
+  never page text or query history — to the configured classifier; one call per `web_research` round.
+  With the reflex layer on and a remote backend, the query plus candidate
   titles/URLs/snippets (never full pages) go to the classifier provider through your pi session. Usage and
   cost are logged; `reflex.localOnly: true` keeps everything local. Search traffic never goes through a
   classifier provider.

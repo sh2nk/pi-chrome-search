@@ -38,6 +38,7 @@ import type {
   Candidate,
   CoverageVerdict,
   Evidence,
+  PageGateOptions,
   PageKind,
   PageSubject,
   PageVerdict,
@@ -93,7 +94,11 @@ export interface ReflexBackend {
    * before P14 simply omits it; the policy then answers the page gate from rules
    * and logs it, exactly as it does for a disabled reflex.
    */
-  judgePages?(query: string, subjects: readonly PageSubject[]): Promise<BackendResult<PageVerdict[]>>;
+  judgePages?(
+    query: string,
+    subjects: readonly PageSubject[],
+    options?: PageGateOptions,
+  ): Promise<BackendResult<PageVerdict[]>>;
   coverage(query: string, evidence: Evidence[]): Promise<BackendResult<CoverageVerdict>>;
   route(query: string): Promise<BackendResult<Route>>;
 }
@@ -131,7 +136,11 @@ export interface PolicyDeps {
 
 export interface ReflexPolicy extends Reflex {
   /** P14: required on the policy; the frozen `Reflex` keeps it optional. */
-  judgePages(query: string, subjects: readonly PageSubject[]): Promise<PageVerdict[]>;
+  judgePages(
+    query: string,
+    subjects: readonly PageSubject[],
+    options?: PageGateOptions,
+  ): Promise<PageVerdict[]>;
   /** Reset the per-search budget. A query change resets it automatically. */
   beginSearch(): void;
   stats(): PolicyStats;
@@ -235,7 +244,11 @@ function isValidPageVerdicts(value: unknown, count: number): value is PageVerdic
 interface NormalizedBackend {
   triage(query: string, items: Candidate[]): Promise<BackendResult<unknown>>;
   gateRead(query: string, item: Candidate): Promise<BackendResult<unknown>>;
-  judgePages(query: string, subjects: readonly PageSubject[]): Promise<BackendResult<unknown>>;
+  judgePages(
+    query: string,
+    subjects: readonly PageSubject[],
+    options?: PageGateOptions,
+  ): Promise<BackendResult<unknown>>;
   coverage(query: string, evidence: Evidence[]): Promise<BackendResult<unknown>>;
   route(query: string): Promise<BackendResult<unknown>>;
 }
@@ -279,13 +292,13 @@ function normalizeBackend(backend: Reflex | ReflexBackend): NormalizedBackend {
   return {
     triage: async (query, items) => unwrap(await plain.triage(query, items)),
     gateRead: async (query, item) => unwrap(await plain.gateRead(query, item)),
-    judgePages: async (query, subjects) => {
+    judgePages: async (query, subjects, options) => {
       // A plain `Reflex` (or a pre-P14 backend) may lack the method; that is the
       // old contract, and the policy must treat it as "no verdict", not an error.
       if (typeof plain.judgePages !== "function") {
         return { value: null, meta: { confidence: 0, stopReason: "error" } };
       }
-      return unwrap(await plain.judgePages(query, subjects));
+      return unwrap(await plain.judgePages(query, subjects, options));
     },
     coverage: async (query, evidence) => unwrap(await plain.coverage(query, evidence)),
     route: async (query) => unwrap(await plain.route(query)),
@@ -403,6 +416,14 @@ interface DecisionRequest<T> {
   decision: Decision;
   query: string;
   url?: string;
+  /**
+   * Whether this decision may spend a model call. Defaults to
+   * `reflex.enabled`; the page gate passes `enabled || pageGate` and `false`
+   * for the rules-only caller (`web_read`).
+   */
+  useBackend?: boolean;
+  /** Log reason when `useBackend` is false; `rules_only` is not a fallback. */
+  offReason?: "disabled" | "rules_only";
   /** Material that identifies the decision's cache slot; never empty. */
   cacheMaterial: string;
   rules: () => Promise<T>;
@@ -543,17 +564,19 @@ export function createPolicy(deps: PolicyDeps): ReflexPolicy {
     // Fast path first, before the cache: a disabled reflex must never serve a
     // model verdict that an earlier enabled call left in the shared cache.
     const callBackend = req.backend;
+    const useBackend = req.useBackend ?? reflex.enabled;
     // Compound check so `callBackend` is narrowed to non-null after the block.
-    if (!reflex.enabled || reflex.backend === "rules" || callBackend === null) {
-      const reason = !reflex.enabled
-        ? "disabled"
+    if (!useBackend || reflex.backend === "rules" || callBackend === null) {
+      const reason = !useBackend
+        ? (req.offReason ?? "disabled")
         : reflex.backend === "rules"
           ? "backend_rules"
           : "no_backend";
       const overrides: Record<string, unknown> = { reason };
-      // An explicitly configured rules backend is not a fallback; a disabled
-      // reflex is, and the bench keys on that to find its baseline rows.
-      if (reason === "backend_rules") overrides.fallback = false;
+      // An explicitly configured rules backend or a rules-only caller is not a
+      // fallback; a disabled reflex is, and the bench keys on that to find its
+      // baseline rows.
+      if (reason === "backend_rules" || reason === "rules_only") overrides.fallback = false;
       return useRules(req, queryHash, overrides);
     }
 
@@ -686,15 +709,18 @@ export function createPolicy(deps: PolicyDeps): ReflexPolicy {
       });
     },
 
-    judgePages(query, subjects) {
+    judgePages(query, subjects, options) {
       // The contract caps a batch at `PAGE_BATCH_MAX`; the caller may pass more
       // (a SERP is 10+ results) and gets verdicts for the prefix only.
       const items = subjects.slice(0, PAGE_BATCH_MAX);
       if (items.length === 0) return Promise.resolve<PageVerdict[]>([]);
-      const baseline = judgePagesSync(query, items);
+      const baseline = judgePagesSync(items);
+      const rulesOnly = options?.backend === "rules";
       return decide<PageVerdict[]>({
         decision: "page_gate",
         query,
+        useBackend: !rulesOnly && (reflex.enabled || reflex.pageGate),
+        ...(rulesOnly ? { offReason: "rules_only" as const } : {}),
         cacheMaterial: items.map((item) => urlCacheKey(item.url)).join("\n"),
         rules: () => Promise.resolve(baseline),
         backend: backend === null ? null : () => backend.judgePages(query, items),

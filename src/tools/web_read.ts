@@ -388,7 +388,10 @@ function auditDomain(finalUrl: URL): string {
 async function pageGateVerdict(reflex: Reflex, url: string): Promise<PageVerdict | null> {
   if (typeof reflex.judgePages !== "function") return null;
   try {
-    const verdicts = await reflex.judgePages(url, [{ url }]);
+    // Rules only: an explicit URL has already been chosen, so the gate is the
+    // safety floor (punycode, abused TLD, scam, login) and this read pays no
+    // classifier latency or cost. `web_research` uses the classifier.
+    const verdicts = await reflex.judgePages(url, [{ url }], { backend: "rules" });
     return verdicts === null ? null : (verdicts[0] ?? null);
   } catch {
     return null;

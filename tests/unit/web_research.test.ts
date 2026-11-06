@@ -465,7 +465,7 @@ test("refinement happens once per round and never repeats a query", async () => 
 // V6.3 — reflex off / on / throwing
 // ---------------------------------------------------------------------------
 
-test("reflex off (and localOnly) makes zero model calls and still works", async () => {
+test("reflex.enabled=false keeps triage/coverage off (pageGate has its own switch)", async () => {
   const reflex = spyReflex();
   const harness = makeHarness({
     fixture: BASIC,

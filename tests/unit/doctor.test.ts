@@ -617,7 +617,7 @@ test("reflex reports disabled off and unavailable (no probe yet) when on", async
   const off = await buildDoctorReport(depsFor({ connector: new FakeConnector() }));
   assert.equal(off.reflex.classifier, "disabled");
   assert.equal(off.reflex.enabled, false);
-  assert.equal(off.reflex.pageGate, false, "P14: the gate has its own switch");
+  assert.equal(off.reflex.pageGate, true, "P14: the gate has its own switch and ships on");
 
   const config = configWith((cfg) => {
     cfg.reflex.enabled = true;

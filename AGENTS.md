@@ -132,7 +132,8 @@ npm test                          # node --test tests/**/*.test.ts (offline)
 npm run audit                     # hard rules, secrets, personal fixtures, tool budget
 node src/cli/doctor.ts --json     # headless doctor; the canonical gate output
 npm run bench                     # offline replay; --live is opt-in (P5)
-node bench/run.ts --gate          # P14 page-gate bench (slop corpus, offline; exit 1 = gate failed)
+node bench/run.ts --gate          # P14 page-gate bench (slop corpus replay, offline; exit 1 = gate failed)
+node bench/record.ts              # refresh the classifier replay (live, paid, capped; review cost first)
 PI_CHROME_LIVE=1 npm run test:live   # one query per engine, n=2; SKIP on wall, never loop
 pi -e ./src/index.ts              # load the extension in a throwaway session
 pi -e ./src/index.ts --model …    # if the current model misbehaves
@@ -225,13 +226,14 @@ The decision points (triage, read gate, coverage, routing), fallbacks, abstain t
 experiment and benchmark gate are in SPEC §9. Do not put a classifier on the critical path before that.
 
 **P14 page gate (`judgePages`).** A second, additive decision: *is this page worth a read, and can this
-source be trusted?* One batched classifier call covers up to 10 pages (`PAGE_BATCH_MAX`), and the rules
-layer in `src/reflex/rules.ts` is the floor: it answers offline, and `mergePageVerdicts` lets a model
-add a skip but never rescue an `unsafe` rules verdict. Wired into `web_read` (before a tab is spent) and
-`web_research` (rank/drop sources). `reflex.pageGate: true` enables the rules gate alone (offline, $0);
-`reflex.enabled: true` adds the classifier. Corpus + rubric: `bench/slop.jsonl`, `bench/SLOP-RUBRIC.md`;
-verdict: `bench/RESULTS-P14.md` (V14.3 passes on the observed SERPs: 50 % of reads, 0 goldens lost;
-V14.4 unmeasured offline; both remain the reason the classifier is not on by default).
+source be trusted?* It ships **on** (`reflex.pageGate: true`, independent of `reflex.enabled`):
+`web_research` uses one batched classifier call (≤10 pages, `PAGE_BATCH_MAX`) to drop and rank sources;
+`web_read` uses the rules safety floor only (no model latency on an explicit URL). The rules layer is a
+safety floor, not a list of trusted/farm domains — those were removed after review because they only
+matched their own rubric. `mergePageVerdicts` lets a model add a skip but never rescue an `unsafe` floor
+verdict. Corpus/rubric/replay: `bench/slop.jsonl`, `bench/SLOP-RUBRIC.md`, `bench/slop-verdicts.jsonl`;
+measured 92.9 % recall, 1.63 false skips per 20, 41.7 % of reads saved, $0.000077/decision
+(`bench/RESULTS-P14.md`). `reflex.enabled` still gates triage/route/coverage and stays `false`.
 
 ### Codemode: optional, per research session
 

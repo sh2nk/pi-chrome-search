@@ -165,10 +165,16 @@ export interface TriageConfig {
 export interface ReflexConfig {
   enabled: boolean;
   /**
-   * P14 page gate, independent of `enabled` (default false). With `enabled:false`
-   * the gate runs the offline rules only: no model call, no cost, and a read is
-   * refused only for a named reason (farm host, off-topic path, unsafe URL, …).
-   * Turning `enabled` on additionally lets the classifier judge/rank pages.
+   * P14 page gate (default true), independent of `enabled`.
+   *
+   * - `web_research` uses the classifier when a model is available (one batched
+   *   call per round, capped by the classifier budgets) and the safety floor
+   *   otherwise; quality come from the model, never from hand-maintained lists.
+   * - `web_read` uses the safety floor only: an explicit URL does not pay
+   *   classifier latency, and a PDF still opens.
+   *
+   * With `enabled:false` the rest of the reflex (triage/route/coverage) stays
+   * off; the page gate is its own switch and its own cost line.
    */
   pageGate: boolean;
   backend: ReflexBackend;
@@ -237,7 +243,7 @@ export const DEFAULT_CONFIG: Config = {
   artifacts: { enabled: true, keep: 30, maxBytes: 52428800 },
   reflex: {
     enabled: false,
-    pageGate: false,
+    pageGate: true,
     backend: "auto",
     localOnly: false,
     provider: "auto",

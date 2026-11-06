@@ -148,7 +148,9 @@ export function createReflex(options: CreateReflexOptions): ReflexBundle {
   // Constructing the classifier makes no model calls, but skipping it when it
   // cannot possibly answer guarantees "disabled = zero registry traffic".
   const useClassifier =
-    config.reflex.enabled && config.reflex.backend !== "rules" && registry !== undefined;
+    (config.reflex.enabled || config.reflex.pageGate) &&
+    config.reflex.backend !== "rules" &&
+    registry !== undefined;
   const backend = useClassifier
     ? adapt(createClassifierReflex({ config, registry, clock, log: backendLog(log) }))
     : undefined;

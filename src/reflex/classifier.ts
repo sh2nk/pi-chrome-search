@@ -108,10 +108,20 @@ export interface ClassifierResult {
   errorMessage?: string;
 }
 
-/** Only the fields this backend needs; pi's `ModelRegistry` satisfies it. */
+/**
+ * Only the fields this backend *requires*; pi's `ModelRegistry` satisfies it.
+ * The rest of a registry entry is preserved by `selected()` on purpose: the
+ * SDK's `classify()` validates `model.type === "classifier"` and needs `api`
+ * and `cost`, so a stripped `{provider, id}` makes every call fail as
+ * `provider_error` (found live while recording the P14 corpus).
+ */
 export interface ClassifierModel {
   provider: string;
   id: string;
+  /** Registry entries carry these; `selected()` preserves them for `classify()`. */
+  type?: string;
+  api?: string;
+  cost?: unknown;
 }
 
 /** The registry surface injected by the extension; tests pass a fake. */
@@ -143,7 +153,7 @@ export type ClassifyAbstainReason =
   | "bad_answer"
   | "low_confidence";
 
-export interface SelectedModel {
+export interface SelectedModel extends ClassifierModel {
   provider: string;
   id: string;
   /** True for the local llama.cpp providers; the only models `localOnly` allows. */
@@ -877,7 +887,9 @@ export function createClassifierReflex(options: ClassifierReflexOptions): Classi
   }
 
   function selected(model: ClassifierModel): SelectedModel {
-    return { provider: model.provider, id: model.id, local: isLocalProvider(model.provider) };
+    // Keep the registry entry intact (type/api/cost): the SDK's `classify()`
+    // asserts `type === "classifier"` and prices the call from `cost`.
+    return { ...model, provider: model.provider, id: model.id, local: isLocalProvider(model.provider) };
   }
 
   async function available(provider?: string): Promise<readonly ClassifierModel[]> {
@@ -965,8 +977,14 @@ export function createClassifierReflex(options: ClassifierReflexOptions): Classi
     return models;
   }
 
-  async function resolveModels(): Promise<SelectedModel[]> {
-    if (!reflex.enabled || reflex.backend === "rules") return [];
+  /**
+   * `forPageGate` is the one decision allowed to run with `enabled:false`:
+   * `pageGate:true` is its own switch, because the gate is the quality judge.
+   * Triage/read-gate/coverage/route still need `enabled:true` — turning the page
+   * gate on must not quietly buy four other model decisions.
+   */
+  async function resolveModels(forPageGate = false): Promise<SelectedModel[]> {
+    if ((!reflex.enabled && !(forPageGate && reflex.pageGate)) || reflex.backend === "rules") return [];
 
     const pinnedProvider = reflex.provider === "auto" ? null : reflex.provider;
     const pinnedModel = reflex.model;
@@ -1438,7 +1456,7 @@ export function createClassifierReflex(options: ClassifierReflexOptions): Classi
   async function judgePages(query: string, subjects: readonly PageSubject[]): Promise<PageVerdict[]> {
     const startedAt = nowMs();
     const items = subjects.slice(0, PAGE_BATCH_MAX);
-    const models = await resolveModels();
+    const models = await resolveModels(true);
     const totals = emptyTotals();
     const budget: Budget = { remaining: reflex.maxCallsPerSearch };
 
@@ -1553,7 +1571,7 @@ export function createClassifierReflex(options: ClassifierReflexOptions): Classi
     judgePages,
     coverage,
     route,
-    models: resolveModels,
+    models: () => resolveModels(false),
     lastOutcome: () => last,
     stats: () => ({ ...stats }),
   };

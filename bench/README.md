@@ -292,14 +292,20 @@ all, and can this source be trusted?* It is measured on a separate labelled corp
 corpus — returning fewer results always lowers tokens, so the token metric cannot judge a gate.
 
 ```bash
-node bench/run.ts --gate              # same as node bench/gate.ts; prints the report
+node bench/run.ts --gate              # same as node bench/gate.ts; offline replay
 node bench/gate.ts --no-write         # print only (bench/results/ is git-ignored)
-node bench/gate.ts --self-test        # corpus shape, metric arithmetic, verdict logic
+node bench/gate.ts --no-verdicts      # rules safety floor only
+node bench/gate.ts --self-test        # corpus shape, replay mapping, verdict logic
+node bench/record.ts                  # LIVE, paid, capped: refresh bench/slop-verdicts.jsonl
 ```
 
-The report, the V14.1–V14.5 table and the decision live in
-[`RESULTS-P14.md`](./RESULTS-P14.md). The rules backend is measured offline; the classifier backend's
-accuracy and price are marked **unmeasured** because they need a live `pi` session with the user's
-classifier provider. `--gate` exits `1` when a measured gate fails, so a script cannot mistake a failed
-gate for success. The gate ships behind its own `reflex.pageGate` switch (default `false`; rules-only and
-free with `reflex.enabled:false`, classifier-assisted when both are on).
+The classifier is measured by **replay**: `bench/record.ts` opens a throwaway pi SDK session, uses the
+user's classifier (default `~typesafe/jev-latest` on OpenRouter), and writes one JSON object per batch
+(ids, verdicts, usage/cost, latency) to `bench/slop-verdicts.jsonl` — 139 pages in 37 batches cost
+$0.0028. `gate.ts` then scores those real verdicts offline and deterministically; without the file it
+prints the rules floor only and marks the classifier gates UNMEASURED.
+
+The report, the V14.1–V14.5 table and the decision live in [`RESULTS-P14.md`](./RESULTS-P14.md). The gate
+ships on by default behind its own `reflex.pageGate` switch, classifier-first for `web_research` and
+rules-only for `web_read`. `--gate` exits `1` when a measured gate fails, so a script cannot mistake a
+failed gate for success.

@@ -37,7 +37,7 @@ import {
   type ClassifierRegistry,
   type ClassifierResult,
 } from "../../src/reflex/classifier.ts";
-import { createRules, judgePage, judgePagesSync, queryEcho } from "../../src/reflex/rules.ts";
+import { createRules, judgePage, judgePagesSync } from "../../src/reflex/rules.ts";
 import { PAGE_BATCH_MAX, type PageSubject, type PageVerdict, type Reflex } from "../../src/reflex/types.ts";
 import { createCache } from "../../src/runtime/cache.ts";
 import type { Cache, Logger } from "../../src/runtime/types.ts";
@@ -80,96 +80,57 @@ test("rules: unsafe shapes are refused and named", () => {
     ["https://adult-videos.example/watch", "adult host", /unsafe-token/],
   ];
   for (const [url, label, reason] of cases) {
-    const verdict = judgePage("q", subject(url));
+    const verdict = judgePage(subject(url));
     assert.equal(verdict.worth, false, label);
     assert.equal(verdict.kind, "unsafe", label);
     assert.equal(verdict.trust, 0, label);
     assert.ok(verdict.reasons.some((entry) => reason.test(entry)), `${label}: ${verdict.reasons.join(",")}`);
   }
 
-  const scam = judgePage("q", subject("https://example.com/article", "Ваш компьютер заражен — позвоните нам"));
+  const scam = judgePage(subject("https://example.com/article", "Ваш компьютер заражен — позвоните нам"));
   assert.equal(scam.kind, "unsafe");
   assert.equal(scam.worth, false);
 });
 
-test("rules: a trusted publisher survives a clickbait title and a /news/ path", () => {
-  for (const url of [
-    "https://www.nytimes.com/2026/10/16/technology/best-laptops.html",
-    "https://www.reuters.com/technology/",
-    "https://en.wikipedia.org/wiki/Cat",
-    "https://learn.microsoft.com/ru-ru/answers/questions/1/x",
-    "https://docs.python.org/3/library/asyncio.html",
+test("rules: quality is not the rules' job — a farm host or a slop title stays readable", () => {
+  // The classifier is the quality judge. The offline floor must not carry
+  // hand-maintained farm/trusted lists and pretend they generalise.
+  for (const entry of [
+    subject("https://sonnik.ru/kot/", "Сонник кот"),
+    subject("https://www.kp.ru/woman/sonnik/k-chemu-snyatsya-koshki/", "К чему снятся кошки"),
+    subject("https://varfabric.com/blog/tayny-snov/", "Сны про кошек"),
+    subject("https://example.com/post", "К чему снится кот", "Машинный перевод статьи с английского."),
+    subject("https://en.wikipedia.org/wiki/Cat", "Cat"),
   ]) {
-    const verdict = judgePage("q", subject(url, "You won't believe this shocking find"));
-    assert.equal(verdict.worth, true, `${url} must stay readable`);
-    assert.equal(verdict.kind, "original", url);
-    assert.ok((verdict.trust ?? 0) >= 0.85, url);
+    const verdict = judgePage(entry);
+    assert.equal(verdict.worth, true, `${entry.url} must stay readable`);
+    assert.equal(verdict.kind, "unknown", entry.url);
+    assert.deepEqual(verdict.reasons, ["safety:ok"], entry.url);
   }
 });
 
-test("rules: forum and aggregator are worth reading at low trust, never skipped", () => {
-  const forum = judgePage("q", subject("https://www.reddit.com/r/WindowsHelp/comments/1/x", "How to fix it"));
-  assert.equal(forum.kind, "forum");
-  assert.equal(forum.worth, true);
-  assert.ok((forum.trust ?? 1) < 0.6);
+test("rules: ad/affiliate hosts are refused, login/cart paths cost no read, a PDF still opens", () => {
+  const ad = judgePage(subject("https://bit.ly/3xyz"));
+  assert.equal(ad.worth, false);
+  assert.equal(ad.kind, "slop");
 
-  const aggregator = judgePage("q", subject("https://market.yandex.ru/catalog/1", "Ноутбуки"));
-  assert.equal(aggregator.kind, "aggregator");
-  assert.equal(aggregator.worth, true);
-  assert.ok((aggregator.trust ?? 1) < 0.5);
-});
-
-test("rules: farm hosts, off-topic paths, slop titles, translated text and thin excerpts are slop", () => {
-  const reasons: Array<[PageSubject, RegExp]> = [
-    [subject("https://sonnik.ru/kot/", "Сонник кот"), /host:farm/],
-    [subject("https://www.kp.ru/woman/sonnik/k-chemu-snyatsya-koshki/", "К чему снятся кошки"), /path:offtopic/],
-    [subject("https://horo.mail.ru/article/879-k-chemu-snitsya-kot/", "К чему снится кот"), /host:topic-farm/],
-    [subject("https://news.ru/family/ritmy-dnya/kot-vo-sne", "К чему снится кот? Толкование снов"), /title:slop/],
-    [subject("https://varfabric.com/blog/tayny-snov/", "Сны про кошек"), /path:informational/],
-    [subject("https://letu.ru/blog/k-chemu-snyatsya-koshka/", "К чему снятся кошки"), /path:informational/],
-    [subject("https://digi-keys.ru/articles/oshibka-0x80070005/", "Ошибка 0x80070005"), /path:informational/],
-    [subject("https://example.com/post", "Fix it", "Машинный перевод статьи с английского."), /text:translated/],
-    [
-      subject(
-        "https://example.com/post",
-        "Some title",
-        "",
-        "Короткие предложения без даты и автора. ".repeat(20),
-      ),
-      /excerpt:thin/,
-    ],
-  ];
-  for (const [entry, reason] of reasons) {
-    const verdict = judgePage("q", entry);
-    assert.equal(verdict.worth, false, `${entry.url} (${reason})`);
-    assert.equal(verdict.kind, "slop", `${entry.url} (${reason})`);
-    assert.ok(verdict.reasons.some((item) => reason.test(item)), `${entry.url}: ${verdict.reasons.join(",")}`);
-  }
-});
-
-test("rules: login/cart paths cost no read, but a PDF still does", () => {
   for (const url of [
     "https://example.com/login",
     "https://learn.microsoft.com/signin",
     "https://shop.example.com/checkout",
   ]) {
-    const verdict = judgePage("q", subject(url));
+    const verdict = judgePage(subject(url));
     assert.equal(verdict.worth, false, url);
     assert.deepEqual(verdict.reasons, ["url:not-content"], url);
   }
   // P12: the PDF branch is supported, so a binary suffix must not be refused.
-  const pdf = judgePage("q", subject("https://arxiv.org/pdf/2211.17192"));
-  assert.equal(pdf.worth, true);
+  assert.equal(judgePage(subject("https://arxiv.org/pdf/2211.17192")).worth, true);
 });
 
-test("rules: a snippet is never judged thin, an unknown host is readable", () => {
-  const short = judgePage("q", subject("https://example.com/p", "Short", "tiny snippet"));
-  assert.equal(short.kind, "unknown");
-  assert.equal(short.worth, true);
-
-  // An excerpt under 400 chars is not enough evidence to call a page thin.
-  const small = judgePage("q", subject("https://example.com/p", "Title", "", "One short paragraph. No date."));
-  assert.equal(small.worth, true);
+test("rules: a snippet or excerpt never changes the verdict (no quality heuristics left)", () => {
+  const thin = judgePage(subject("https://example.com/p", "Title", "", "Короткие. Без даты. Без автора. ".repeat(20)));
+  assert.equal(thin.worth, true);
+  assert.deepEqual(thin.reasons, ["safety:ok"]);
 });
 
 test("rules: deterministic, input-ordered, and the batch never abstains", async () => {
@@ -178,16 +139,15 @@ test("rules: deterministic, input-ordered, and the batch never abstains", async 
     subject("https://en.wikipedia.org/wiki/Cat", "Cat"),
     subject("https://best-casino-bonus.com/play", "Bonus"),
   ];
-  const first = judgePagesSync("к чему снится кот", items);
-  const second = judgePagesSync("к чему снится кот", items);
+  const first = judgePagesSync(items);
+  const second = judgePagesSync(items);
   assert.deepEqual(first, second);
   assert.equal(first.length, items.length);
-  assert.deepEqual(first.map((entry) => entry.kind), ["slop", "original", "unsafe"]);
+  assert.deepEqual(first.map((entry) => entry.kind), ["unknown", "unknown", "unsafe"]);
 
   const rules = createRules();
   assert.ok(rules.judgePages !== undefined, "rules must implement the P14 method");
   assert.deepEqual(await rules.judgePages!("q", items), first);
-  assert.equal(queryEcho("к чему снится кот", "К чему снится кот? Толкование снов"), 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -265,14 +225,14 @@ function harness(options: {
   return { policy, rows, cache, clock };
 }
 
-test("policy: disabled means zero page-gate calls and the rules verdict", async () => {
+test("policy: the whole gate off (enabled:false, pageGate:false) is the rules-only path", async () => {
   const spy = pageBackend(() => ({ value: [pageVerdict({ worth: true })], meta: meta() }));
-  const h = harness({ config: makeConfig({ enabled: false }), backend: spy.backend });
+  const h = harness({ config: makeConfig({ enabled: false, pageGate: false }), backend: spy.backend });
   const items = [subject("https://sonnik.ru/kot/", "Сонник кот"), subject("https://en.wikipedia.org/wiki/Cat", "Cat")];
 
   const verdicts = await h.policy.judgePages("q", items);
 
-  assert.deepEqual(verdicts, judgePagesSync("q", items));
+  assert.deepEqual(verdicts, judgePagesSync(items));
   assert.equal(spy.calls.length, 0, "disabled reflex must never touch the backend");
   const row = h.rows.at(-1);
   assert.ok(row);
@@ -281,6 +241,36 @@ test("policy: disabled means zero page-gate calls and the rules verdict", async 
   assert.equal(row.model, "rules");
   assert.equal(row.fallback, true);
   assert.equal(row.reason, "disabled");
+});
+
+test("policy: reflex.pageGate uses the classifier with the rest of the reflex off", async () => {
+  const spy = pageBackend((_query, subjects) => ({
+    value: subjects.map(() => pageVerdict({ worth: false, kind: "slop" })),
+    meta: meta(),
+  }));
+  const h = harness({ config: makeConfig({ enabled: false, pageGate: true }), backend: spy.backend });
+  const item = subject("https://example.com/page", "Page");
+
+  const verdicts = await h.policy.judgePages("q", [item]);
+
+  assert.equal(spy.calls.length, 1, "pageGate is the quality judge even when the reflex is off");
+  assert.equal(verdicts[0]?.worth, false);
+  assert.equal(h.rows.at(-1)?.model, "fake-jev");
+  assert.equal(h.policy.stats().backendCalls, 1);
+});
+
+test("policy: a rules-only caller (web_read) never spends a model call", async () => {
+  const spy = pageBackend(() => ({ value: [pageVerdict({ worth: false })], meta: meta() }));
+  const h = harness({ config: makeConfig({ enabled: true, pageGate: true }), backend: spy.backend });
+
+  const verdicts = await h.policy.judgePages("q", [subject("https://example.com/page")], { backend: "rules" });
+
+  assert.equal(spy.calls.length, 0);
+  assert.equal(verdicts[0]?.worth, true, "the safety floor keeps an ordinary page");
+  const row = h.rows.at(-1);
+  assert.ok(row);
+  assert.equal(row.reason, "rules_only");
+  assert.equal(row.fallback, false);
 });
 
 test("policy: an explicit rules backend logs a non-fallback rules decision", async () => {
@@ -326,14 +316,14 @@ test("policy: a model skip is merged in, an unsafe rules verdict is never rescue
 });
 
 test("policy: merge is idempotent, so the rules fallback can pass through settle", () => {
-  const rules = judgePagesSync("q", [
+  const rules = judgePagesSync([
     subject("https://sonnik.ru/kot/", "Сонник кот"),
     subject("https://example.com/x", "X"),
     subject("https://best-casino-bonus.com/play", "Bonus"),
   ]);
   assert.deepEqual(mergePageVerdicts(rules, rules), rules);
 
-  const notContent = judgePagesSync("q", [subject("https://example.com/login")]);
+  const notContent = judgePagesSync([subject("https://example.com/login")]);
   assert.equal(notContent[0]?.kind, "unknown");
   assert.deepEqual(mergePageVerdicts(notContent, notContent), notContent);
 });
@@ -344,7 +334,7 @@ test("policy: a low-confidence model batch falls back to rules and says why", as
   const item = subject("https://example.com/unknown-host", "Some page");
 
   const verdicts = await h.policy.judgePages("q", [item]);
-  assert.deepEqual(verdicts, judgePagesSync("q", [item]));
+  assert.deepEqual(verdicts, judgePagesSync([item]));
   const row = h.rows.at(-1);
   assert.ok(row);
   assert.equal(row.reason, "low_confidence");
@@ -361,7 +351,7 @@ test("policy: a malformed batch is rejected as invalid_verdict, not trusted", as
   const item = subject("https://example.com/x", "X");
 
   const verdicts = await h.policy.judgePages("q", [item]);
-  assert.deepEqual(verdicts, judgePagesSync("q", [item]));
+  assert.deepEqual(verdicts, judgePagesSync([item]));
   assert.equal(h.rows.at(-1)?.reason, "invalid_verdict");
 });
 
@@ -586,7 +576,7 @@ test("classifier: an unconfigured remote backend and a disabled reflex send noth
   assert.equal(registry.calls.length, 0);
 
   const disabled = createClassifierReflex({
-    config: makeConfig({ enabled: false }),
+    config: makeConfig({ enabled: false, pageGate: false }),
     registry,
     clock: new FakeClock({ autoAdvance: false }),
   });

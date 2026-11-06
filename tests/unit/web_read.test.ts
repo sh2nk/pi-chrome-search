@@ -1058,7 +1058,12 @@ test("P14 page gate: reflex.pageGate turns the gate on without the rest of the r
 
 test("P14 page gate: a disabled reflex is never consulted", async () => {
   const reflex = pageGateSpy({ verdict: { worth: false, trust: 0, kind: "unsafe", reasons: ["url:punycode"] } });
-  const harness = makeHarness({ config: (config) => { config.reflex.enabled = false; } });
+  const harness = makeHarness({
+    config: (config) => {
+      config.reflex.enabled = false;
+      config.reflex.pageGate = false;
+    },
+  });
   harness.deps.reflex = reflex;
 
   success(await run(harness, { url: "https://example.test/page" }));

@@ -80,6 +80,17 @@ export interface PageVerdict {
  */
 export const PAGE_BATCH_MAX = 10;
 
+/** P14: how a caller wants the page gate to judge. */
+export interface PageGateOptions {
+  /**
+   * `"rules"` never calls the model. `web_read` uses it: an explicit URL has
+   * already been chosen, so the safety floor is enough and the read does not pay
+   * classifier latency/cost. `web_research` uses `"auto"`: one batch amortizes
+   * the call across the sources it ranks.
+   */
+  backend?: "auto" | "rules";
+}
+
 export interface Reflex {
   triage(query: string, items: Candidate[]): Promise<TriageResult>;
   gateRead(query: string, item: Candidate): Promise<boolean>;
@@ -92,7 +103,11 @@ export interface Reflex {
    * fall back to `gateRead` or to their fixed order. A `Reflex` without this
    * method behaves exactly as it did before P14.
    */
-  judgePages?(query: string, subjects: readonly PageSubject[]): Promise<PageVerdict[] | null>;
+  judgePages?(
+    query: string,
+    subjects: readonly PageSubject[],
+    options?: PageGateOptions,
+  ): Promise<PageVerdict[] | null>;
   /**
    * Optional per-search reset of the model budget (P5 policy). Tools call it
    * once at the start of a user search; a `Reflex` without budgets (rules,

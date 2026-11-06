@@ -517,15 +517,18 @@ const PAGE_BATCH_MAX = 10;
   One decision covers up to `PAGE_BATCH_MAX` pages, so a SERP-sized gate costs one budget slot. `null`
   means no verdict. `web_read` gates before a tab is acquired; `web_research` drops refused sources and
   ranks the rest by `trust`.
-- **Rules are the floor.** The rules layer answers offline and owns `unsafe`; a model verdict may add a
-  skip but never rescue an `unsafe` rules verdict. Classifier batches are one `classify()` call with two
+- **Rules are a safety floor.** The rules layer answers offline and owns `unsafe` (scheme, credentials,
+  punycode, abused TLD, adult/pharma/casino/scam, login/cart, ad hosts); it does **not** carry
+  trusted/farm domain lists or title/path quality heuristics. A model verdict may add a skip but never
+  rescue an `unsafe` rules verdict. Classifier batches are one `classify()` call with two
   typed questions per page (`worth` bool, `kind` choice); a missing or malformed answer fails open on that
   page only, and the policy abstains on low confidence/error exactly as for the other decisions.
 - **Off by default:** `reflex.enabled: false`. When off, `rules.ts` is used for routing/dedup and no model
   runs.
-- **Page gate has its own switch:** `reflex.pageGate: false`. Turning it on runs the offline rules gate
-  (farm host, off-topic path, unsafe URL, login/cart, thin excerpt) on `web_read`/`web_research` with no
-  model call and no cost; `reflex.enabled: true` additionally lets the classifier judge and rank pages.
+- **Page gate has its own switch:** `reflex.pageGate: true` (default), independent of
+  `reflex.enabled`. `web_research` sends one batched decision per round (≤10 pages) to the classifier
+  and falls back to the rules floor on abstain; `web_read` calls `judgePages(..., { backend: "rules" })`
+  so an explicit URL pays no classifier latency. `reflex.enabled` still gates triage/route/coverage.
 - **Backends:** `auto` = local decision model → OpenRouter classifier → rules. `localOnly: true` forbids
   remote calls entirely. `provider`/`model` pin one classifier; `prefer` reorders `auto`.
 - **Abstain:** if `confidence < reflex.abstainBelow` (default 0.55), `stopReason !== "stop"`, or latency
