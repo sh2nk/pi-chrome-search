@@ -45,6 +45,20 @@ They are labelled `capturedWith: "derived from … (P8 S4)"` and their `notes` s
 so. A derived fixture is never presented as a fresh capture, and no answer text
 is invented: the lead string is the one the live bug produced.
 
+## P13 claim fixtures (no HTML)
+
+Two JSON fixtures, no SERP bytes, no `meta.json`:
+
+| Fixture | Shape | Origin |
+|---|---|---|
+| `claims-qa.json` | 10 cases: query, answer fact, the pages `web_research` reads in order | synthetic `.test` pages, hand-written for V13.1 |
+| `research-live-p13.json` | trimmed `web_research` transcript: claims, citations, excerpts | one live V13.4 run, queries recorded (neutral technical) |
+
+`claims-qa.json` is a labelled seed for the P14 corpus; it must stay difficult
+(the baseline rule answers ≈2/10 on it). `research-live-p13.json` is scanned by
+the offline V13.2 test: no tracking parameter may appear in any URL it recorded.
+Never add SERP HTML, cookies or a personal query to either file.
+
 ## `meta.json` schema
 
 ```json

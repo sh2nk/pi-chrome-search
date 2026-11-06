@@ -31,6 +31,7 @@ import { createHash } from "node:crypto";
 
 import type { Config } from "../config.ts";
 import { ENGINE_IDS, type EngineId, type Freshness } from "../engines/types.ts";
+import { MIN_CLAIM_COVERAGE, claimsCoverage } from "../extract/claims.ts";
 import type { Cache, Clock, Logger } from "../runtime/types.ts";
 import { RULES_MODEL } from "./rules.ts";
 import type { Candidate, CoverageVerdict, Evidence, Reflex, Route, TriageResult } from "./types.ts";
@@ -320,6 +321,13 @@ interface DecisionRequest<T> {
   backend: (() => Promise<BackendResult<unknown>>) | null;
   validate: Validator<T>;
   verdict: (value: T) => string;
+  /**
+   * Last deterministic word on a verdict, applied to rules and model answers
+   * alike before it is cached or logged. Used by `coverage` for the V13.3
+   * floor: no backend may call a bundle `enough` while its text ignores most
+   * of the query. Optional, so every other decision is untouched.
+   */
+  settle?: (value: T) => T;
 }
 
 interface BudgetStop {
@@ -420,7 +428,8 @@ export function createPolicy(deps: PolicyDeps): ReflexPolicy {
     queryHash: string,
     overrides: Record<string, unknown>,
   ): Promise<T> {
-    const value = await req.rules();
+    const raw = await req.rules();
+    const value = req.settle === undefined ? raw : req.settle(raw);
     rulesVerdicts += 1;
     await writeRow({
       ...baseRow(req, queryHash),
@@ -533,10 +542,15 @@ export function createPolicy(deps: PolicyDeps): ReflexPolicy {
       });
     }
 
+    // The floor is deterministic and model-independent: it runs after validation
+    // so a malformed verdict still falls back, and before caching so an
+    // over-eager verdict cannot be replayed from the cache.
+    const settled = req.settle === undefined ? accepted : req.settle(accepted);
+
     cache.set<CachedVerdict>(
       cacheKey,
       {
-        value: accepted,
+        value: settled,
         model: meta.model ?? UNKNOWN_MODEL,
         confidence: safeConfidence(meta.confidence),
         usage: meta.usage ?? zeroUsage(),
@@ -547,7 +561,7 @@ export function createPolicy(deps: PolicyDeps): ReflexPolicy {
 
     await writeRow({
       ...baseRow(req, queryHash),
-      verdict: req.verdict(accepted),
+      verdict: req.verdict(settled),
       confidence: safeConfidence(meta.confidence),
       latencyMs,
       model: meta.model ?? UNKNOWN_MODEL,
@@ -555,7 +569,7 @@ export function createPolicy(deps: PolicyDeps): ReflexPolicy {
       costUsd,
       fallback: false,
     });
-    return accepted;
+    return settled;
   }
 
   return {
@@ -585,6 +599,16 @@ export function createPolicy(deps: PolicyDeps): ReflexPolicy {
     },
 
     coverage(query, evidence) {
+      const settle = (value: CoverageVerdict): CoverageVerdict => {
+        if (!value.enough) return value;
+        // `Evidence.excerpt` is the page window the bundle will quote from; the
+        // share of the query it covers is the same deterministic floor V13.3
+        // applies in `web_research`, enforced here for every backend.
+        if (claimsCoverage(query, evidence.map((item) => item.excerpt ?? "")) >= MIN_CLAIM_COVERAGE) {
+          return value;
+        }
+        return { enough: false, next: value.next === "read_more" ? "read_more" : "refine" };
+      };
       return decide<CoverageVerdict>({
         decision: "coverage",
         query,
@@ -593,6 +617,7 @@ export function createPolicy(deps: PolicyDeps): ReflexPolicy {
         backend: backend === null ? null : () => backend.coverage(query, evidence),
         validate: isValidCoverage,
         verdict: (value) => `${value.enough ? "enough" : "not_enough"}:${value.next}`,
+        settle,
       });
     },
 

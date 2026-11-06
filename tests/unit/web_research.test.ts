@@ -472,7 +472,7 @@ test("reflex off (and localOnly) makes zero model calls and still works", async 
   assert.equal(result.details.coverage.enough, true, "the fixed coverage rule still stops the loop");
 });
 
-test("reflex on uses the injected triage order and coverage verdict", async () => {
+test("reflex on uses the injected triage order", async () => {
   const reflex = spyReflex({
     triage: async (_query, items) => ({
       keep: items.map((_, index) => index).reverse(),
@@ -488,14 +488,52 @@ test("reflex on uses the injected triage order and coverage verdict", async () =
       config.reflex.enabled = true;
     },
   });
+  await run(harness, { q: BASIC.query, budget: "normal" });
+
+  assert.ok(reflex.triageCalls.length >= 1, "triage still drives the fixed order");
+  assert.ok(reflex.coverageCalls.length >= 1, "the injected coverage verdict was consulted");
+  // Three unique candidates: docs, blog, reference. Reversed keep reads reference first.
+  assert.equal(harness.calls.read[0]?.url, "https://reference.example.test/devtools/browser");
+});
+
+test("the coverage floor rejects a model's enough:yes when the claims ignore the query", async () => {
+  const reflex = spyReflex({
+    coverage: async () => ({ enough: true, next: "stop" }),
+  });
+  const harness = makeHarness({
+    fixture: SPARSE,
+    reflex,
+    config: (config) => {
+      config.reflex.enabled = true;
+    },
+  });
+  const result = success(await run(harness, { q: SPARSE.query, budget: "normal" }));
+
+  // `alpha beta` appears in no page: 0% claim coverage, so V13.3 wins over the model.
+  assert.equal(result.details.coverage.enough, false);
+  assert.ok(reflex.coverageCalls.length >= 2, "the floor kept the loop spending its budget");
+});
+
+test("an injected enough verdict that the claims support stops the loop", async () => {
+  const reflex = spyReflex({
+    coverage: async () => ({ enough: true, next: "stop" }),
+  });
+  const harness = makeHarness({
+    fixture: BASIC,
+    reflex,
+    config: (config) => {
+      config.reflex.enabled = true;
+    },
+  });
   const result = success(await run(harness, { q: BASIC.query, budget: "normal" }));
 
   assert.equal(reflex.triageCalls.length, 1);
   assert.equal(reflex.coverageCalls.length, 1);
-  // Three unique candidates: docs, blog, reference. Reversed keep reads reference first.
-  assert.equal(harness.calls.read[0]?.url, "https://reference.example.test/devtools/browser");
+  // Docs + blog: one claim quotes "attach", both quote "browser" -> 2/3 >= 60%.
+  assert.equal(harness.calls.read[0]?.url, "https://docs.example.test/cdp/attach");
+  assert.equal(result.details.coverage.enough, true);
   assert.equal(result.details.coverage.next, "stop");
-  assert.equal(result.details.reads, 2);
+  assert.equal(result.details.searches, 1);
 });
 
 test("a throwing reflex falls back to the fixed budget instead of failing", async () => {
@@ -783,4 +821,80 @@ test("a repeated result set stops the refine loop instead of spending the budget
   });
   const result = success(await run(harness, { q: BASIC.query, budget: "deep" }));
   assert.ok(result.details.searches <= 2, `repeated SERPs must stop the loop, saw ${result.details.searches}`);
+});
+
+// ---------------------------------------------------------------------------
+// P13 — claims that answer, honest coverage, source hygiene
+// ---------------------------------------------------------------------------
+
+test("V13.3: enough is false when claims cover < 60% of the query, and the header is truthful", async () => {
+  const harness = makeHarness({ fixture: SPARSE });
+  const result = success(await run(harness, { q: SPARSE.query, budget: "deep" }));
+
+  // `alpha beta` appears in no read page. The old rule declared enough:yes after
+  // two domains; the new one cannot, and it spends the budget trying instead.
+  assert.equal(result.details.coverage.enough, false);
+  assert.equal(result.details.searches, 4);
+  assert.equal(result.details.reads, 8);
+  assert.match(
+    textOf(result).split("\n")[0] ?? "",
+    /searches 4\/4 · reads 8\/8 · .*enough:no/,
+    "the header must report the budget that was actually spent",
+  );
+});
+
+test("V13.2: a table-of-contents read leaves no excerpt and no claim", async () => {
+  const toc = "# Содержание\n1. Быстрый ответ и нейросети\n2. Настройка поиска и быстрые ответы в браузере\n3. История поиска\n4. Настройки приватности\n5. Справочный центр";
+  const harness = makeHarness({
+    fixture: BASIC,
+    search: async (q) => ({
+      query: q,
+      engines: ["google"],
+      hits: [
+        { title: "Содержание", url: "https://wiki.example.test/search/toc", snippet: "Разделы справки." },
+        {
+          title: "Attach over CDP",
+          url: "https://docs.example.test/cdp/attach?utm_source=serp",
+          snippet: "How to attach to a running browser over CDP.",
+        },
+      ],
+    }),
+    read: async (url) => {
+      if (url.includes("/search/toc")) return { url, title: "Содержание", text: toc };
+      return {
+        url,
+        title: "Attach over CDP",
+        text: "Attaching over CDP reuses the browser session, see [the guide](https://docs.example.test/guide?utm_medium=email&keep=1).",
+      };
+    },
+  });
+
+  const result = success(await run(harness, { q: "attach cdp browser guide", budget: "quick" }));
+  assert.deepEqual(
+    result.details.evidence.excerpts.map((excerpt) => excerpt.url),
+    ["https://docs.example.test/cdp/attach"],
+    "the table of contents is not evidence",
+  );
+  assert.ok(result.details.evidence.claims.length > 0);
+  assert.equal(textOf(result).includes("utm_"), false, "no tracking parameter reaches the bundle");
+  assert.match(textOf(result), /keep=1/, "meaningful parameters survive");
+});
+
+test("V13.2: two URLs that differ only in the query string are one source", async () => {
+  const harness = makeHarness({
+    fixture: BASIC,
+    search: async (q) => ({
+      query: q,
+      engines: ["google"],
+      hits: [
+        { title: "Report", url: "https://docs.example.test/report?page=1", snippet: "First page of the report." },
+        { title: "Report", url: "https://docs.example.test/report?page=2", snippet: "Second page of the report." },
+      ],
+    }),
+    read: async (url) => ({ url, title: "Report", text: "The report covers freight volumes and warehouse throughput." }),
+  });
+
+  const result = success(await run(harness, { q: "freight report", budget: "quick" }));
+  assert.equal(result.details.results, 1, "canonical host+path de-duplication");
+  assert.equal(harness.calls.read.length, 1);
 });

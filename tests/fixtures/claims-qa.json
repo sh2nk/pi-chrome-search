@@ -1,0 +1,186 @@
+{
+  "name": "claims-qa",
+  "notes": "P13 V13.1: ten queries with a known answer fact. Synthetic pages only (RFC 2606 .test hosts), no personal data. Pages are listed in the order web_research reads them, so the first page is the one the shipped lead-sentence rule quotes. Cases 9 and 10 are deliberately easy for the baseline; the rest bury the fact below a plausible-sounding intro sentence, a licence banner or a table of contents.",
+  "cases": [
+    {
+      "id": "postgres-connections",
+      "query": "postgres max_connections default",
+      "answer": "100 connections",
+      "source": "https://docs.example.test/postgres/config",
+      "pages": [
+        {
+          "title": "Configuring connections",
+          "url": "https://docs.example.test/postgres/config",
+          "text": "The server reads its settings from postgresql.conf when it starts, and an operator can reload the file without a restart for most parameters.\nThe default for max_connections is 100 connections, which is enough for a small team but not for a connection pool behind an application server."
+        },
+        {
+          "title": "Connection limits",
+          "url": "https://blog.example.test/postgres/pool-size",
+          "text": "Every backend consumes a slot, so the pool size must stay below the server limit.\nA pool of twenty clients per replica is a common starting point for a read heavy workload."
+        }
+      ]
+    },
+    {
+      "id": "rust-tokio-select",
+      "query": "rust tokio select macro",
+      "answer": "tokio::select!",
+      "source": "https://docs.example.test/rust/tokio/select",
+      "pages": [
+        {
+          "title": "Asynchronous control flow",
+          "url": "https://docs.example.test/rust/tokio/select",
+          "text": "This chapter covers asynchronous control flow in Rust and the ways a future can be polled to completion.\nThe tokio::select! macro waits on several futures at once and runs the branch that completes first, cancelling the others."
+        },
+        {
+          "title": "Waiting on multiple futures",
+          "url": "https://blog.example.test/rust/futures",
+          "text": "Polling two futures from one task used to need a hand written state machine.\nThe runtime provides a combinator for the common case."
+        }
+      ]
+    },
+    {
+      "id": "cdp-attach",
+      "query": "chrome devtools protocol attach",
+      "answer": "Target.attachToTarget",
+      "source": "https://docs.example.test/devtools/targets",
+      "pages": [
+        {
+          "title": "Target domain",
+          "url": "https://docs.example.test/devtools/targets",
+          "text": "This documentation page is part of the Chrome DevTools Protocol reference and is licensed under the Apache License.\nA flat session is opened with Target.attachToTarget, which returns the session id that every later command must carry."
+        },
+        {
+          "title": "Sessions and targets",
+          "url": "https://reference.example.test/devtools/sessions",
+          "text": "A browser target exposes every page as a separate target.\nInspect the target list before attaching to avoid an orphaned session."
+        }
+      ]
+    },
+    {
+      "id": "venv-windows",
+      "query": "python venv activate windows",
+      "answer": "Scripts\\activate",
+      "source": "https://docs.example.test/python/venv/windows",
+      "pages": [
+        {
+          "title": "Activating a virtual environment",
+          "url": "https://docs.example.test/python/venv/windows",
+          "text": "Activating a virtual environment differs between shells and operating systems, so check the table for the shell you use.\nOn Windows the venv puts its entry points in Scripts\\activate, which you run from cmd.exe before starting Python."
+        },
+        {
+          "title": "Virtual environments",
+          "url": "https://blog.example.test/python/venv",
+          "text": "A virtual environment keeps the interpreter and the site packages of a project apart from the system installation.\nCreate one per project directory."
+        }
+      ]
+    },
+    {
+      "id": "http-429",
+      "query": "http 429 retry after",
+      "answer": "Retry-After",
+      "source": "https://docs.example.test/http/status/429",
+      "pages": [
+        {
+          "title": "Status codes a client must handle",
+          "url": "https://docs.example.test/http/status/429",
+          "text": "This section lists the status codes a client must handle and explains when each code is expected to appear.\nA 429 response carries a Retry-After header that tells the client how long to wait before it sends another request."
+        },
+        {
+          "title": "Rate limiting clients",
+          "url": "https://blog.example.test/http/rate-limit",
+          "text": "Servers that rate limit usually return a short body explaining the policy.\nThe client should back off instead of retrying immediately."
+        }
+      ]
+    },
+    {
+      "id": "pytest-fixture-scope",
+      "query": "pytest fixture scope session",
+      "answer": "scope=\"session\"",
+      "source": "https://docs.example.test/pytest/fixtures/scope",
+      "pages": [
+        {
+          "title": "Fixture basics",
+          "url": "https://docs.example.test/pytest/fixtures/scope",
+          "text": "Fixtures are functions that run before a test and provide a fixed baseline the test can rely on.\nTo share one fixture across the whole test module, declare it with scope=\"session\" so it is created once."
+        },
+        {
+          "title": "Sharing test setup",
+          "url": "https://blog.example.test/pytest/setup",
+          "text": "Test setup that connects to a database should not run for every function.\nA wider scope keeps the connection open for the module."
+        }
+      ]
+    },
+    {
+      "id": "compose-healthcheck",
+      "query": "docker compose healthcheck interval",
+      "answer": "interval: 30s",
+      "source": "https://docs.example.test/compose/healthcheck",
+      "pages": [
+        {
+          "title": "Healthchecks",
+          "url": "https://docs.example.test/compose/healthcheck",
+          "text": "A healthcheck tells Compose how to test whether a container is ready to serve traffic.\nThe interval: 30s key controls how often Compose runs that test, and the retries key bounds the failures."
+        },
+        {
+          "title": "Waiting for dependencies",
+          "url": "https://blog.example.test/compose/depends-on",
+          "text": "depends_on waits for the dependency container to start, not for the service inside it to answer.\nReadiness requires a healthcheck on the dependency itself."
+        }
+      ]
+    },
+    {
+      "id": "cors-ru",
+      "query": "что такое cors простыми словами",
+      "answer": "Access-Control-Allow-Origin",
+      "source": "https://docs.example.test/web/cors",
+      "pages": [
+        {
+          "title": "Что такое CORS",
+          "url": "https://docs.example.test/web/cors",
+          "text": "CORS — это механизм, который позволяет браузеру запрашивать ресурсы с другого домена.\nСервер разрешает такой запрос заголовком Access-Control-Allow-Origin, где перечислены допустимые источники."
+        },
+        {
+          "title": "Проверка запросов",
+          "url": "https://blog.example.test/web/cors-preflight",
+          "text": "Браузер отправляет предварительный запрос, если метод или заголовки не относятся к простым.\nОтвет на него тоже должен содержать разрешающие заголовки."
+        }
+      ]
+    },
+    {
+      "id": "git-squash",
+      "query": "git rebase interactive squash",
+      "answer": "squash",
+      "source": "https://docs.example.test/git/rebase/squash",
+      "pages": [
+        {
+          "title": "Squashing commits",
+          "url": "https://docs.example.test/git/rebase/squash",
+          "text": "To squash commits, start an interactive rebase and mark the commits you want to combine with squash.\nThe editor keeps the message of the first commit unless you rewrite it."
+        },
+        {
+          "title": "Cleaning up history",
+          "url": "https://blog.example.test/git/history",
+          "text": "A tidy history is easier to review than a long chain of fixup commits.\nRewrite only commits that nobody else has pulled."
+        }
+      ]
+    },
+    {
+      "id": "yandex-fast-answer",
+      "query": "yandex быстрый ответ поиск",
+      "answer": "Быстрый ответ",
+      "source": "https://docs.example.test/search/fast-answer",
+      "pages": [
+        {
+          "title": "Содержание",
+          "url": "https://wiki.example.test/search/toc",
+          "text": "# Содержание\n1. Быстрый ответ и нейросети\n2. Настройка поиска и быстрые ответы в браузере\n3. История поиска\n4. Настройки приватности\n5. Справочный центр"
+        },
+        {
+          "title": "Быстрый ответ",
+          "url": "https://docs.example.test/search/fast-answer",
+          "text": "Блок «Быстрый ответ» показывает короткую справку над результатами поиска.\nОн появляется для фактических запросов и не заменяет список ссылок."
+        }
+      ]
+    }
+  ]
+}

@@ -15,9 +15,14 @@
  *    deterministic "no new domains" rule apply and no model is consulted at all
  *    (V6.3). A throwing reflex always falls back to the fixed path.
  * 3. **The evidence bundle.** Every claim cites a URL that a search actually
- *    returned; citations are de-duplicated by `normalizeUrl`; domains are derived
- *    from those URLs, never invented. Claims are extracted from the read text
- *    (the lead sentence), so the main model still writes the final answer.
+ *    returned; sources are de-duplicated by canonical host+path
+ *    (`sourceKey`), tracking parameters are stripped from URLs and link text,
+ *    and domains are derived from those URLs, never invented. Claims are the
+ *    best-answering sentences across all read pages (`extract/claims.ts`), not
+ *    the first sentence of the first page, so the main model still writes the
+ *    final answer. `enough:yes` requires those claims to cover at least 60% of
+ *    the query terms (V13.3); otherwise the loop spends the rest of its budget
+ *    on `read_more`/`refine` instead of declaring victory.
  * 4. **The hard cap.** The rendered text can never exceed `outputMaxChars`
  *    (default 2500). Loss order: tail excerpts → tail sources → tail claims; a
  *    URL is never cut in half. `truncated` reports every cut.
@@ -34,8 +39,14 @@ import { Type, type Static } from "typebox";
 
 import type { EngineId } from "../engines/types.ts";
 import { ENGINE_IDS } from "../engines/types.ts";
-import { domainOf, normalizeUrl } from "../extract/urls.ts";
-import { hasExactTerm, queryTerms, tokenize } from "../reflex/rules.ts";
+import {
+  MIN_CLAIM_COVERAGE,
+  claimsCoverage,
+  isTocPage,
+  selectClaims,
+} from "../extract/claims.ts";
+import { domainOf, normalizeUrl, sourceKey, stripTrackingFromText } from "../extract/urls.ts";
+import { queryTerms, tokenize } from "../reflex/rules.ts";
 import type { Candidate, CoverageNext, CoverageVerdict, Evidence } from "../reflex/types.ts";
 import type { ErrorCode, FailureDetails, Stage } from "../runtime/error-codes.ts";
 import { isWebSearchError } from "../runtime/error-codes.ts";
@@ -238,9 +249,7 @@ export interface WebResearchOptions {
 const TITLE_MAX_CHARS = 200;
 const SNIPPET_MAX_CHARS = 300;
 
-/** A claim is a lead sentence: shorter is a fragment, longer is a paragraph. */
-const CLAIM_MIN_CHARS = 30;
-const CLAIM_MAX_CHARS = 200;
+/** A claim is a sentence: shorter is a fragment, longer is a paragraph. */
 const MAX_CLAIM_CITATIONS = 3;
 
 /** Excerpts are the bulk of the bundle; they get half of the hard cap. */
@@ -476,6 +485,8 @@ interface ReadRecord {
 
 interface LoopState {
   seen: Map<string, SeenResult>;
+  /** `sourceKey` of every merged hit: canonical host+path de-duplication (P13-B). */
+  sourceKeys: Set<string>;
   domains: Set<string>;
   /** URLs added by the current search round (read these before leftovers). */
   roundUrls: Set<string>;
@@ -525,12 +536,17 @@ function mergeOutcome(state: LoopState, outcome: SearchOutcome): number {
     const domain = domainOf(url);
     if (domain === "") continue;
     if (state.seen.has(url)) continue;
+    // A tracking-parameter variant is the same source, not a second one: one
+    // query string can never buy a duplicate citation.
+    const key = sourceKey(url) ?? url;
+    if (state.sourceKeys.has(key)) continue;
+    state.sourceKeys.add(key);
 
     const engine = hit.engine ?? outcome.engines[0] ?? "google";
     state.seen.set(url, {
       url,
-      title: truncate(collapse(hit.title), TITLE_MAX_CHARS),
-      snippet: truncate(collapse(hit.snippet), SNIPPET_MAX_CHARS),
+      title: truncate(collapse(stripTrackingFromText(hit.title)), TITLE_MAX_CHARS),
+      snippet: truncate(collapse(stripTrackingFromText(hit.snippet)), SNIPPET_MAX_CHARS),
       domain,
       engine,
     });
@@ -610,30 +626,54 @@ function isCoverageVerdict(value: unknown): value is CoverageVerdict {
 
 /**
  * Deterministic coverage judge, used when `reflex.enabled` is false (and as the
- * fail-open fallback). It is the SPEC §9.2 rule in its cheap form:
+ * fail-open fallback, and as the honesty floor on a model verdict).
  *
- * - two independent domains plus one page that actually carries a query term is
- *   enough;
- * - no evidence at all means "read more";
- * - a round that contributed no new domain means refining would repeat the same
- *   result set, so stop (the PLAN P5-B "no new domains" rule);
- * - one domain or an off-target result set asks for a refinement.
+ * SPEC §9.2 asked for "two independent domains plus one page that carries a
+ * query term". That declared `enough:yes` while the claims were off-topic, so
+ * P13 replaces the single-term test with claim coverage (V13.3): the answer has
+ * to use at least 60% of what the user asked. Everything else is the cheap
+ * budget policy — read the candidates already in the pool before spending a
+ * search, stop refining when a round added no new domain.
  */
-function fixedCoverage(query: string, evidence: readonly Evidence[], newDomains: number): CoverageVerdict {
+function fixedCoverage(
+  query: string,
+  evidence: readonly Evidence[],
+  newDomains: number,
+  claimTexts: readonly string[],
+  unread: boolean,
+): CoverageVerdict {
   const domains = new Set<string>();
-  let termHit = false;
-
   for (const item of evidence) {
     const domain = domainOf(item.url);
     if (domain !== "") domains.add(domain);
-    if (hasExactTerm(query, `${item.title ?? ""} ${item.excerpt ?? ""}`)) termHit = true;
   }
+  const coverage = claimsCoverage(query, claimTexts);
 
-  if (domains.size >= 2 && termHit) return { enough: true, next: "stop" };
   if (evidence.length === 0) return { enough: false, next: "read_more" };
-  if (newDomains === 0) return { enough: false, next: "stop" };
-  if (domains.size < 2) return { enough: false, next: "read_more" };
-  return { enough: false, next: "refine" };
+  if (domains.size >= 2 && coverage >= MIN_CLAIM_COVERAGE) return { enough: true, next: "stop" };
+  // A round that contributed no new domain cannot be improved by a new query.
+  if (newDomains === 0) return { enough: false, next: unread ? "read_more" : "stop" };
+  // The question is only partly answered: spend the remaining budget on it.
+  return { enough: false, next: unread ? "read_more" : "refine" };
+}
+
+/**
+ * A model verdict cannot declare `enough:yes` while the claims ignore the query.
+ * The floor is deterministic, so it holds for every backend (and for rules).
+ */
+function applyCoverageFloor(
+  verdict: CoverageVerdict,
+  query: string,
+  claimTexts: readonly string[],
+  unread: boolean,
+  searchesLeft: number,
+): CoverageVerdict {
+  if (!verdict.enough) return verdict;
+  if (claimsCoverage(query, claimTexts) >= MIN_CLAIM_COVERAGE) return verdict;
+  return {
+    enough: false,
+    next: unread ? "read_more" : searchesLeft > 0 ? "refine" : "stop",
+  };
 }
 
 function evidenceOf(state: LoopState): Evidence[] {
@@ -650,17 +690,22 @@ async function judgeCoverage(
   newDomains: number,
   reflexOn: boolean,
   deps: ToolDeps,
+  claimTexts: readonly string[],
+  unread: boolean,
+  searchesLeft: number,
 ): Promise<CoverageVerdict> {
   const evidence = evidenceOf(state);
+  let verdict: CoverageVerdict | undefined;
   if (reflexOn && deps.reflex !== undefined) {
     try {
-      const verdict = await deps.reflex.coverage(query, evidence);
-      if (isCoverageVerdict(verdict)) return verdict;
+      const candidate = await deps.reflex.coverage(query, evidence);
+      if (isCoverageVerdict(candidate)) verdict = candidate;
     } catch {
       // Fail-open: the fixed rule is the floor.
     }
   }
-  return fixedCoverage(query, evidence, newDomains);
+  verdict ??= fixedCoverage(query, evidence, newDomains, claimTexts, unread);
+  return applyCoverageFloor(verdict, query, claimTexts, unread, searchesLeft);
 }
 
 // ---------------------------------------------------------------------------
@@ -702,60 +747,36 @@ function refineQuery(
 // Claims
 // ---------------------------------------------------------------------------
 
-const SKIPPED_LINE = /^[#>*|!]|^\d+[.)]\s|^[-+*]\s/;
-
 /**
- * The lead sentence of a readable document: skip headings, lists, quotes and
- * tables, then take the first sentence long enough to say something. A page that
- * yields nothing contributes no claim — the bundle never pads with fabrication.
+ * Snippet claim used only when no read page produced a sentence (every read
+ * failed, or the pages were navigation). It is still real cited text, and the
+ * same boilerplate/date filters apply — a SERP snippet is not a free pass.
  */
-function leadSentence(text: string): string | null {
-  for (const line of text.split(/\n+/)) {
-    const clean = line.trim();
-    if (clean === "" || SKIPPED_LINE.test(clean)) continue;
-    for (const part of clean.split(/(?<=[.!?…])\s+/u)) {
-      const sentence = collapse(part);
-      if (sentence.length < CLAIM_MIN_CHARS) continue;
-      return truncate(sentence, CLAIM_MAX_CHARS);
-    }
-  }
-  return null;
-}
-
 function snippetClaim(item: SeenResult): string | null {
-  const text = collapse(item.snippet);
-  if (text.length < CLAIM_MIN_CHARS) return null;
-  return truncate(text, CLAIM_MAX_CHARS);
+  const text = collapse(stripTrackingFromText(item.snippet));
+  if (text.length < 30) return null;
+  return truncate(text, 200);
 }
 
 /**
- * One claim per read page, corroboration merged when two pages agree word for
- * word. When no page produced a claim (every read failed, or the text was pure
- * navigation), snippets from the SERP stand in — they are still real cited text.
+ * Claims for the bundle: the best-answering sentences across every read page,
+ * not the first sentence of the first page (P13-A). Identical text from two
+ * pages is one claim with two citations; a page that contributed nothing is
+ * simply absent. Snippets stand in only when no page produced a claim.
  */
-function buildClaims(state: LoopState, maxClaims: number): ResearchClaim[] {
-  const claims: ResearchClaim[] = [];
-  const byText = new Map<string, ResearchClaim>();
-
-  for (const record of state.reads) {
-    if (claims.length >= maxClaims) break;
-    const text = leadSentence(record.text);
-    if (text === null) continue;
-    const key = queryKey(text);
-    const existing = byText.get(key);
-    if (existing !== undefined) {
-      if (!existing.citations.includes(record.url) && existing.citations.length < MAX_CLAIM_CITATIONS) {
-        existing.citations.push(record.url);
-      }
-      continue;
-    }
-    const claim: ResearchClaim = { text, sourceUrl: record.url, citations: [record.url] };
-    byText.set(key, claim);
-    claims.push(claim);
-  }
-
+function buildClaims(state: LoopState, query: string, maxClaims: number): ResearchClaim[] {
+  const picks = selectClaims(
+    state.reads.map((record) => ({ url: record.url, title: record.title, text: record.text })),
+    { query, maxClaims },
+  );
+  const claims: ResearchClaim[] = picks.map((pick) => ({
+    text: pick.text,
+    sourceUrl: pick.sourceUrl,
+    citations: pick.citations.slice(0, MAX_CLAIM_CITATIONS),
+  }));
   if (claims.length > 0) return claims;
 
+  const byText = new Map<string, ResearchClaim>();
   for (const item of state.seen.values()) {
     if (claims.length >= maxClaims) break;
     const text = snippetClaim(item);
@@ -769,8 +790,8 @@ function buildClaims(state: LoopState, maxClaims: number): ResearchClaim[] {
   return claims;
 }
 
-function buildBundle(state: LoopState, maxClaims: number): ResearchEvidence {
-  const claims = buildClaims(state, maxClaims);
+function buildBundle(state: LoopState, query: string, maxClaims: number): ResearchEvidence {
+  const claims = buildClaims(state, query, maxClaims);
 
   const cited = new Set<string>();
   for (const claim of claims) for (const url of claim.citations) cited.add(url);
@@ -976,6 +997,7 @@ export function createWebResearchTool(
 
     const state: LoopState = {
       seen: new Map(),
+      sourceKeys: new Set(),
       domains: new Set(),
       roundUrls: new Set(),
       read: new Set(),
@@ -1055,12 +1077,15 @@ export function createWebResearchTool(
             state.lastError = { code: "E_UNSUPPORTED", stage: "read" };
             continue;
           }
-          const title = collapse(document.title ?? "");
+          // A table of contents is navigation, not evidence: citing it would
+          // quote a heading and spend the read on a page that answers nothing.
+          if (isTocPage(raw)) continue;
+          const title = collapse(stripTrackingFromText(document.title ?? ""));
           state.reads.push({
             url: candidate.url,
             title,
             text: raw,
-            excerpt: truncate(collapse(raw), excerptChars),
+            excerpt: truncate(collapse(stripTrackingFromText(raw)), excerptChars),
           });
         }
       }
@@ -1069,29 +1094,41 @@ export function createWebResearchTool(
       // Judge against the user's original question, not the rewritten query:
       // a refinement borrows terms from the SERP, so scoring it would always
       // "match" the very pages that produced those terms.
-      verdict = await judgeCoverage(input.q, state, roundNewDomains, reflexOn, deps);
+      const maxClaims = readLimit > 0 ? Math.max(1, readLimit) : 1;
+      const claimTexts = buildClaims(state, input.q, maxClaims).map((claim) => claim.text);
+      const unread = unreadLeft();
+      verdict = await judgeCoverage(
+        input.q,
+        state,
+        roundNewDomains,
+        reflexOn,
+        deps,
+        claimTexts,
+        unread,
+        spec.searches - state.searches,
+      );
       if (verdict.enough || verdict.next === "stop") break;
+      // `read_more` is honoured before a search: the candidates are already in
+      // the pool, and a rewrite can wait until they are exhausted (V13.3).
+      if (verdict.next === "read_more" && unread && state.readCount < readLimit) {
+        roundReadsLeft = readShare(readLimit - state.readCount, 1);
+        if (roundReadsLeft > 0) continue;
+      }
       if (state.searches >= spec.searches) break;
       if (state.readCount >= readLimit) break;
       // No new domain: refining would only re-fetch the same result set.
       if (roundNewDomains === 0) break;
 
       const nextQuery = refineQuery(query, roundHits, tried);
-      if (nextQuery === null) {
-        // The verdict may still ask for more reading from the same result set.
-        if (verdict.next === "read_more" && unreadLeft()) {
-          roundReadsLeft = readShare(readLimit - state.readCount, 1);
-          continue;
-        }
-        break;
-      }
+      if (nextQuery === null) break;
       tried.add(queryKey(nextQuery));
       query = nextQuery;
       pendingSearch = true;
     }
 
     // --- render -----------------------------------------------------------
-    const bundle = buildBundle(state, readLimit > 0 ? Math.max(1, readLimit) : 1);
+    const maxClaims = readLimit > 0 ? Math.max(1, readLimit) : 1;
+    const bundle = buildBundle(state, input.q, maxClaims);
     const fitted = renderBundle(
       headerOf(input.budget, state.searches, state.readCount, state.seen.size, verdict),
       bundle,

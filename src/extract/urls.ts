@@ -33,6 +33,8 @@ const TRACKING_EXACT: ReadonlySet<string> = new Set([
   "si",
   "sca_esv",
   "sxsrf",
+  // Plan-listed marketing parameters that survive on copied links.
+  "ref",
 ]);
 
 /** Prefix families (`utm_source`, `utm_medium`, …). Compared case-insensitively. */
@@ -120,6 +122,26 @@ export function stripTrackingParams(raw: string): string {
   return parsed.toString();
 }
 
+/**
+ * Source identity for de-duplication and citation folding (PLAN-v2 P13-B).
+ *
+ * Canonical host (no `www.`) + path, with the whole query string dropped. Two
+ * links that differ only in tracking or campaign parameters are the same source,
+ * and a source can never appear twice in a research bundle.
+ *
+ * Deliberately *not* the registrable domain: folding `docs.python.org/x` and
+ * `blog.python.org/x` into `python.org/x` would merge two independent sources
+ * and quietly destroy the corroboration signal the research bundle relies on.
+ * Returns null for anything that is not a parseable http(s) URL.
+ */
+export function sourceKey(raw: string): string | null {
+  const normalized = normalizeUrl(raw);
+  if (normalized === null) return null;
+  const parsed = new URL(normalized);
+  const path = parsed.pathname.replace(/\/+$/, "");
+  return `${parsed.hostname.replace(/^www\./, "")}${path}`;
+}
+
 /** Hostname without a leading `www.`, lowercase; empty string for unparsable input. */
 export function domainOf(raw: string): string {
   if (typeof raw !== "string") return "";
@@ -131,6 +153,46 @@ export function domainOf(raw: string): string {
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
   return parsed.hostname.toLowerCase().replace(/^www\./, "");
+}
+
+/**
+ * Strip tracking parameters from every URL inside prose or Markdown link text
+ * (PLAN-v2 P13-B). A research claim is quoted text, and the shipped bundle was
+ * returning a truncated `[label](https://…?utm_source=…)` tail.
+ *
+ * Markdown links are cleaned on both sides: the href loses its tracking
+ * parameters and a URL used as the label is cleaned too. Trailing punctuation is
+ * preserved, so a sentence stays a sentence. Input that is not a string is
+ * returned unchanged.
+ */
+export function stripTrackingFromText(text: string): string {
+  if (typeof text !== "string" || text === "") return text;
+  return cleanBareUrls(
+    text.replace(MARKDOWN_LINK, (_match, label: string, href: string) =>
+      `[${cleanBareUrls(label)}](${stripTrackingParams(href)})`,
+    ),
+  );
+}
+
+const MARKDOWN_LINK = /\[([^\]]*)\]\(([^()\s]+)\)/g;
+const BARE_URL = /https?:\/\/[^\s<>"'`]+/gi;
+const TRAILING_PUNCT = /[.,;:!?]/;
+
+function cleanBareUrls(text: string): string {
+  return text.replace(BARE_URL, (match) => {
+    // Keep sentence punctuation outside the URL, and keep a closing paren only
+    // when the URL itself opened one (wikimedia-style `/wiki/Foo_(bar)`).
+    let end = match.length;
+    while (end > 0 && TRAILING_PUNCT.test(match[end - 1] ?? "")) end -= 1;
+    while (end > 0 && match[end - 1] === ")") {
+      const head = match.slice(0, end);
+      const opens = head.split("(").length - 1;
+      const closes = head.split(")").length - 1;
+      if (closes <= opens) break;
+      end -= 1;
+    }
+    return `${stripTrackingParams(match.slice(0, end))}${match.slice(end)}`;
+  });
 }
 
 /**

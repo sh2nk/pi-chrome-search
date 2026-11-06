@@ -1,0 +1,238 @@
+{
+  "queries": [
+    {
+      "q": "postgres max_connections по умолчанию",
+      "enough": false,
+      "searches": 1,
+      "reads": 2,
+      "claims": [
+        {
+          "text": "По умолчанию обычно это 100 подключений, но это число может быть меньше, если ядро накладывает свои ограничения (это определяется в процессе initdb).",
+          "sourceUrl": "https://postgresqlco.nf/doc/ru/param/max_connections/",
+          "citations": [
+            "https://postgresqlco.nf/doc/ru/param/max_connections/"
+          ]
+        },
+        {
+          "text": "TCP-порт, открываемый сервером; по умолчанию, 5432.",
+          "sourceUrl": "https://postgrespro.ru/docs/postgresql/current/runtime-config-connection?lang=ru-en",
+          "citations": [
+            "https://postgrespro.ru/docs/postgresql/current/runtime-config-connection?lang=ru-en"
+          ]
+        }
+      ],
+      "citations": [
+        {
+          "url": "https://postgresqlco.nf/doc/ru/param/max_connections/",
+          "title": "PostgreSQL Документация: max_connections параметр",
+          "domain": "postgresqlco.nf"
+        },
+        {
+          "url": "https://postgrespro.ru/docs/postgresql/current/runtime-config-connection?lang=ru-en",
+          "title": "19.3.1. Параметры подключений",
+          "domain": "postgrespro.ru"
+        }
+      ],
+      "excerpts": [
+        {
+          "url": "https://postgrespro.ru/docs/postgresql/current/runtime-config-connection?lang=ru-en",
+          "excerpt": "# Компания Postgres Professional | 19.3. Подключения и аутентификация | | | | | | --- | --- | --- | --- | --- | | Пред. | Наверх | Глава 19. Конфигурация сервера | Начало | След. | ## 19.3. Подключения и аутентификация # ### 19.3.1. Параметры подключений # `listen_addresses` (`string`) # Задаёт адреса TCP/IP, по которым сервер будет принимать подключения клиентских приложений. Это значение принимает форму списка, разделённого запятыми, из имён и/или числовых IP-адресов узлов. Особый элемент, `*`, обозначает все имеющиеся IP-интерфейсы. Запись `0.0.0.0` позволяет задействовать все адреса IPv4, а `::` — все адреса IPv6…"
+        },
+        {
+          "url": "https://postgresqlco.nf/doc/ru/param/max_connections/",
+          "excerpt": "# max_connections | Тип: | integer | | --- | --- | | По умолчанию: | 100 | | Минимальный: | 1 | | Максимальный: | 262143 | | Контекст: | postmaster | | Перезапуск: | true | Определяет максимальное число одновременных подключений к серверу БД. По умолчанию обычно это 100 подключений, но это число может быть меньше, если ядро накладывает свои ограничения (это определяется в процессе initdb). Этот параметр можно задать только при запуске сервера. Для ведомого сервера значение этого параметра должно быть больше или равно значению на ведущем. В противном случае на ведомом сервере не будут разрешены запросы. #### Рекоменда…"
+        }
+      ]
+    },
+    {
+      "q": "docker compose healthcheck интервал",
+      "enough": true,
+      "searches": 1,
+      "reads": 2,
+      "claims": [
+        {
+          "text": "HEALTHCHECK в Docker — это встроенный механизм, который периодически запускает команду внутри контейнера и оценивает его состояние: healthy, starting или unhealthy.",
+          "sourceUrl": "https://fastfox.pro/blog/tutorials/docker-healthcheck-restart-policy/",
+          "citations": [
+            "https://fastfox.pro/blog/tutorials/docker-healthcheck-restart-policy/"
+          ]
+        },
+        {
+          "text": "Именно здесь важную роль играют проверки работоспособности Docker Compose.",
+          "sourceUrl": "https://dockerhosting.ru/blog/healthcheck-v-docker-proverka-sostoyaniya-kontejnera/",
+          "citations": [
+            "https://dockerhosting.ru/blog/healthcheck-v-docker-proverka-sostoyaniya-kontejnera/"
+          ]
+        }
+      ],
+      "citations": [
+        {
+          "url": "https://fastfox.pro/blog/tutorials/docker-healthcheck-restart-policy/",
+          "title": "Docker HEALTHCHECK правильно: шаблоны проверок и ...",
+          "domain": "fastfox.pro"
+        },
+        {
+          "url": "https://dockerhosting.ru/blog/healthcheck-v-docker-proverka-sostoyaniya-kontejnera/",
+          "title": "Healthcheck в Docker. Проверка состояния контейнера",
+          "domain": "dockerhosting.ru"
+        }
+      ],
+      "excerpts": [
+        {
+          "url": "https://dockerhosting.ru/blog/healthcheck-v-docker-proverka-sostoyaniya-kontejnera/",
+          "excerpt": "# Healthcheck в Docker. Проверка состояния контейнера - автор: [Александр](https://dockerhosting.ru/blog/author/aleks/) - 24.06.2025 ### Проверка работоспособности Docker Вы когда-нибудь запускали контейнер, который работает, но на самом деле не работает? Такое случается. Именно здесь важную роль играют проверки работоспособности Docker Compose. Они не просто подтверждают, что контейнер запущен, — они гарантируют, что он действительно готов обрабатывать запросы. Работающий контейнер не всегда является работоспособным, и это различие может означать разницу между успешным развертыванием и долгой ночью, полной поиска и…"
+        },
+        {
+          "url": "https://fastfox.pro/blog/tutorials/docker-healthcheck-restart-policy/",
+          "excerpt": "# Docker HEALTHCHECK правильно: шаблоны проверок и связка с restart‑политиками - VPS, серверы и администрирование - 30 окт, 2025 - Время на чтение: ~15 мин - Автор: AI (GPT 5) Искусственный интеллект Данная статья была создана с использованием искусственного интеллекта (GPT-5). Пожалуйста, имейте в виду, что текст может содержать неточности или ошибки. HEALTHCHECK в Docker — это встроенный механизм, который периодически запускает команду внутри контейнера и оценивает его состояние: healthy, starting или unhealthy. При правильно заданной проверке вы получаете предсказуемый старт зависимостей, аккуратные rolling‑обновл…"
+        }
+      ]
+    },
+    {
+      "q": "CORS Access-Control-Allow-Origin настройка",
+      "enough": true,
+      "searches": 1,
+      "reads": 2,
+      "claims": [
+        {
+          "text": "CORS (Cross-Origin Resource Sharing) — механизм безопасности, встроенный в каждый современный браузер.",
+          "sourceUrl": "https://purpleschool.ru/blog/chto-takoe-cors-i-kak-ego-nastroit-polnoe-rukovodstvo",
+          "citations": [
+            "https://purpleschool.ru/blog/chto-takoe-cors-i-kak-ego-nastroit-polnoe-rukovodstvo"
+          ]
+        },
+        {
+          "text": "Для простых запросов браузер сразу отправляет запрос и проверяет заголовок `Access-Control-Allow-Origin` в ответе:",
+          "sourceUrl": "https://purpleschool.ru/blog/chto-takoe-cors-i-kak-ego-nastroit-polnoe-rukovodstvo",
+          "citations": [
+            "https://purpleschool.ru/blog/chto-takoe-cors-i-kak-ego-nastroit-polnoe-rukovodstvo"
+          ]
+        }
+      ],
+      "citations": [
+        {
+          "url": "https://purpleschool.ru/blog/chto-takoe-cors-i-kak-ego-nastroit-polnoe-rukovodstvo",
+          "title": "Что такое CORS и как его настроить: полное руководство",
+          "domain": "purpleschool.ru"
+        },
+        {
+          "url": "https://habr.com/ru/companies/otus/articles/706908/",
+          "title": "Несколько советов по работе с CORS для начинающих ...",
+          "domain": "habr.com"
+        }
+      ],
+      "excerpts": [
+        {
+          "url": "https://habr.com/ru/companies/otus/articles/706908/",
+          "excerpt": "# Несколько советов по работе с CORS для начинающих разработчиков В этой статье мы с вами разберемся, что такое CORS, CORS‑ошибки и из‑за чего мы можем с ними сталкиваться. Я также продемонстрирую возможные решения и объясню, что такое предварительные (preflight) запросы, CORS‑заголовки и в чем заключается их важность при обмене данными между сторонами. Эта статья рассчитана на тех, у кого уже есть базовые познания в области веб‑разработки и некоторый опыт с протоколом HTTP. Я старался писать статью так, чтобы она была понятна и новичкам, будучи наполненной знаниями, но при этом стараясь избегать слишком большого кол…"
+        },
+        {
+          "url": "https://purpleschool.ru/blog/chto-takoe-cors-i-kak-ego-nastroit-polnoe-rukovodstvo",
+          "excerpt": "# Что такое CORS и как его настроить: полное руководство ## Введение CORS (Cross-Origin Resource Sharing) — механизм безопасности, встроенный в каждый современный браузер. Он ограничивает HTTP-запросы между разными источниками. Источник (origin) — это комбинация протокола, домена и порта. Например, `https://example.com:443` и `https://api.example.com:443` — разные источники, даже если домен отличается только поддоменом. Когда ваш фронтенд на `http://localhost:3000` делает запрос к API на `http://localhost:8000`, браузер блокирует его по умолчанию. Именно это и называют ошибкой CORS. Разберём, как браузер принимает ре…"
+        }
+      ]
+    }
+  ],
+  "claims": [
+    {
+      "text": "По умолчанию обычно это 100 подключений, но это число может быть меньше, если ядро накладывает свои ограничения (это определяется в процессе initdb).",
+      "sourceUrl": "https://postgresqlco.nf/doc/ru/param/max_connections/",
+      "citations": [
+        "https://postgresqlco.nf/doc/ru/param/max_connections/"
+      ]
+    },
+    {
+      "text": "TCP-порт, открываемый сервером; по умолчанию, 5432.",
+      "sourceUrl": "https://postgrespro.ru/docs/postgresql/current/runtime-config-connection?lang=ru-en",
+      "citations": [
+        "https://postgrespro.ru/docs/postgresql/current/runtime-config-connection?lang=ru-en"
+      ]
+    },
+    {
+      "text": "HEALTHCHECK в Docker — это встроенный механизм, который периодически запускает команду внутри контейнера и оценивает его состояние: healthy, starting или unhealthy.",
+      "sourceUrl": "https://fastfox.pro/blog/tutorials/docker-healthcheck-restart-policy/",
+      "citations": [
+        "https://fastfox.pro/blog/tutorials/docker-healthcheck-restart-policy/"
+      ]
+    },
+    {
+      "text": "Именно здесь важную роль играют проверки работоспособности Docker Compose.",
+      "sourceUrl": "https://dockerhosting.ru/blog/healthcheck-v-docker-proverka-sostoyaniya-kontejnera/",
+      "citations": [
+        "https://dockerhosting.ru/blog/healthcheck-v-docker-proverka-sostoyaniya-kontejnera/"
+      ]
+    },
+    {
+      "text": "CORS (Cross-Origin Resource Sharing) — механизм безопасности, встроенный в каждый современный браузер.",
+      "sourceUrl": "https://purpleschool.ru/blog/chto-takoe-cors-i-kak-ego-nastroit-polnoe-rukovodstvo",
+      "citations": [
+        "https://purpleschool.ru/blog/chto-takoe-cors-i-kak-ego-nastroit-polnoe-rukovodstvo"
+      ]
+    },
+    {
+      "text": "Для простых запросов браузер сразу отправляет запрос и проверяет заголовок `Access-Control-Allow-Origin` в ответе:",
+      "sourceUrl": "https://purpleschool.ru/blog/chto-takoe-cors-i-kak-ego-nastroit-polnoe-rukovodstvo",
+      "citations": [
+        "https://purpleschool.ru/blog/chto-takoe-cors-i-kak-ego-nastroit-polnoe-rukovodstvo"
+      ]
+    }
+  ],
+  "citations": [
+    {
+      "url": "https://postgresqlco.nf/doc/ru/param/max_connections/",
+      "title": "PostgreSQL Документация: max_connections параметр",
+      "domain": "postgresqlco.nf"
+    },
+    {
+      "url": "https://postgrespro.ru/docs/postgresql/current/runtime-config-connection?lang=ru-en",
+      "title": "19.3.1. Параметры подключений",
+      "domain": "postgrespro.ru"
+    },
+    {
+      "url": "https://fastfox.pro/blog/tutorials/docker-healthcheck-restart-policy/",
+      "title": "Docker HEALTHCHECK правильно: шаблоны проверок и ...",
+      "domain": "fastfox.pro"
+    },
+    {
+      "url": "https://dockerhosting.ru/blog/healthcheck-v-docker-proverka-sostoyaniya-kontejnera/",
+      "title": "Healthcheck в Docker. Проверка состояния контейнера",
+      "domain": "dockerhosting.ru"
+    },
+    {
+      "url": "https://purpleschool.ru/blog/chto-takoe-cors-i-kak-ego-nastroit-polnoe-rukovodstvo",
+      "title": "Что такое CORS и как его настроить: полное руководство",
+      "domain": "purpleschool.ru"
+    },
+    {
+      "url": "https://habr.com/ru/companies/otus/articles/706908/",
+      "title": "Несколько советов по работе с CORS для начинающих ...",
+      "domain": "habr.com"
+    }
+  ],
+  "excerpts": [
+    {
+      "url": "https://postgrespro.ru/docs/postgresql/current/runtime-config-connection?lang=ru-en",
+      "excerpt": "# Компания Postgres Professional | 19.3. Подключения и аутентификация | | | | | | --- | --- | --- | --- | --- | | Пред. | Наверх | Глава 19. Конфигурация сервера | Начало | След. | ## 19.3. Подключения и аутентификация # ### 19.3.1. Параметры подключений # `listen_addresses` (`string`) # Задаёт адреса TCP/IP, по которым сервер будет принимать подключения клиентских приложений. Это значение принимает форму списка, разделённого запятыми, из имён и/или числовых IP-адресов узлов. Особый элемент, `*`, обозначает все имеющиеся IP-интерфейсы. Запись `0.0.0.0` позволяет задействовать все адреса IPv4, а `::` — все адреса IPv6…"
+    },
+    {
+      "url": "https://postgresqlco.nf/doc/ru/param/max_connections/",
+      "excerpt": "# max_connections | Тип: | integer | | --- | --- | | По умолчанию: | 100 | | Минимальный: | 1 | | Максимальный: | 262143 | | Контекст: | postmaster | | Перезапуск: | true | Определяет максимальное число одновременных подключений к серверу БД. По умолчанию обычно это 100 подключений, но это число может быть меньше, если ядро накладывает свои ограничения (это определяется в процессе initdb). Этот параметр можно задать только при запуске сервера. Для ведомого сервера значение этого параметра должно быть больше или равно значению на ведущем. В противном случае на ведомом сервере не будут разрешены запросы. #### Рекоменда…"
+    },
+    {
+      "url": "https://dockerhosting.ru/blog/healthcheck-v-docker-proverka-sostoyaniya-kontejnera/",
+      "excerpt": "# Healthcheck в Docker. Проверка состояния контейнера - автор: [Александр](https://dockerhosting.ru/blog/author/aleks/) - 24.06.2025 ### Проверка работоспособности Docker Вы когда-нибудь запускали контейнер, который работает, но на самом деле не работает? Такое случается. Именно здесь важную роль играют проверки работоспособности Docker Compose. Они не просто подтверждают, что контейнер запущен, — они гарантируют, что он действительно готов обрабатывать запросы. Работающий контейнер не всегда является работоспособным, и это различие может означать разницу между успешным развертыванием и долгой ночью, полной поиска и…"
+    },
+    {
+      "url": "https://fastfox.pro/blog/tutorials/docker-healthcheck-restart-policy/",
+      "excerpt": "# Docker HEALTHCHECK правильно: шаблоны проверок и связка с restart‑политиками - VPS, серверы и администрирование - 30 окт, 2025 - Время на чтение: ~15 мин - Автор: AI (GPT 5) Искусственный интеллект Данная статья была создана с использованием искусственного интеллекта (GPT-5). Пожалуйста, имейте в виду, что текст может содержать неточности или ошибки. HEALTHCHECK в Docker — это встроенный механизм, который периодически запускает команду внутри контейнера и оценивает его состояние: healthy, starting или unhealthy. При правильно заданной проверке вы получаете предсказуемый старт зависимостей, аккуратные rolling‑обновл…"
+    },
+    {
+      "url": "https://habr.com/ru/companies/otus/articles/706908/",
+      "excerpt": "# Несколько советов по работе с CORS для начинающих разработчиков В этой статье мы с вами разберемся, что такое CORS, CORS‑ошибки и из‑за чего мы можем с ними сталкиваться. Я также продемонстрирую возможные решения и объясню, что такое предварительные (preflight) запросы, CORS‑заголовки и в чем заключается их важность при обмене данными между сторонами. Эта статья рассчитана на тех, у кого уже есть базовые познания в области веб‑разработки и некоторый опыт с протоколом HTTP. Я старался писать статью так, чтобы она была понятна и новичкам, будучи наполненной знаниями, но при этом стараясь избегать слишком большого кол…"
+    },
+    {
+      "url": "https://purpleschool.ru/blog/chto-takoe-cors-i-kak-ego-nastroit-polnoe-rukovodstvo",
+      "excerpt": "# Что такое CORS и как его настроить: полное руководство ## Введение CORS (Cross-Origin Resource Sharing) — механизм безопасности, встроенный в каждый современный браузер. Он ограничивает HTTP-запросы между разными источниками. Источник (origin) — это комбинация протокола, домена и порта. Например, `https://example.com:443` и `https://api.example.com:443` — разные источники, даже если домен отличается только поддоменом. Когда ваш фронтенд на `http://localhost:3000` делает запрос к API на `http://localhost:8000`, браузер блокирует его по умолчанию. Именно это и называют ошибкой CORS. Разберём, как браузер принимает ре…"
+    }
+  ]
+}

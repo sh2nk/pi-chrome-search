@@ -449,3 +449,37 @@ One session through the CDP broker (`07-cdp-broker.mjs`, single Chrome connectio
 6. **Image thumbnails are served as-is.** Two Google thumbnails came back as
    JPEG (9 087 B and 61 745 B) and were emitted as image blocks without
    re-encoding; `attach:"bytes"` is two extra requests, not a new image pipeline.
+
+## 17. P13 measurements — claims, coverage and source hygiene (2026-11-06)
+
+1. **The shipped claim rule was a quote generator.** On the ten-query fixture
+   (`tests/fixtures/claims-qa.json`, synthetic `.test` pages with a known answer
+   fact) "the first sentence of the first read page" answered **2/10**. The
+   misses are predictable: a licence banner, a "this chapter covers…" intro, a
+   date stamp. Ranking every sentence by query-term coverage + numeric/date/
+   named-entity presence, across all read pages, answers **9/10**. The one miss
+   is a Russian definition question (`что такое CORS…`) whose detail sentence
+   does not repeat the acronym: without coreference resolution the definition
+   sentence wins, which is a defensible answer but not the fixture's fact.
+2. **`enough:yes` was not tied to the question.** The shipped rule required two
+   domains and *one* exact term; a bundle whose claims were off-topic still said
+   `enough`. Claim coverage (share of query terms used by the claims) is now the
+   gate at 60%, and it also floors a model verdict: a classifier cannot declare
+   `enough` for claims that ignore the query.
+3. **Tracking parameters were reaching both the URL list and the quoted text.**
+   A read page can render `[label](https://…?utm_source=…)`; the old claim was
+   the raw markdown tail. URLs and link text are now cleaned, and sources are
+   de-duplicated by canonical host+path (query string dropped) rather than by
+   exact normalized URL.
+4. **Read text carries code.** Some sites keep code in a plain `<p>`, and the
+   live run quoted `port = ENV["PORT"].to_i || 4000` as a "claim". Fenced blocks
+   are skipped, and a symbol-heavy / bracket / arrow / `ENV[` sentence is never
+   a claim. `scope="session"` in prose stays a sentence.
+5. **Live gate (three queries, `budget:quick`, one run, Chrome 157, RU IP):**
+   `docker compose healthcheck интервал` → `enough:yes`, coverage 75%;
+   `CORS Access-Control-Allow-Origin настройка` → `enough:yes`, coverage 83%;
+   `postgres max_connections по умолчанию` → `enough:no`, coverage 25% — the top
+   claim *is* the answer ("100 подключений") but the page says it in Russian
+   prose while the query term is `max_connections`, so coverage is honestly low.
+   That is the cross-language limitation: coverage counts tokens, not meaning.
+   The transcript is `tests/fixtures/research-live-p13.json`.
