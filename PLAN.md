@@ -500,7 +500,7 @@ hard rules were broken along the way.
 | P0 contracts | `[x]` | `evidence/P0.md` | contracts, scaffold, harness, audit green |
 | P1 attach/doctor | `[x]` | `evidence/P1.md` | M0 gates V1.1–V1.6 pass; live doctor JSON recorded |
 | P2 plumbing | `[x]` | `evidence/P2.md` | M0.5 gates V2.1–V2.7 pass; artifacts pulled forward from P4-C |
-| P3 engines | `[ ]` | `evidence/P3.md`, `evidence/P3-live.md` | live serial; artifacts pulled forward from P4-C (V3.6) |
+| P3 engines | `[x]` | `evidence/P3.md`, `evidence/P3-live.md` | google/ddg/yandex registered; live V3.5 pass; artifacts proven offline, live wall not provoked |
 | P4 read/images/doctor | `[ ]` | `evidence/P4.md` | live serial |
 | P5 reflex | `[ ]` | `evidence/P5.md`, `bench/RESULTS.md` | bench gate decides |
 | P6 research | `[ ]` | `evidence/P6.md` | — |
