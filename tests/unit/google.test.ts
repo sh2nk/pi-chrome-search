@@ -380,6 +380,141 @@ test("extract reads the AI Overview with sources and strips its controls", async
   );
 });
 
+test("extract ignores an inline <style> blob inside the AI block", async () => {
+  /**
+   * The live shape (Chrome 157, RU): the wrapper the extractor used to pick by
+   * `textContent.length` carries an inline <style> whose rules are longer than
+   * the answer. `.A3ySSe{padding:10px}` is verbatim from the captured SERP.
+   */
+  const css =
+    ".A3ySSe{padding:10px}.Jd31eb{display:contents}.JWCOje,.QmP1Ud{display:none}" +
+    ".gKpVEd{margin:0 auto;max-width:640px}.zZpxe{position:relative;display:flex}" +
+    ".rQesXe{font-weight:700}.n6owBd{line-height:1.5}.awi2gc{overflow:hidden}";
+  const page = inlinePage(`
+    <div id="rso">
+      <section>
+        <div role="heading"><strong>Обзор от ИИ</strong></div>
+        <div class="wrapper">
+          <style>${css}</style>
+          <div class="answer">Трансформер — это архитектура глубоких нейронных сетей, представленная в 2017 году и лежащая в основе современных языковых моделей.</div>
+          <div class="sources"><a href="https://ru.wikipedia.org/wiki/Transformer">Википедия</a> · <a href="https://example.org/page">Example</a> · <a href="https://www.google.com/search?q=x">Google</a></div>
+        </div>
+      </section>
+      <div data-hveid="o1"><a href="https://example.org/one"><h3>Result</h3></a><div class="VwiC3b">Snippet</div></div>
+    </div>
+  `);
+
+  const serp = await googleEngine.extract(page, makeQuery({ summary: true }));
+  assert.ok(serp.ai !== undefined, "the section still carries an AI Overview");
+
+  const ai = serp.ai;
+  assert.ok(ai.text.includes("архитектура глубоких нейронных сетей"), ai.text);
+  assert.equal(ai.text.includes(".A3ySSe"), false, ai.text);
+  assert.equal(ai.text.includes("display:contents"), false, ai.text);
+  assert.equal(ai.text.includes("padding:10px"), false, ai.text);
+  assert.equal(ai.text.includes("{"), false, ai.text);
+
+  // Sources still come from the anchors and stay domain-only.
+  // Arrays built in the page context carry that realm's prototype; compare values.
+  assert.deepEqual([...ai.sources], ["ru.wikipedia.org", "example.org"]);
+});
+
+test("extract ignores an inline <script> object literal inside the AI block", async () => {
+  const script = "var x = {a:1};var y = {b:2};var z = {c:3};var w = {d:4};var v = {e:5};";
+  const page = inlinePage(`
+    <div id="rso">
+      <section>
+        <div role="heading"><strong>Обзор от ИИ</strong></div>
+        <div class="wrapper">
+          <script>${script}</script>
+          <div class="answer">Трансформер — это архитектура глубоких нейронных сетей, представленная в 2017 году и лежащая в основе современных языковых моделей.</div>
+          <div class="sources"><a href="https://ru.wikipedia.org/wiki/Transformer">Википедия</a></div>
+        </div>
+      </section>
+    </div>
+  `);
+
+  const serp = await googleEngine.extract(page, makeQuery({ summary: true }));
+  assert.ok(serp.ai !== undefined);
+
+  const ai = serp.ai;
+  assert.ok(ai.text.includes("архитектура глубоких нейронных сетей"), ai.text);
+  assert.equal(ai.text.includes("var x"), false, ai.text);
+  assert.equal(ai.text.includes("{a:1}"), false, ai.text);
+  assert.deepEqual([...ai.sources], ["ru.wikipedia.org"]);
+});
+
+test("extract strips a bare CSS rule prefix when no <style> element wraps it", async () => {
+  const page = inlinePage(`
+    <div id="rso">
+      <section>
+        <div role="heading"><strong>Обзор от ИИ</strong></div>
+        <div class="answer">.A3ySSe{padding:10px}.Jd31eb{display:contents}div{margin:0}Трансформер — это архитектура глубоких нейронных сетей, представленная в 2017 году и лежащая в основе современных языковых моделей.</div>
+      </section>
+    </div>
+  `);
+
+  const serp = await googleEngine.extract(page, makeQuery({ summary: true }));
+  assert.ok(serp.ai !== undefined);
+
+  assert.ok(serp.ai.text.includes("архитектура глубоких нейронных сетей"), serp.ai.text);
+  assert.equal(serp.ai.text.includes(".A3ySSe"), false, serp.ai.text);
+  assert.equal(serp.ai.text.includes("padding:10px"), false, serp.ai.text);
+  assert.equal(serp.ai.text.includes("margin:0"), false, serp.ai.text);
+  assert.match(serp.ai.text, /^Трансформер/);
+});
+
+test("extract keeps answer prose that merely mentions a brace pair", async () => {
+  // The declaration guard must not eat a sentence: braces only count as residue
+  // when they form a CSS/JS prefix, not when the answer discusses them.
+  const page = inlinePage(`
+    <div id="rso">
+      <section>
+        <div role="heading"><strong>Обзор от ИИ</strong></div>
+        <div class="answer">Трансформер — это архитектура глубоких нейронных сетей. Функция возвращает {a: 1} при первом вызове, и это не CSS.</div>
+      </section>
+    </div>
+  `);
+
+  const serp = await googleEngine.extract(page, makeQuery({ summary: true }));
+  assert.ok(serp.ai !== undefined);
+  assert.ok(serp.ai.text.includes("{a: 1}"), serp.ai.text);
+  assert.match(serp.ai.text, /^Трансформер/);
+});
+
+test("the real google-ai fixture still yields prose-only AI text", async () => {
+  const { page } = fixturePage("google-ai");
+  const serp = await googleEngine.extract(page, makeQuery({ n: 8, summary: true }));
+
+  assert.ok(serp.ai !== undefined);
+  const text = serp.ai.text;
+  assert.ok(text.length >= 200, `AI text is only ${text.length} chars`);
+  // A stylesheet/declaration blob would match a property:value run inside braces.
+  assert.doesNotMatch(text, /\{[^{}]*[a-zA-Z-]+\s*:[^{}]*\}/, text.slice(0, 200));
+  assert.match(text, /^\p{L}/u, text.slice(0, 80));
+  assert.doesNotMatch(text, /^[.#]/, text.slice(0, 80));
+  assert.doesNotMatch(text, /\{/, text.slice(0, 200));
+});
+
+test("extract does not leak <style> text into result titles or snippets", async () => {
+  const page = inlinePage(`
+    <div id="rso">
+      <div data-hveid="s1">
+        <a href="https://example.org/styled"><h3><style>.x{color:red}</style>Заголовок результата</h3></a>
+        <div class="VwiC3b"><style>.VwiC3b{color:red}</style>Настоящий сниппет без CSS.</div>
+      </div>
+    </div>
+  `);
+
+  const serp = await googleEngine.extract(page, makeQuery({ summary: true }));
+
+  assert.equal(serp.results.length, 1);
+  assert.equal(serp.results[0]?.title, "Заголовок результата");
+  assert.equal(serp.results[0]?.snippet, "Настоящий сниппет без CSS.");
+  assert.equal(serp.results[0]?.title.includes("color:red"), false);
+  assert.equal(serp.results[0]?.snippet.includes("color:red"), false);
+});
+
 test("extract returns 5+ organics with http(s) urls, titles and snippets", async () => {
   for (const name of ["google-ai", "google-no-ai"]) {
     const { page } = fixturePage(name);

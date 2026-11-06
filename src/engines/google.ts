@@ -16,7 +16,10 @@
  *    so a free variable fails offline instead of in production.
  *
  * `innerText` does not exist in the fixture DOM (linkedom), which is why the
- * in-page code reads `textContent` and normalises whitespace explicitly.
+ * in-page code walks `childNodes` through `visibleText` (skipping <style>,
+ * <script> and other non-prose elements) and normalises whitespace explicitly.
+ * `textContent` is never the prose source: a live AI Overview nests a
+ * stylesheet inside the answer wrapper, and raw text length let CSS win.
  *
  * Link policy (SPEC §6.1): hrefs leave this adapter exactly as the page offers
  * them. A `/goto?url=<protobuf>` wrapper stays wrapped — resolving it needs a
@@ -251,6 +254,104 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
     return value.length > max ? value.slice(0, max) : value;
   }
 
+  /**
+   * Prose-only text of a node.
+   *
+   * `textContent` includes the text of <style>/<script> children, and a live
+   * AI Overview nests its answer right next to an inline <style> block. Ranking
+   * descendants by `textContent.length` therefore picked the stylesheet
+   * (".A3ySSe{padding:10px}…") over the answer and shipped CSS to the model.
+   * `innerText` is not available in the fixture DOM (linkedom) and would apply
+   * CSS visibility rules an adapter must not interpret, so the skip list is
+   * explicit. A skipped element leaves whitespace behind, so two neighbouring
+   * prose nodes are never glued into one word.
+   */
+  function visibleText(node: Node | null): string {
+    const SKIP_TAGS = ["STYLE", "SCRIPT", "NOSCRIPT", "TEMPLATE", "SVG", "LINK", "META"];
+    const parts: string[] = [];
+    function walk(current: Node | null): void {
+      if (current === null) return;
+      if (current.nodeType === 3) {
+        parts.push(current.nodeValue === null ? "" : current.nodeValue);
+        return;
+      }
+      if (current.nodeType !== 1) return;
+      const element = current as Element;
+      if (SKIP_TAGS.indexOf(element.tagName.toUpperCase()) !== -1) {
+        parts.push(" ");
+        return;
+      }
+      const children = current.childNodes;
+      for (let index = 0; index < children.length; index += 1) walk(children[index]);
+    }
+    walk(node);
+    return normalize(parts.join(""));
+  }
+
+  /** `{padding:10px}` / `{a:1}` — a declaration run, not prose with a brace pair. */
+  function isDeclarationBlock(value: string): boolean {
+    if (value.length < 3 || value.charAt(0) !== "{" || value.charAt(value.length - 1) !== "}") return false;
+    const inner = value.slice(1, value.length - 1);
+    if (inner.trim() === "" || inner.indexOf("{") !== -1 || inner.indexOf("}") !== -1) return false;
+    let properties = 0;
+    for (const part of inner.split(";")) {
+      const piece = part.trim();
+      if (piece === "") continue;
+      if (!/^-{0,2}[a-zA-Z][a-zA-Z0-9-]*\s*:\s*\S/.test(piece)) return false;
+      properties += 1;
+    }
+    return properties > 0;
+  }
+
+  /**
+   * Cut a CSS/JS declaration prefix that survived `visibleText` (rules shipped
+   * as bare text, or a wrapper the extractor cannot classify). Only a *prefix*
+   * is cut: normal prose that merely contains a brace pair mid-sentence is left
+   * exactly as it is.
+   */
+  function stripDeclarationResidue(value: string): string {
+    let out = value;
+    let cut = 0;
+    const RULE = /^[.#][^{}]{0,80}\{[^{}]*\}/;
+    for (let guard = 0; guard < 64; guard += 1) {
+      const rest = out.slice(cut).replace(/^\s+/, "");
+      // `out.length - rest.length` is the offset of `rest` inside `out`.
+      const offset = out.length - rest.length;
+      const rule = RULE.exec(rest);
+      if (rule !== null) {
+        cut = offset + rule[0].length;
+        continue;
+      }
+      const block = /^\{[^{}]*\}/.exec(rest);
+      if (block !== null && isDeclarationBlock(block[0])) {
+        cut = offset + block[0].length;
+        continue;
+      }
+      break;
+    }
+    out = cut > 0 ? out.slice(cut).trim() : out;
+    if (out === "") return "";
+
+    // A tag/attribute selector in front of the first declaration block ("div{margin:0}")
+    // is still residue; anything containing whitespace is prose and is kept.
+    const head = out.slice(0, 200);
+    const open = head.indexOf("{");
+    if (open > 0) {
+      const selector = head.slice(0, open).trim();
+      if (/^[.#*[\]a-zA-Z][^{}\s]{0,40}$/.test(selector)) {
+        let lastEnd = -1;
+        const blocks = /\{[^{}]*\}/g;
+        let match = blocks.exec(head);
+        while (match !== null) {
+          if (isDeclarationBlock(match[0])) lastEnd = match.index + match[0].length;
+          match = blocks.exec(head);
+        }
+        if (lastEnd > 0) out = out.slice(lastEnd).trim();
+      }
+    }
+    return out.replace(/^[;,}\s]+/, "").trim();
+  }
+
   function absoluteUrl(href: string | null): URL | null {
     const raw = (href === null ? "" : href).trim();
     // A fragment-only href points at the SERP itself, not at a result.
@@ -285,7 +386,7 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
   function hasAdBadge(scope: Element): boolean {
     for (const node of Array.from(scope.querySelectorAll("span, div, b"))) {
       if (node.children.length > 0) continue;
-      if (AD_LABELS.indexOf(normalize(node.textContent)) !== -1) return true;
+      if (AD_LABELS.indexOf(visibleText(node)) !== -1) return true;
     }
     return false;
   }
@@ -301,7 +402,7 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
 
   function findAiSection(): Element | null {
     for (const section of Array.from(doc.querySelectorAll("section"))) {
-      const text = normalize(section.textContent);
+      const text = visibleText(section);
       if (text === "") continue;
       for (const label of AI_LABELS) {
         if (text.indexOf(label) !== -1) return section;
@@ -346,7 +447,7 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
   function hasControlHeading(scope: Element): boolean {
     for (const node of Array.from(scope.querySelectorAll("h1, h2, h3, h4, div, span"))) {
       if (node.children.length > 0) continue;
-      const text = normalize(node.textContent);
+      const text = visibleText(node);
       if (text === "") continue;
       if (AI_LABELS.indexOf(text) !== -1) return true;
       for (const prefix of AI_LEAD_PREFIXES) {
@@ -361,14 +462,17 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
    * neither the trailing controls nor the label heading. Taking the section text
    * verbatim would ship the sources carousel, the like/dislike footer and the
    * share dialog to the model; the structural pick keeps the answer only.
-   * Falls back to a text cut when no such chunk exists (a layout that nests the
-   * controls inside the prose wrapper).
+   *
+   * Ranking is by `visibleText`, not `textContent`: a live Overview nests an
+   * inline <style> block inside the wrapper, and raw text length would make
+   * that stylesheet win. Falls back to a text cut when no such chunk exists (a
+   * layout that nests the controls inside the prose wrapper).
    */
   function aiAnswerText(section: Element): string {
-    const full = normalize(section.textContent);
+    const full = visibleText(section);
     let body = "";
     for (const node of Array.from(section.querySelectorAll("div, section, article"))) {
-      const text = normalize(node.textContent);
+      const text = visibleText(node);
       if (text.length <= body.length) continue;
       let carriesControls = false;
       for (const marker of AI_TRAILING_MARKERS) {
@@ -381,6 +485,7 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
       body = text;
     }
     let text = body.length >= MIN_BODY_CHARS ? body : stripAiLead(cutTrailingControls(full));
+    text = stripDeclarationResidue(text);
     text = stripAiLead(text);
     return clampText(text, MAX_AI_CHARS).trim();
   }
@@ -415,7 +520,7 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
       anchor.closest("div[data-hveid]") ?? heading.closest("div[data-hveid]") ?? anchor.parentElement;
     if (isSponsored(anchor, heading, container)) continue;
 
-    const title = clampText(normalize(heading.textContent), MAX_TITLE_CHARS);
+    const title = clampText(visibleText(heading), MAX_TITLE_CHARS);
     if (title === "") continue;
 
     const url = absoluteUrl(anchor.getAttribute("href"));
@@ -425,7 +530,7 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
     seenUrls.add(href);
 
     const snippetNode = container === null ? null : container.querySelector(".VwiC3b, [data-sncf]");
-    const snippet = clampText(normalize(snippetNode === null ? "" : snippetNode.textContent), MAX_SNIPPET_CHARS);
+    const snippet = clampText(snippetNode === null ? "" : visibleText(snippetNode), MAX_SNIPPET_CHARS);
 
     organics += 1;
     if (results.length < limit) results.push({ title, url: href, snippet });
