@@ -1,0 +1,137 @@
+{
+  "class": "factual",
+  "serps": [
+    {
+      "id": "factual-boiling",
+      "engine": "google",
+      "query": "boiling point of water at sea level",
+      "covers": ["f1", "f2"],
+      "ai": {
+        "text": "At standard atmospheric pressure (101.325 kPa), pure water boils at 100 C (212 F). Pressure changes the boiling point: at high altitude it drops, which is why cooking times rise.",
+        "sources": ["en.wikipedia.org", "britannica.com"]
+      },
+      "results": [
+        {
+          "title": "Boiling point - Wikipedia",
+          "url": "https://en.wikipedia.org/wiki/Boiling_point",
+          "snippet": "The boiling point of a substance is the temperature at which it changes state from liquid to gas. For water at sea level this is 100 C."
+        },
+        {
+          "title": "Boiling point of water | Britannica",
+          "url": "https://www.britannica.com/science/boiling-point",
+          "snippet": "Boiling occurs when vapour pressure equals ambient pressure. At 1 atmosphere, water reaches this equilibrium at 373.15 K."
+        },
+        {
+          "title": "Jupiter's moons: how many are there? | NASA",
+          "url": "https://science.nasa.gov/jupiter/moons/",
+          "snippet": "Jupiter has dozens of confirmed moons, with new small satellites still being discovered and announced by the International Astronomical Union."
+        },
+        {
+          "title": "How many moons does Jupiter have? | Space.com",
+          "url": "https://www.space.com/jupiter-moons-count",
+          "snippet": "The count keeps rising as surveys find fainter irregular satellites; the largest four were seen by Galileo in 1610."
+        },
+        {
+          "title": "[synthetic spam] Miracle water hack - boil faster today",
+          "url": "https://spam-seo.example/water-hack",
+          "snippet": "Synthetic spam entry used by the benchmark: it must never appear in a filtered result set."
+        },
+        {
+          "title": "Why water boils at different temperatures | HowStuffWorks",
+          "url": "https://science.howstuffworks.com/water-boiling",
+          "snippet": "Altitude and dissolved solids shift the boiling point, which matters for cooking and for industrial processes."
+        }
+      ]
+    },
+    {
+      "id": "factual-wealth-press",
+      "engine": "duckduckgo",
+      "query": "who wrote the wealth of nations and when was the printing press invented",
+      "covers": ["f3", "f6"],
+      "results": [
+        {
+          "title": "Adam Smith | Britannica",
+          "url": "https://www.britannica.com/biography/Adam-Smith",
+          "snippet": "Scottish economist and philosopher Adam Smith wrote An Inquiry into the Nature and Causes of the Wealth of Nations, published in 1776."
+        },
+        {
+          "title": "The Wealth of Nations - Wikipedia",
+          "url": "https://en.wikipedia.org/wiki/The_Wealth_of_Nations",
+          "snippet": "The book is a foundational work of classical economics, first published in two volumes in London in 1776."
+        },
+        {
+          "title": "The Wealth of Nations by Adam Smith - Project Gutenberg",
+          "url": "https://www.gutenberg.org/ebooks/3300",
+          "snippet": "Full public-domain text of the 1776 edition, available as plain text and ebook formats."
+        },
+        {
+          "title": "Printing press | Britannica",
+          "url": "https://www.britannica.com/technology/printing-press",
+          "snippet": "Movable-type printing in Europe is associated with Johannes Gutenberg, whose press was operating in Mainz around 1450."
+        },
+        {
+          "title": "Printing press - Wikipedia",
+          "url": "https://en.wikipedia.org/wiki/Printing_press",
+          "snippet": "Gutenberg's movable type press spread across Europe in the second half of the fifteenth century, transforming book production."
+        },
+        {
+          "title": "The printing press | History.com",
+          "url": "https://www.history.com/topics/inventions/printing-press",
+          "snippet": "Gutenberg's innovation combined movable type, oil-based ink and a screw press adapted from wine making."
+        },
+        {
+          "title": "[synthetic spam] Rare first editions cheap",
+          "url": "https://spam-seo.example/rare-books",
+          "snippet": "Synthetic spam entry used by the benchmark: it must never appear in a filtered result set."
+        }
+      ]
+    },
+    {
+      "id": "factual-solar-volga",
+      "engine": "yandex",
+      "query": "сколько планет в солнечной системе и длина реки волга",
+      "covers": ["f4", "f5"],
+      "ai": {
+        "text": "В Солнечной системе восемь планет: Меркурий, Венера, Земля, Марс, Юпитер, Сатурн, Уран и Нептун. Волга — крупнейшая река Европы, её длина около 3530 км.",
+        "sources": ["ru.wikipedia.org", "bigenc.ru"]
+      },
+      "results": [
+        {
+          "title": "Солнечная система — Википедия",
+          "url": "https://ru.wikipedia.org/wiki/Солнечная_система",
+          "snippet": "Солнечная система состоит из Солнца и восьми планет, а также карликовых планет, спутников и малых тел."
+        },
+        {
+          "title": "Solar System - NASA Science",
+          "url": "https://science.nasa.gov/solar-system/",
+          "snippet": "Our solar system has eight planets, hundreds of moons and millions of asteroids, comets and other small bodies."
+        },
+        {
+          "title": "Солнечная система | Большая российская энциклопедия",
+          "url": "https://bigenc.ru/c/solnechnaia-sistema",
+          "snippet": "Планеты земной группы и газовые гиганты обращаются вокруг Солнца; Плутон с 2006 года относят к карликовым планетам."
+        },
+        {
+          "title": "Волга — Википедия",
+          "url": "https://ru.wikipedia.org/wiki/Волга",
+          "snippet": "Волга — река в Европейской части России, одна из крупнейших рек Земли; длина около 3530 км."
+        },
+        {
+          "title": "Volga River | Britannica",
+          "url": "https://www.britannica.com/place/Volga-River",
+          "snippet": "The Volga rises in the Valdai Hills and drains into the Caspian Sea, forming the largest river system in Europe."
+        },
+        {
+          "title": "Волга | Большая российская энциклопедия",
+          "url": "https://bigenc.ru/c/volga",
+          "snippet": "Бассейн Волги занимает около трети площади Европейской части России; река судоходна на большей части длины."
+        },
+        {
+          "title": "[synthetic spam] Секретная карта планет",
+          "url": "https://spam-seo.example/planets",
+          "snippet": "Synthetic spam entry used by the benchmark: it must never appear in a filtered result set."
+        }
+      ]
+    }
+  ]
+}

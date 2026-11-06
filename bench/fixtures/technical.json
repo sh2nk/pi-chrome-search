@@ -1,0 +1,133 @@
+{
+  "class": "technical",
+  "serps": [
+    {
+      "id": "technical-typescript-css",
+      "engine": "google",
+      "query": "typescript satisfies operator and css grid auto-fit vs auto-fill",
+      "covers": ["t1", "t2"],
+      "results": [
+        {
+          "title": "satisfies operator - TypeScript",
+          "url": "https://www.typescriptlang.org/docs/handbook/release-notes/typescript-4-9.html",
+          "snippet": "The satisfies operator validates that an expression matches a type without changing the resulting type."
+        },
+        {
+          "title": "satisfies - MDN Web Docs",
+          "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/satisfies",
+          "snippet": "satisfies checks an expression against a type at compile time while preserving the narrower inferred type."
+        },
+        {
+          "title": "Auto-fit vs auto-fill in CSS Grid | CSS-Tricks",
+          "url": "https://css-tricks.com/auto-sizing-columns-css-grid-auto-fill-vs-auto-fit/",
+          "snippet": "auto-fill creates as many tracks as fit and keeps empty ones; auto-fit collapses empty tracks so items stretch."
+        },
+        {
+          "title": "CSS grid layout - web.dev",
+          "url": "https://web.dev/articles/css-grid",
+          "snippet": "Repeat, minmax and auto-fit combine into responsive layouts without media queries."
+        },
+        {
+          "title": "[synthetic spam] 10x your CSS overnight",
+          "url": "https://spam-seo.example/css-course",
+          "snippet": "Synthetic spam entry used by the benchmark: it must never appear in a filtered result set."
+        },
+        {
+          "title": "TypeScript 4.9 release notes - GitHub",
+          "url": "https://github.com/microsoft/TypeScript/releases/tag/v4.9.0",
+          "snippet": "Release notes for TypeScript 4.9, including the new satisfies operator and improved narrowing."
+        }
+      ]
+    },
+    {
+      "id": "technical-postgres-ssh",
+      "engine": "duckduckgo",
+      "query": "postgres index only scan explain and ssh key setup on linux",
+      "covers": ["t3", "t4"],
+      "results": [
+        {
+          "title": "Index-only scans - PostgreSQL documentation",
+          "url": "https://www.postgresql.org/docs/current/indexes-index-only-scans.html",
+          "snippet": "An index-only scan answers a query from the index alone, avoiding heap fetches when the visibility map allows it."
+        },
+        {
+          "title": "Explaining index-only scans | pganalyze",
+          "url": "https://pganalyze.com/blog/5mins-postgres-index-only-scans",
+          "snippet": "EXPLAIN shows Heap Fetches for index-only scans; a high count means VACUUM has not marked pages all-visible."
+        },
+        {
+          "title": "[synthetic spam] Database tuning secrets",
+          "url": "https://spam-seo.example/postgres-tuning",
+          "snippet": "Synthetic spam entry used by the benchmark: it must never appear in a filtered result set."
+        },
+        {
+          "title": "PostgreSQL planner README - GitHub",
+          "url": "https://github.com/postgres/postgres/blob/master/src/backend/optimizer/README",
+          "snippet": "Design notes on the PostgreSQL query planner, cost model and scan path selection."
+        },
+        {
+          "title": "ssh-keygen(1) - man page",
+          "url": "https://man7.org/linux/man-pages/man1/ssh-keygen.1.html",
+          "snippet": "ssh-keygen generates, manages and converts authentication keys for SSH, including ed25519 keys."
+        },
+        {
+          "title": "SSH keys - Ubuntu documentation",
+          "url": "https://ubuntu.com/server/docs/service-ssh",
+          "snippet": "Generate a key pair, copy the public key to the server and disable password authentication."
+        },
+        {
+          "title": "How to set up SSH keys | DigitalOcean",
+          "url": "https://www.digitalocean.com/community/tutorials/how-to-set-up-ssh-keys",
+          "snippet": "Step-by-step guide to creating a key pair and installing the public key on a remote host."
+        }
+      ]
+    },
+    {
+      "id": "technical-docker-node",
+      "engine": "yandex",
+      "query": "что такое docker compose и backpressure в node js streams",
+      "covers": ["t5", "t6"],
+      "ai": {
+        "text": "Docker Compose описывает многоконтейнерное приложение в YAML-файле и управляет его жизненным циклом одной командой. Backpressure в потоках Node.js — это механизм, при котором writable-поток просит источник приостановиться, когда буфер заполнен.",
+        "sources": ["docs.docker.com", "nodejs.org"]
+      },
+      "results": [
+        {
+          "title": "Docker Compose overview",
+          "url": "https://docs.docker.com/compose/",
+          "snippet": "Compose is a tool for defining and running multi-container applications from a single YAML configuration file."
+        },
+        {
+          "title": "Что такое Docker Compose - Habr",
+          "url": "https://habr.com/ru/articles/docker-compose-guide/",
+          "snippet": "Compose описывает сервисы, сети и тома в compose.yaml и запускает их одной командой docker compose up."
+        },
+        {
+          "title": "Docker (software) - Wikipedia",
+          "url": "https://en.wikipedia.org/wiki/Docker_(software)",
+          "snippet": "Docker packages applications into containers; Compose coordinates several containers as one application."
+        },
+        {
+          "title": "Backpressuring in streams - Node.js",
+          "url": "https://nodejs.org/en/learn/modules/backpressuring-in-streams",
+          "snippet": "Backpressure is when a writable stream signals that its internal buffer is full and the source should pause."
+        },
+        {
+          "title": "Streams API - MDN Web Docs",
+          "url": "https://developer.mozilla.org/en-US/docs/Web/API/Streams_API",
+          "snippet": "Streams provide a way to handle data progressively; readers and writers coordinate flow control."
+        },
+        {
+          "title": "Node.js stream documentation - GitHub",
+          "url": "https://github.com/nodejs/node/blob/main/doc/api/stream.md",
+          "snippet": "Reference for readable, writable, duplex and transform streams, including highWaterMark and drain events."
+        },
+        {
+          "title": "[synthetic spam] Docker mastery in one hour",
+          "url": "https://spam-seo.example/docker-mastery",
+          "snippet": "Synthetic spam entry used by the benchmark: it must never appear in a filtered result set."
+        }
+      ]
+    }
+  ]
+}

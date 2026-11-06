@@ -1,0 +1,133 @@
+{
+  "class": "ambiguous",
+  "serps": [
+    {
+      "id": "ambiguous-perf-coffee",
+      "engine": "google",
+      "query": "python vs javascript performance and how to make coffee taste better",
+      "covers": ["a1", "a2"],
+      "results": [
+        {
+          "title": "Python performance — official documentation",
+          "url": "https://www.python.org/doc/essays/blurb/",
+          "snippet": "General guidance on Python performance, profiling and when to move hot loops to native code."
+        },
+        {
+          "title": "JavaScript performance - MDN Web Docs",
+          "url": "https://developer.mozilla.org/en-US/docs/Web/Performance",
+          "snippet": "Techniques for measuring and improving JavaScript execution in the browser."
+        },
+        {
+          "title": "[synthetic spam] One language to rule them all",
+          "url": "https://spam-seo.example/language-wars",
+          "snippet": "Synthetic spam entry used by the benchmark: it must never appear in a filtered result set."
+        },
+        {
+          "title": "Benchmark games source - GitHub",
+          "url": "https://github.com/hanabi1224/Programming-Language-Benchmarks",
+          "snippet": "Community benchmark implementations and results across languages and runtimes."
+        },
+        {
+          "title": "How to make better coffee at home | Serious Eats",
+          "url": "https://www.seriouseats.com/how-to-make-better-coffee",
+          "snippet": "Grind size, water temperature and ratio explained with tested recommendations."
+        },
+        {
+          "title": "Coffee brewing guide - The New York Times",
+          "url": "https://www.nytimes.com/wirecutter/reviews/best-coffee-maker/",
+          "snippet": "Wirecutter's tested coffee gear and brewing advice for consistent results."
+        }
+      ]
+    },
+    {
+      "id": "ambiguous-remote-language",
+      "engine": "duckduckgo",
+      "query": "is remote work more productive and the best way to learn a language",
+      "covers": ["a3", "a4"],
+      "ai": {
+        "text": "Studies on remote-work productivity disagree because measurement differs: output, hours and self-report point in different directions. Language-learning research favours frequent comprehensible input plus spaced retrieval over any single app.",
+        "sources": ["hbr.org", "nature.com"]
+      },
+      "results": [
+        {
+          "title": "Research on remote work productivity - Harvard Business Review",
+          "url": "https://hbr.org/topic/subject/remote-work",
+          "snippet": "Articles summarising studies on distributed teams, focus time and collaboration costs."
+        },
+        {
+          "title": "The future of work after COVID-19 - McKinsey",
+          "url": "https://www.mckinsey.com/featured-insights/future-of-work",
+          "snippet": "Survey-based analysis of hybrid work, productivity perceptions and real-estate impact."
+        },
+        {
+          "title": "Remote work and well-being - Nature",
+          "url": "https://www.nature.com/subjects/remote-working",
+          "snippet": "Peer-reviewed research on telework, mental health and job satisfaction."
+        },
+        {
+          "title": "Language acquisition - Wikipedia",
+          "url": "https://en.wikipedia.org/wiki/Language_acquisition",
+          "snippet": "Overview of first- and second-language acquisition research, input and practice effects."
+        },
+        {
+          "title": "How to learn a language | Duolingo",
+          "url": "https://www.duolingo.com/guide",
+          "snippet": "Practical tips on streaks, spaced repetition and speaking practice from the app's learning team."
+        },
+        {
+          "title": "BBC - Learning a language",
+          "url": "https://www.bbc.co.uk/languages/",
+          "snippet": "Free courses and audio for beginners in several languages."
+        },
+        {
+          "title": "[synthetic spam] Fluent in 3 days guaranteed",
+          "url": "https://spam-seo.example/fluent-fast",
+          "snippet": "Synthetic spam entry used by the benchmark: it must never appear in a filtered result set."
+        }
+      ]
+    },
+    {
+      "id": "ambiguous-startup-university-ru",
+      "engine": "yandex",
+      "query": "что лучше для стартапа и как выбрать вуз",
+      "covers": ["a5", "a6"],
+      "results": [
+        {
+          "title": "Startup advice library - Y Combinator",
+          "url": "https://www.ycombinator.com/library",
+          "snippet": "Essays and talks on founding teams, product-market fit and fundraising."
+        },
+        {
+          "title": "What makes a startup succeed - Harvard Business Review",
+          "url": "https://hbr.org/topic/subject/entrepreneurship",
+          "snippet": "Research and practitioner articles on venture design and early-stage strategy."
+        },
+        {
+          "title": "[synthetic spam] Guaranteed startup funding",
+          "url": "https://spam-seo.example/startup-funding",
+          "snippet": "Synthetic spam entry used by the benchmark: it must never appear in a filtered result set."
+        },
+        {
+          "title": "Stripe Atlas — start a company",
+          "url": "https://stripe.com/atlas",
+          "snippet": "Incorporation and banking guidance for founders, with jurisdiction comparisons."
+        },
+        {
+          "title": "University - Wikipedia",
+          "url": "https://en.wikipedia.org/wiki/University",
+          "snippet": "Overview of university types, admission systems and academic structures."
+        },
+        {
+          "title": "Choosing a university - The Guardian",
+          "url": "https://www.theguardian.com/education/choosing-a-university",
+          "snippet": "Guides on courses, open days, accommodation and student finance."
+        },
+        {
+          "title": "University rankings - Times Higher Education",
+          "url": "https://www.timeshighereducation.com/world-university-rankings",
+          "snippet": "Global and subject rankings with methodology notes."
+        }
+      ]
+    }
+  ]
+}

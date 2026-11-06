@@ -12,3 +12,6 @@ dist/
 artifacts/
 .pi/
 /tmp/
+
+# Bench output is local evidence, not a fixture
+bench/results/
