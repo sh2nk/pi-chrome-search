@@ -367,8 +367,11 @@ Findings:
    and falls back to the legacy one, so older builds keep working. Window class measured with
    `hyprctl clients -j`: `google-chrome` (title `… - Google Chrome`), no `wmctrl`/`xdotool`/`kdotool`.
 6. **Attention is signalled, never manufactured.** Nothing in the path opens a window, a tab or a URL,
-   launches the browser or installs a helper; `gio launch chrome.desktop` was deliberately left out of the
-   raise ladder because activating a stopped browser is a side effect, not attention.
+   launches the browser or installs a helper. `gio launch …/google-chrome.desktop` is left out of the raise
+   ladder — **measured** (`evidence/P11-spike.md`): with Chrome already running, `Exec=… %U` and no URI is a
+   *New Window* request, so it created and focused a second window (1 → 2 windows, new `chrome://newtab/`
+   target) instead of activating the existing one. `open -a "Google Chrome"` on macOS has the same defect
+   (activates when running, launches when stopped), so the ladder uses `osascript … activate` instead.
 7. **A fresh-Chrome re-reproduction is out of scope by rule.** Forcing the prompt again would require
    restarting Chrome or revoking the Allow in `chrome://inspect`; the first is forbidden (AGENTS §2), the
    second would leave the user's session unusable mid-run. The waiting state machine is therefore proven
