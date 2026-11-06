@@ -942,11 +942,6 @@ function toContentToken(value: PdfValue): ContentToken {
   return { kind: "op", value: "" };
 }
 
-interface PageText {
-  text: string;
-  hasImage: boolean;
-}
-
 class TextCollector {
   lines: string[] = [];
   current = "";

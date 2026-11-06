@@ -1,0 +1,27 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # The engine range lives in package.json; take the major from `engines.node`
+      # instead of letting CI and the manifest drift apart.
+      - id: node
+        run: echo "version=$(node -p "require('./package.json').engines.node.replace(/[^0-9.]/g,'')")" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test

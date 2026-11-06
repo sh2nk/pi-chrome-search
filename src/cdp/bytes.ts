@@ -28,8 +28,6 @@ import type { CdpSession } from "./session.ts";
 import type { FetchedBytes, FetchBytesOptions } from "./types.ts";
 
 export const DEFAULT_FETCH_TIMEOUT_MS = 20_000;
-/** Chrome's default response buffer is 10 MB; the caller's ceiling is the real limit. */
-const MAX_CDP_BUFFER = 64 * 1024 * 1024;
 
 const DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
 

@@ -94,16 +94,6 @@ export function extractReadableDocument(doc: Document): ReadableDocument {
     EMBED: true,
   };
 
-  /** Block elements handled separately; inline collection never walks into them. */
-  const BLOCK_TAGS: Record<string, boolean> = {
-    TABLE: true,
-    PRE: true,
-    UL: true,
-    OL: true,
-    FIGURE: true,
-    DL: true,
-  };
-
   const INLINE_SKIP_TAGS: Record<string, boolean> = {
     SCRIPT: true,
     STYLE: true,

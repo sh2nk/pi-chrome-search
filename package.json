@@ -14,10 +14,11 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit && node scripts/audit.mjs",
     "test": "node --test --test-timeout=15000 \"tests/unit/**/*.test.ts\"",
     "test:live": "PI_CHROME_LIVE=1 node --test \"tests/live/**/*.test.ts\"",
-    "bench": "node bench/run.ts",
-    "audit": "node scripts/audit.mjs"
+    "audit": "node scripts/audit.mjs",
+    "release": "node scripts/release.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
@@ -35,13 +36,32 @@
     "typescript": "^5.9.0"
   },
   "keywords": [
-    "pi-package"
+    "pi-package",
+    "chrome",
+    "cdp",
+    "web-search",
+    "google",
+    "duckduckgo",
+    "yandex"
   ],
   "files": [
     "index.ts",
     "src",
     "assets",
+    "docs",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pi-chrome-search/pi-chrome-search.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pi-chrome-search/pi-chrome-search/issues"
+  },
+  "homepage": "https://github.com/pi-chrome-search/pi-chrome-search#readme",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
 }

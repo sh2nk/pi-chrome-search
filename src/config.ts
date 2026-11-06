@@ -10,7 +10,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { ENGINE_IDS, type EngineId } from "./engines/types.ts";
+import { ENGINE_IDS } from "./engines/types.ts";
 import { agentDir, expandHome } from "./runtime/host.ts";
 import { WebSearchError, type FailureDetails } from "./runtime/error-codes.ts";
 
@@ -283,7 +283,6 @@ type Spec =
   | { kind: "nullable"; of: Spec }
   | { kind: "object"; fields: Record<string, Spec> };
 
-const STRING: Spec = { kind: "string" };
 const STRING_NE: Spec = { kind: "string", nonEmpty: true };
 const BOOL: Spec = { kind: "boolean" };
 const NUM = (min = 0, integer = true, max?: number): Spec =>

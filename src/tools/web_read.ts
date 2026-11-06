@@ -25,7 +25,6 @@ import { Type, type Static } from "typebox";
 import { pageLockFor, readSlotKeys } from "../cdp/page-lock.ts";
 import type { CdpPage, PageKey } from "../cdp/types.ts";
 import type { Config } from "../config.ts";
-import type { EngineId } from "../engines/types.ts";
 import {
   extractPdfText,
   renderPdfWindow,
