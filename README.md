@@ -27,8 +27,9 @@ using the same profile afterwards.
 
 ## Requirements
 
-Node ≥ 26 (native TypeScript, no build step), Chrome 136+ (tested with 157 on Wayland), pi ≥ 1.5
-(`package.json#peerDependencies`), and a desktop session — headed Chrome, no server/headless deployment.
+Node ≥ 26 (native TypeScript, no build step), Chrome 136+ (tested with 157 on Wayland), pi (the devDependency
+pins `^1.5.0`; the package peer is `*` so a newer pi is allowed), and a desktop session — headed Chrome, no
+server/headless deployment.
 
 ## Install
 
@@ -40,9 +41,19 @@ pi -e ./src/index.ts        # load the extension for one session
 pi install .                # …or register the checkout as a package
 ```
 
-From a packed tarball: `npm pack`, then `pi install ./pi-chrome-search-0.1.0.tgz`. `pi install` writes the
-package to `~/.pi/agent/settings.json`; `pi list` shows it, `pi remove <source>` removes it. Verify the
-extension loaded by running `/web-doctor` inside pi.
+Install the packed tarball with npm, then point pi at the installed **directory** (pi's loader rejects a
+`.tgz` path, and Node refuses to strip TypeScript under `node_modules`, so `pi -e` is the supported loader):
+
+```bash
+npm pack
+npm install --prefix /tmp/pi-web ./pi-chrome-search-0.1.0.tgz
+pi install /tmp/pi-web/node_modules/pi-chrome-search
+```
+
+With the shipped `peerDependencies` npm may also pull the pi/typebox chain into that prefix; pass
+`--legacy-peer-deps` if you only want the extension and `ws`. `pi install` writes the package to
+`~/.pi/agent/settings.json`; `pi list` shows it, `pi remove <source>` removes it. Verify the extension loaded
+by running `/web-doctor` inside pi.
 
 ## Enable CDP in Chrome
 
@@ -150,7 +161,7 @@ a partial file is deep-merged over the defaults.
 Environment variables (override the file, not persisted): `PI_CHROME_CDP_WS` (full CDP URL, e.g.
 `ws://127.0.0.1:9222/devtools/browser/<uuid>`), `PI_CHROME_CDP_PORTS` (comma-separated fallback ports),
 `PI_CHROME_SEARCH_DEBUG` (`1`/`true`), `PI_CHROME_SEARCH_PROFILE` (launch mode), `PI_CODING_AGENT_DIR`
-(agent dir; config lives at `<dir>/web-search.json`).
+(agent dir; the config is `$PI_CODING_AGENT_DIR/web-search.json`, default `~/.pi/agent/web-search.json`).
 
 Example `~/.pi/agent/web-search.json`:
 
@@ -188,8 +199,9 @@ PI_CHROME_LIVE=1 node bench/run.ts --live --limit 1                  # one real 
 PI_CHROME_LIVE=1 node bench/run.ts --live --limit 1 --engine google  # one engine
 ```
 
-The live suite directory is not committed in this checkout; today the one-query smoke is the bench live run
-above (or `research/probes/08-live-search.mjs`). A wall means stop and ask — not retry.
+`tests/live/smoke.test.ts` is the committed suite behind `npm run test:live`: one query per engine, `n=2`, no
+retries; it skips without `PI_CHROME_LIVE=1` and passes with a logged wall instead of failing. A wall means
+stop and ask — not retry.
 
 ## Privacy and ToS
 
@@ -220,7 +232,7 @@ above (or `research/probes/08-live-search.mjs`). A wall means stop and ask — n
 | `E_PARSE` | A selector canary failed. Open the artifact dir from the error, compare `page.html`/`page.txt` with the adapter, run `/web-doctor` |
 | `E_BUSY` | Another pi session holds `~/.pi/agent/web-search.lock`. Close it or wait for the heartbeat (`--fix` reclaims a provably dead lock) |
 | `E_RATE_LIMITED` / `E_EMPTY` | Gap or daily cap active — wait or use another engine; no results — rephrase, drop freshness, try another engine |
-| `E_CONFIG` / `E_BLOCKED_URL` | A key in `web-search.json` is wrong or unknown (unknown keys are rejected); `web_read` refused a private/local/`file:` URL |
+| `E_CONFIG` / `E_BLOCKED_URL` | A key in `~/.pi/agent/web-search.json` is wrong or unknown (unknown keys are rejected); `web_read` refused a private/local/`file:` URL |
 | AI summary missing (`ai:no`) | Normal: AI blocks are A/B and query-dependent. Results are unchanged; nothing is invented |
 
 `/web-doctor` (or `node src/cli/doctor.ts --json`) reports the CDP endpoint, browser version, profile,
@@ -238,8 +250,9 @@ never touches a captcha and never edits the profile. Exit code 0 means ok/degrad
 - **Probes:** one-shot scripts in [`research/probes/`](research/probes/) — `03-dom-dump.mjs` for a page dump,
   `06-capture-fixtures.mjs` for sanitized fixtures, `07-cdp-broker.mjs` for the shared connection,
   `08-live-search.mjs` for a single live search. Never loop them.
-- **Fixtures:** `tests/fixtures/*.html.gz` + `meta.json`, captured then sanitized (no cookies, tokens,
-  account identity, exact IP or personal queries). `npm run audit` fails on a personal-data pattern.
+- **Fixtures:** `tests/fixtures/*.html.gz` with a `meta.json` for SERPs (`read-*` article captures have no
+  meta, and a few discovery/`research-*` `.txt`/`.json` fixtures exist), captured then sanitized (no cookies,
+  tokens, account identity, exact IP or personal queries). `npm run audit` fails on a personal-data pattern.
 - **Audit:** `scripts/audit.mjs` enforces the hard rules (no Playwright/launch/headless, no fingerprint
   spoofing, no killing Chrome, no captcha solvers, no paid search APIs, no secrets, sanitized fixtures) and
   the approximate tool-description budget; `npm test` holds the authoritative budget/cap tests.

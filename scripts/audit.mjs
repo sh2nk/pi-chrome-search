@@ -603,6 +603,18 @@ const R1_PATTERNS = [
     family: "launch",
     hint: "a computed launcher key is still a launch; attach over raw CDP",
   },
+  // The key itself may be computed (`c[launcherKey]()`, `c["lau"+"nch"]()`): any bracket access whose
+  // expression mentions `launch` is treated as a launcher, with or without an optional-call `?.`.
+  {
+    re: /\[[^\]\n]*launch[^\]\n]*\]\s*(?:\?\.)?\s*\(/i,
+    family: "launch",
+    hint: "a computed launcher key (variable or concatenated) is still a launch; attach over raw CDP",
+  },
+  {
+    re: /\.\s*launch(?:PersistentContext|Server)?\s*\?\.\s*\(/,
+    family: "launch",
+    hint: "an optional-call launcher is still a launcher; attach over raw CDP",
+  },
   // Destructuring hides the receiver (`const { launch } = chromium; launch()`). No code in src/ or
   // tests/ may call a bare launch*(), so the shape itself is forbidden rather than resolved.
   {
@@ -617,15 +629,18 @@ const R1_PATTERNS = [
   },
   { re: /--enable-automation/, hint: "an automation flag makes the session detectable; attach instead" },
   { re: /--headless/, family: "headless", hint: "the browser must be real and headed (AGENTS §2.4)" },
-  // A flag split across a concatenation (`"--head" + "less"`) renders the same argv entry.
+  // A flag split across a concatenation (`"--head" + "less"`, `"--hea" + "dless"`) renders the same
+  // argv entry. Rather than enumerating split points, any `--flag`-shaped literal concatenated with
+  // another string literal is suspicious: argv flags belong in user instructions, not in our code.
   {
-    re: /["'`]--head["'`]\s*\+/,
+    re: /["'`]--[a-z][a-z-]*["'`]\s*\+/i,
     family: "headless",
-    hint: "a split --headless flag is still headless; keep the browser headed (AGENTS §2.4)",
+    hint: "a split or concatenated command-line flag; the browser must stay headed and unattended-free",
   },
   {
-    re: /["'`]--enable-auto(?:mation)?["'`]\s*\+/,
-    hint: "a split --enable-automation flag is still an automation flag",
+    re: /\+\s*["'`](?:less|mation|dless|automation)["'`]/i,
+    family: "headless",
+    hint: "a split command-line flag is still that flag",
   },
 ];
 
@@ -649,6 +664,19 @@ const R2_PATTERNS = [
     re: /Object\s*\.\s*defineProperty\s*\(\s*(?:window\s*\.\s*)?navigator\s*,/,
     hint: "never redefine a navigator property (webdriver/platform/…) — that is fingerprint spoofing",
   },
+  // `Object["defineProperty"](globalThis.navigator, …)` / `Reflect["set"](…)` bypass the dotted forms.
+  {
+    re: /Object\s*\[\s*["'`]defineProperty["'`]\s*\]\s*\([\s\S]{0,120}?navigator/,
+    hint: "never redefine a navigator property through a computed Object key",
+  },
+  {
+    re: /Reflect\s*\[\s*["'`](?:set|defineProperty|deleteProperty)["'`]\s*\]\s*\([\s\S]{0,120}?navigator/,
+    hint: "never patch navigator through a computed Reflect key",
+  },
+  {
+    re: /(?:Object|Reflect)\s*\.\s*(?:defineProperty|set)\s*\(\s*(?:globalThis\s*\.\s*|window\s*\.\s*)?navigator/,
+    hint: "never patch navigator, including through globalThis/window",
+  },
   {
     re: /\bdelete\s+navigator\s*(?:\.\s*webdriver\b|\[\s*["'`]webdriver)/,
     hint: "never delete navigator.webdriver; the real value must stay observable",
@@ -666,6 +694,11 @@ const R3_PATTERNS = [
   {
     re: /\bchild_process\b/,
     hint: "no child_process in src/: never spawn, kill or restart Chrome — attach over CDP and ask the user",
+  },
+  // `"node:child" + "_process"` is the same import after concatenation.
+  {
+    re: /["'`](?:node:)?child["'`]\s*\+\s*["'`]_?process["'`]/,
+    hint: "a split child_process import is still a process spawner",
   },
   { re: /\bpkill\b/, hint: "never kill the user's Chrome; ask the user" },
   { re: /\btaskkill\b/, hint: "never kill the user's Chrome; ask the user" },
@@ -867,7 +900,9 @@ function charCount(value) {
 // (c) no doc calling a non-web_search tool `direct`.
 // ---------------------------------------------------------------------------
 
-const DOC_FILES = ["SPEC.md", "PLAN.md", "AGENTS.md"];
+// README is user-facing: a doc that tells people `web_read` is direct, or names a script that does
+// not exist, is the same defect as SPEC drifting. It must name the same gate commands.
+const DOC_FILES = ["SPEC.md", "PLAN.md", "AGENTS.md", "README.md"];
 
 /** Commands every document must name; PLAN §3 uses them as the gates. */
 const DOC_COMMANDS = [
@@ -1743,7 +1778,7 @@ function runAudit(root) {
     const result = checkDocs(root, store);
     checks.push({
       id: "R10",
-      title: "docs consistency (SPEC ↔ PLAN ↔ AGENTS)",
+      title: "docs consistency (SPEC ↔ PLAN ↔ AGENTS ↔ README)",
       scope: "SPEC.md, PLAN.md, AGENTS.md (+ package.json scripts)",
       files: result.files,
       findings: result.findings,
@@ -1850,6 +1885,16 @@ function docsFixture(overrides = {}) {
       `Artifacts: \`${CANONICAL_ARTIFACTS_PATH}/<ts>-<engine>-<hash>/\`.`,
       "",
     ].join("\n"),
+    "README.md": [
+      "# README",
+      "",
+      `Commands: ${commands}.`,
+      "",
+      "`web_search` is `direct`; `web_read`, `image_search`, `web_research` are `deferred`.",
+      "",
+      `Config: \`${CANONICAL_CONFIG_PATH}\`.`,
+      "",
+    ].join("\n"),
     "package.json": JSON.stringify({
       name: "audit-doc-fixture",
       version: "0.1.0",
@@ -1930,6 +1975,26 @@ const SELF_TEST_CASES = [
       { check: "R1", max: 0, label: "comment-only mention of a launcher" },
       { check: "R2", max: 0, label: "reading navigator.webdriver" },
       { check: "R3", max: 0, label: "comment-only mention of process.kill" },
+    ],
+  },
+  {
+    name: "bypass spellings",
+    files: {
+      "src/bypass.ts": [
+        "export function go(c: Record<string, () => void>, launcherKey: string): void {",
+        "  c[launcherKey]();",
+        '  const flag = "--hea" + "dless";',
+        '  Object["defineProperty"](globalThis.navigator, "webdriver", { value: false });',
+        '  void import("node:child" + "_process");',
+        "  void flag;",
+        "}",
+        "",
+      ].join("\n"),
+    },
+    expect: [
+      { check: "R1", min: 2, label: "variable launcher key + split flag" },
+      { check: "R2", min: 1, label: "computed defineProperty on globalThis.navigator" },
+      { check: "R3", min: 1, label: "split child_process import" },
     ],
   },
   {

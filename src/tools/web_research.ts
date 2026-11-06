@@ -504,7 +504,8 @@ function readShare(readsLeft: number, roundsLeft: number): number {
 
 /** Ask for a few more results than reads so triage has something to choose from. */
 function searchN(deps: ToolDeps, share: number): number {
-  const nMax = Math.min(10, Math.max(1, Math.floor(deps.config.search.nMax)));
+  const rawMax = Number.isFinite(deps.config.search.nMax) ? deps.config.search.nMax : 10;
+  const nMax = Math.min(10, Math.max(1, Math.floor(rawMax)));
   const configured = Number.isFinite(deps.config.search.n) ? Math.floor(deps.config.search.n) : 5;
   return Math.min(nMax, Math.max(3, configured, share));
 }
@@ -868,6 +869,9 @@ function renderBundle(header: string, bundle: ResearchEvidence, cap: number): Fi
           truncated = true;
           break;
         }
+        // The agent uses `truncated` to decide whether to fetch the page itself;
+        // a body the renderer shortened must say so, not pretend it is complete.
+        if (body.length < excerpt.excerpt.length) truncated = true;
         excerpts.push({ url: excerpt.url, excerpt: body });
       }
       // A shortened excerpt is still the evidence; only a dropped one is a cut.
@@ -1003,9 +1007,14 @@ export function createWebResearchTool(
           outcome = await search(query, searchN(deps, share), signal, ctx);
         } catch (error) {
           const failure = asFailure(error, "navigate", signal);
+          // An abort that surfaced as a sibling error (E_TARGET_LOST, a closed tab)
+          // is still an abort: the caller cancelled, so report that, not the symptom.
+          if (aborted()) throw cancelled("navigate");
           // The first search has no evidence to fall back on; an abort always wins.
           if (state.searches === 0 || failure.details.code === "E_CANCELLED") throw failure;
           state.lastError = { code: failure.details.code, stage: failure.details.stage };
+          // An attempted search that failed is still a search the budget spent.
+          state.searches += 1;
           break;
         }
         state.searches += 1;

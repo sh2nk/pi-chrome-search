@@ -125,8 +125,9 @@ Codemode sensitivity — the read-head size is the only free parameter:
 7. **`deep` returns *less* than `normal` here (43 227 vs 60 793 chars).** The 2 500-char cap is
    divided across the read allowance before the loop runs, so `deep` sizes every excerpt for 8 reads
    (156 chars) even when the loop stops after 4; `normal` sizes them for 4 (312). The no-new-domains
-   rule stops both at 2 searches / 4 reads on a corpus with one SERP per group, so `deep` pays the
-   smaller window without gaining evidence. See §7 — this is a P6-A follow-up, not a bench bug.
+   rule usually stops both at 2 searches / 4 reads on a corpus with one SERP per group (measured: 3/90
+   runs stop earlier), so `deep` pays the smaller window without gaining evidence. See §7 — this is a
+   P6-A follow-up, not a bench bug.
 
 ## 6. Recommendation (V6.4)
 
@@ -151,9 +152,9 @@ Codemode sensitivity — the read-head size is the only free parameter:
 
 - No model, so the script's "what to keep" decision is a constant, not intelligence. A real agent
   could write a *better* 600 chars (or a worse one) — unmeasurable here.
-- The read proxy is topically unrelated to the query, so `web_research`'s coverage judge always
-  spends its budget instead of stopping early: its cost is an **upper bound** on this corpus, not a
-  central estimate.
+- The read proxy is topically unrelated to the query, so `web_research`'s coverage judge usually
+  spends its budget instead of stopping early (measured: 2/30 runs stopped early): its cost is an
+  **upper bound** on this corpus, not a central estimate.
 - One SERP per fixture group means refinement queries return the same URLs; `deep` cannot find more
   evidence than `normal`. A live corpus would let `deep` use its allowance.
 - P6-A follow-up worth taking: size `excerptChars` from the reads **actually performed**, not from

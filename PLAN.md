@@ -444,10 +444,10 @@ hard rules were broken along the way.
 | # | Command / action | PASS criteria |
 |---|---|---|
 | V7.1 | `npm pack --dry-run` | only intended files; no `node_modules`, artifacts, `.env`, personal fixtures, screenshots |
-| V7.2 | install the tarball into a temp `PI_CODING_AGENT_DIR`, then load it | extension loads; `/web-doctor` runs; `pi install ./pi-chrome-search-<v>.tgz` dry-run documented |
+| V7.2 | install the tarball into a temp prefix, then load it | extension loads (`pi -e`); doctor path documented (CLI is repo-only under `node_modules`); a `.tgz` handed straight to `pi install` is documented as unsupported |
 | V7.3 | README review against SPEC §11–§12 | all commands/config/env keys documented; CDP clicks match the verified flow; ToS/privacy honestly stated |
 | V7.4 | `npm run audit && npm test && npm run typecheck` | green, zero waivers — or every waiver listed with a reason |
-| V7.5 | final live smoke (serial, once per engine) | 3 engines complete: `ai:yes/no`, results ≥5, chars ≤2500, latency, wall transitions |
+| V7.5 | final live smoke (serial, once per engine) | 3 engines complete at `n=2` (smoke width; the `n=5` acceptance lives in V3.5): `ai:yes/no`, results ≥1, chars ≤2500, latency, wall transitions |
 | V7.6 | evidence completeness | `evidence/P0…P7.md` exist; §5 status table has no unexplained `PARTIAL`; FINDINGS/SPEC/AGENTS consistent |
 | V7.7 | commit | `m7: packaging, docs, final audit` |
 

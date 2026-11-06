@@ -737,3 +737,50 @@ test("without injected seams the tool drives web_search and web_read end to end"
   }
   assert.equal(claims[0]?.citations.length, 2, "identical read text corroborates across two domains");
 });
+
+// ---------------------------------------------------------------------------
+// Honesty fixes (validator findings)
+// ---------------------------------------------------------------------------
+
+test("a renderer-shortened excerpt sets truncated", async () => {
+  // The agent uses `truncated` to decide whether to fetch the page itself, so a
+  // body the renderer shortened must not be reported as complete.
+  const harness = makeHarness({ fixture: BASIC, maxOutputChars: 800 });
+  const result = success(await run(harness, { q: BASIC.query, budget: "deep" }));
+  const shortened = result.details.evidence.excerpts.some(
+    (excerpt) => excerpt.excerpt.length > 0 && excerpt.excerpt.length < 100,
+  );
+  if (shortened) assert.equal(result.details.truncated, true);
+  else assert.ok(result.details.truncated, "an 800-char cap must report a cut of some kind");
+});
+
+test("an abort that surfaces as E_TARGET_LOST is reported as E_CANCELLED", async () => {
+  const controller = new AbortController();
+  const harness = makeHarness({
+    fixture: BASIC,
+    search: async () => {
+      controller.abort();
+      throw fail("E_TARGET_LOST", "navigate", { message: "the target went away during the abort" });
+    },
+  });
+  const result = await run(harness, { q: BASIC.query, budget: "normal" }, controller.signal);
+  const failure = result as { isError?: boolean; details?: { code?: string } };
+  assert.equal(failure.isError, true);
+  assert.equal(failure.details?.code, "E_CANCELLED");
+});
+
+test("a repeated result set stops the refine loop instead of spending the budget", async () => {
+  // Same SERP every round: refinement cannot add a domain, so the loop must stop
+  // after the first round rather than burn deep's four searches on one page set.
+  let round = 0;
+  const harness = makeHarness({
+    fixture: BASIC,
+    search: async (q, n, signal) => {
+      const entry = BASIC.searches[0]!;
+      round += 1;
+      return { query: `${q} #${round}`, engines: entry.engines, hits: entry.hits.map((hit) => ({ ...hit })) };
+    },
+  });
+  const result = success(await run(harness, { q: BASIC.query, budget: "deep" }));
+  assert.ok(result.details.searches <= 2, `repeated SERPs must stop the loop, saw ${result.details.searches}`);
+});
