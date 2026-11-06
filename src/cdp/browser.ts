@@ -51,7 +51,14 @@ import { WebSearchError, isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, toFailure } from "../runtime/errors.ts";
 import type { Clock, Logger } from "../runtime/types.ts";
 import { CdpSession, createCdpPage } from "./session.ts";
-import type { BrowserInfo, CdpConnectionInfo, CdpConnector, CdpEndpoint, CdpPage } from "./types.ts";
+import type {
+  BrowserInfo,
+  CdpConnectionInfo,
+  CdpConnector,
+  CdpEndpoint,
+  CdpPage,
+  PageKey,
+} from "./types.ts";
 
 /** Shape version of the lock file; a future field bump must refuse older files explicitly. */
 export const LOCK_VERSION = 1;
@@ -90,8 +97,8 @@ export interface ConnectorInfo {
   browser: BrowserInfo;
   webdriver: boolean;
   windowId: number | null;
-  ownedTargets: Array<{ targetId: string; engine: EngineId | null; url: string }>;
-  focusedOnce: EngineId[];
+  ownedTargets: Array<{ targetId: string; engine: PageKey | null; url: string }>;
+  focusedOnce: PageKey[];
   windowDegraded: boolean;
   locked: boolean;
 }
@@ -118,7 +125,7 @@ type LockRead = { kind: "ok"; record: LockRecord } | { kind: "corrupt" };
 interface OwnedPage {
   targetId: string;
   /** `null` only for the bootstrap anchor tab. */
-  engine: EngineId | null;
+  engine: PageKey | null;
   page: CdpPage;
 }
 
@@ -234,10 +241,10 @@ class BrowserConnector implements Connector {
   #heartbeatBusy = false;
 
   #bootstrap: OwnedPage | undefined;
-  readonly #enginePages = new Map<EngineId, OwnedPage>();
+  readonly #enginePages = new Map<PageKey, OwnedPage>();
   /** Target ids this connector created. The only ids `releaseAll` may close. */
   readonly #owned = new Set<string>();
-  readonly #focusedOnce = new Set<EngineId>();
+  readonly #focusedOnce = new Set<PageKey>();
 
   #windowId: number | null = null;
   #windowDegraded = false;
@@ -330,7 +337,7 @@ class BrowserConnector implements Connector {
     }
   }
 
-  async acquirePage(engine: EngineId): Promise<CdpPage> {
+  async acquirePage(engine: PageKey): Promise<CdpPage> {
     if (!this.isConnected()) await this.connect();
     const session = this.#session;
     if (session === undefined) {
@@ -799,14 +806,14 @@ class BrowserConnector implements Connector {
     await bootstrap.page.bringToFront();
   }
 
-  #wantsFocus(engine: EngineId): boolean {
+  #wantsFocus(engine: PageKey): boolean {
     const policy: FocusPolicy = this.#config.window.focus;
     if (policy === "always") return true;
     if (policy === "session") return !this.#focusedOnce.has(engine);
     return false;
   }
 
-  async #applyFocus(engine: EngineId, page: CdpPage): Promise<void> {
+  async #applyFocus(engine: PageKey, page: CdpPage): Promise<void> {
     if (!this.#wantsFocus(engine)) return;
     await page.bringToFront();
     this.#focusedOnce.add(engine);
@@ -835,8 +842,8 @@ class BrowserConnector implements Connector {
     return { endpoint: state.endpoint, browser: state.browser, webdriver: state.webdriver };
   }
 
-  #ownedList(): Array<{ targetId: string; engine: EngineId | null; url: string }> {
-    const list: Array<{ targetId: string; engine: EngineId | null; url: string }> = [];
+  #ownedList(): Array<{ targetId: string; engine: PageKey | null; url: string }> {
+    const list: Array<{ targetId: string; engine: PageKey | null; url: string }> = [];
     const bootstrap = this.#bootstrap;
     if (bootstrap !== undefined && this.#owned.has(bootstrap.targetId)) {
       list.push({ targetId: bootstrap.targetId, engine: null, url: bootstrap.page.url() });

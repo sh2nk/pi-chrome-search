@@ -10,6 +10,7 @@
  */
 
 import { createImageSearchTool } from "./image_search.ts";
+import { createWebReadTool } from "./web_read.ts";
 import type { ToolDeps } from "./types.ts";
 import { createWebDoctorTool, type WebDoctorDepsGetter } from "./web_doctor.ts";
 import { createWebSearchTool } from "./web_search.ts";
@@ -26,6 +27,7 @@ export function createTools(factories: ToolFactories) {
   return [
     createWebSearchTool(factories.getDeps),
     createImageSearchTool(factories.getDeps),
+    createWebReadTool(factories.getDeps),
     createWebDoctorTool(factories.getDoctorDeps),
   ];
 }

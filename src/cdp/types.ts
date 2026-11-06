@@ -25,6 +25,12 @@ export interface CookieInfo {
   domain: string;
 }
 
+/**
+ * Work-tab key. Search tabs are keyed by engine; a read gets its own tab so a
+ * long article never navigates the SERP tab out from under a cached result.
+ */
+export type PageKey = EngineId | "read";
+
 export interface CdpPage {
   /** Current URL, synchronously, as last known to the target. */
   url(): string;
@@ -83,7 +89,7 @@ export interface CdpConnectionInfo {
 export interface CdpConnector {
   connect(): Promise<CdpConnectionInfo>;
   /** One owned work tab per engine, reused across calls. */
-  acquirePage(engine: EngineId): Promise<CdpPage>;
+  acquirePage(target: PageKey): Promise<CdpPage>;
   /** Closes only tabs/windows this extension opened. */
   releaseAll(): Promise<void>;
   isConnected(): boolean;

@@ -139,7 +139,7 @@ interface Harness {
   deps: ToolDeps;
   page: FakePage;
   limiterCalls: EngineId[];
-  pageRequests: EngineId[];
+  pageRequests: string[];
   saved: ArtifactInput[];
 }
 
@@ -177,7 +177,7 @@ function makeHarness(options: HarnessOptions): Harness {
   };
 
   const log: Logger = { async write() {}, path: () => "/dev/null" };
-  const pageRequests: EngineId[] = [];
+  const pageRequests: string[] = [];
   const cdp: CdpConnector = {
     async connect() {
       throw new Error("connect() is not used by image_search unit tests");
