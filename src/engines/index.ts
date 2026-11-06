@@ -20,6 +20,7 @@
 
 import type { Config } from "../config.ts";
 import { duckduckgoEngine } from "./duckduckgo.ts";
+import { googleEngine } from "./google.ts";
 import { yandexEngine } from "./yandex.ts";
 import { WebSearchError } from "../runtime/error-codes.ts";
 import {
@@ -49,6 +50,7 @@ export type EngineMap = Partial<Record<EngineId, Engine>>;
  * back; tests build their own maps with `createEngineRegistry(map, config)`.
  */
 export const DEFAULT_ENGINES: EngineMap = Object.freeze({
+  google: googleEngine,
   duckduckgo: duckduckgoEngine,
   yandex: yandexEngine,
 });
