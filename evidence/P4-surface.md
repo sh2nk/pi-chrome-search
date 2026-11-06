@@ -1,6 +1,7 @@
 # P4-D — tool surface audit
 
 Date: 2026-11-06
+Verdict: **PASS** (5 tests, 872 → 887/900 chars after P6 added `web_research`)
 Command: `node --test tests/unit/tool_surface.test.ts`
 Test: `tests/unit/tool_surface.test.ts` (5 tests)
 

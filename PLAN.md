@@ -501,8 +501,8 @@ hard rules were broken along the way.
 | P1 attach/doctor | `[x]` | `evidence/P1.md` | M0 gates V1.1–V1.6 pass; live doctor JSON recorded |
 | P2 plumbing | `[x]` | `evidence/P2.md` | M0.5 gates V2.1–V2.7 pass; artifacts pulled forward from P4-C |
 | P3 engines | `[x]` | `evidence/P3.md`, `evidence/P3-live.md` | google/ddg/yandex registered; live V3.5 pass; artifacts proven offline, live wall not provoked |
-| P4 read/images/doctor | `[ ]` | `evidence/P4.md` | live serial |
-| P5 reflex | `[ ]` | `evidence/P5.md`, `bench/RESULTS.md` | bench gate decides |
+| P4 read/images/doctor | `[x]` | `evidence/P4.md`, `evidence/P4-surface.md` | V4.1–V4.7 pass; live doctor/--fix, read and image query recorded |
+| P5 reflex | `[x]` | `evidence/P5.md`, `bench/RESULTS.md` | built and wired; bench says keep `enabled:false` (tokens −0.2% at honest keep) |
 | P6 research | `[ ]` | `evidence/P6.md` | — |
 | P7 packaging | `[ ]` | `evidence/P7.md` | — |
 
