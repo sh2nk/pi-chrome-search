@@ -5,6 +5,6 @@
   "capturedAt": "2026-11-06T00:29:15.194Z",
   "ai": "no",
   "results": 30,
-  "notes": "modern markup: 30 .SerpItem blocks with ImagesContentImage thumbs; no .serp-item class in 2026",
+  "notes": "census 2026-11-06: 30 .SerpItem blocks with .ImagesContentImage/.SerpItem-Thumb (0 .serp-item in 2026); 30 tiles, 22 unique thumbs; tiles expose no source page, the cover href carries the source image in img_url",
   "capturedWith": "research/probes/06-capture-fixtures.mjs"
 }

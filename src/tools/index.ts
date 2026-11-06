@@ -9,6 +9,7 @@
  * codemode scripts, but not paid for in every prompt (SPEC §7.1, §8).
  */
 
+import { createImageSearchTool } from "./image_search.ts";
 import type { ToolDeps } from "./types.ts";
 import { createWebDoctorTool, type WebDoctorDepsGetter } from "./web_doctor.ts";
 import { createWebSearchTool } from "./web_search.ts";
@@ -22,7 +23,11 @@ export interface ToolFactories {
 }
 
 export function createTools(factories: ToolFactories) {
-  return [createWebSearchTool(factories.getDeps), createWebDoctorTool(factories.getDoctorDeps)];
+  return [
+    createWebSearchTool(factories.getDeps),
+    createImageSearchTool(factories.getDeps),
+    createWebDoctorTool(factories.getDoctorDeps),
+  ];
 }
 
 export type RegisteredTool = ReturnType<typeof createTools>[number];
