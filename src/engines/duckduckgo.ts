@@ -531,23 +531,31 @@ async function detectSerpWall(page: CdpPage): Promise<Wall | null> {
     markers.push(`url:${path}`);
     blocked = true;
   }
-  if (text.includes(ANOMALY_MARKER)) {
-    markers.push(ANOMALY_MARKER);
-    blocked = true;
-  }
-  if (text.includes(CAPTCHA_MARKER)) {
-    markers.push(CAPTCHA_MARKER);
-    captcha = true;
-  }
-  // "unusual traffic" also appears in normal result text for a query about
-  // network anomalies, so it only counts when the page carries no results.
-  if (!blocked && !captcha && text.includes(WEAK_BLOCK_MARKER)) {
-    const results = countOf(await page.evaluate<unknown>(countExpression(RESULT_TITLE_SELECTOR)));
-    if (results === 0) {
-      markers.push(WEAK_BLOCK_MARKER);
-      blocked = true;
+
+  // Every text marker below is also ordinary SERP text for a query *about*
+  // DuckDuckGo's error copy (e.g. "unusual traffic" or the challenge title), so
+  // a marker only counts on a page with no result anchors. The URL above is
+  // unambiguous and needs no corroboration.
+  let results: number | null = null;
+  const resultCount = async (): Promise<number> => {
+    if (results === null) {
+      results = countOf(await page.evaluate<unknown>(countExpression(RESULT_TITLE_SELECTOR)));
     }
-  }
+    return results;
+  };
+
+  const anomalyText = text.includes(ANOMALY_MARKER) && (await resultCount()) === 0;
+  const captchaText = text.includes(CAPTCHA_MARKER) && (await resultCount()) === 0;
+  const weakText =
+    !anomalyText && !captchaText && text.includes(WEAK_BLOCK_MARKER) && (await resultCount()) === 0;
+  // Markers keep the page order (anomaly wording first) while a challenge
+  // caption still decides the kind: a captcha page is not merely "blocked".
+  if (anomalyText) markers.push(ANOMALY_MARKER);
+  if (captchaText) markers.push(CAPTCHA_MARKER);
+  if (weakText) markers.push(WEAK_BLOCK_MARKER);
+  captcha = captchaText;
+  // `blocked` may already be true from the anomaly URL above; never clear it.
+  blocked = blocked || anomalyText || weakText;
 
   if (!blocked && !captcha) return null;
   const kind: WallKind = captcha ? "captcha" : "blocked";

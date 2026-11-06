@@ -655,3 +655,20 @@ test("a closure-based extractor fails through runInPage, exactly like in the bro
   }
   assert.throws(() => runInPage(leaky, fixtureDocument("<p>a</p>"), null), /suffix|not defined/i);
 });
+
+test("detectWall: a captcha widget alone is a wall even without marker text", async () => {
+  // The live widget can render while the marker copy lives in an iframe/shadow
+  // root the text scan cannot see; the node itself is evidence.
+  const html = [
+    "<html><body>",
+    '<div class="SmartCaptcha"></div>',
+    '<div class="Organic"><div class="OrganicTitle">',
+    '<a href="https://example.com/a">Обычный результат</a></div></div>',
+    "</body></html>",
+  ].join("");
+  const page = pageFor(fixtureDocument(html, SERP_URL), SERP_URL);
+  const wall = await yandexEngine.detectWall(page);
+  assert.ok(wall !== null);
+  assert.equal(wall.kind, "captcha");
+  assert.deepEqual(wall.markers, ["captcha-node"]);
+});

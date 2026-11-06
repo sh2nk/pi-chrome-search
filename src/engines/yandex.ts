@@ -791,10 +791,14 @@ export async function detectYandexWall(page: CdpPage): Promise<Wall | null> {
   if (captchaUrlMarkers.length > 0) {
     return { kind: "captcha", url, markers: captchaMarkers };
   }
-  if (captchaTextMarkers.length > 0) {
-    if ((await captchaNodeCount(page)) > 0 || (await organics()) === 0) {
-      return { kind: "captcha", url, markers: captchaMarkers };
-    }
+  // A widget on the page is evidence on its own: the live card can be present
+  // while the marker text sits in an iframe/shadow root the text scan cannot see.
+  if ((await captchaNodeCount(page)) > 0) {
+    return { kind: "captcha", url, markers: captchaMarkers.length > 0 ? captchaMarkers : ["captcha-node"] };
+  }
+  // Text alone still needs corroboration: a snippet can quote these words.
+  if (captchaTextMarkers.length > 0 && (await organics()) === 0) {
+    return { kind: "captcha", url, markers: captchaMarkers };
   }
 
   const blockedMarkers: string[] = [];

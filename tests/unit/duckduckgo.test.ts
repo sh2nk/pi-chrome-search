@@ -660,3 +660,16 @@ test("extractFromDocument itself survives stringification against a fixture", ()
   assert.equal(serp.results.length, 2);
   assert.ok(serp.ai);
 });
+
+test('detectWall: challenge phrases quoted by real results are not a wall', async () => {
+  // A query about DDG's own error copy puts both phrases into titles/snippets.
+  // With result anchors present the page is a normal SERP.
+  const text = [
+    "Unfortunately, bots use DuckDuckGo too — how the challenge works",
+    "Please complete the following challenge: a guide",
+    "DuckDuckGo",
+  ].join(" ");
+  const page = new FakePage({ url: SERP_URL, text, evaluate: () => 3 });
+
+  assert.equal(await duckduckgoEngine.detectWall(page), null);
+});
