@@ -4,7 +4,7 @@
   "queryClass": "images",
   "capturedAt": "2026-11-06T00:27:36.363Z",
   "ai": "no",
-  "results": 0,
-  "notes": "results = marker census in the HTML; ai = text heuristic (adapter detection is authoritative)",
+  "results": 248,
+  "notes": "248 <img> nodes; links are JS-driven (no /imgres? anchors in the post-render DOM)",
   "capturedWith": "research/probes/06-capture-fixtures.mjs"
 }

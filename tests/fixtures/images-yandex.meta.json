@@ -2,9 +2,9 @@
   "engine": "yandex",
   "urlPathShape": "https://yandex.ru/images/search?text=%3Cquery%3E",
   "queryClass": "images",
-  "capturedAt": "2026-11-06T00:28:08.741Z",
+  "capturedAt": "2026-11-06T00:29:15.194Z",
   "ai": "no",
-  "results": 0,
-  "notes": "results = marker census in the HTML; ai = text heuristic (adapter detection is authoritative)",
+  "results": 30,
+  "notes": "modern markup: 30 .SerpItem blocks with ImagesContentImage thumbs; no .serp-item class in 2026",
   "capturedWith": "research/probes/06-capture-fixtures.mjs"
 }
