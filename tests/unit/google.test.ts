@@ -21,6 +21,7 @@ import {
   canaryCountsFromDocument,
   extractFromDocument,
   googleEngine,
+  wallEvidenceFromDocument,
   type ExtractedSerp,
 } from "../../src/engines/google.ts";
 import type { Freshness, Query } from "../../src/engines/types.ts";
@@ -32,6 +33,15 @@ import { loadFixture } from "../helpers/load-fixture.ts";
 
 const SERP_URL = "https://www.google.com/search?q=transformer&hl=ru";
 const HOME_URL = "https://www.google.com/";
+const WALL_URL = "https://www.google.com/sorry/index?continue=redacted";
+const CONSENT_URL = "https://consent.google.com/m?continue=redacted";
+
+/**
+ * The adapter's readiness gate. It has to include the wall containers: a wall
+ * that never settles would surface as E_TIMEOUT instead of E_WALL.
+ */
+const READY_SELECTOR =
+  '#rso, #search, #captcha-form, #recaptcha, .g-recaptcha, form[action*="consent.google.com"]';
 
 function makeQuery(overrides: Partial<Query> = {}): Query {
   return { text: "rust tokio", n: 5, summary: true, ...overrides };
@@ -93,6 +103,10 @@ function fixturePage(name: string, url = SERP_URL): FixturePage {
       assert.ok(/\(document\)$/.test(expression), "canaries must send only the document");
       return runInPage(canaryCountsFromDocument, document, null);
     }
+    if (expression.includes("wallEvidenceFromDocument")) {
+      assert.ok(/\(document\)$/.test(expression), "wall evidence must send only the document");
+      return runInPage(wallEvidenceFromDocument, document, null);
+    }
     assert.ok(
       expression.includes("extractFromDocument"),
       `unexpected evaluate expression: ${expression.slice(0, 80)}`,
@@ -104,16 +118,36 @@ function fixturePage(name: string, url = SERP_URL): FixturePage {
   return { page, document };
 }
 
-/** Same plumbing for an inline document, for the ad/link/safety cases. */
-function inlinePage(html: string, url = SERP_URL): FakePage {
-  const document = fixtureDocument(html, url);
+/**
+ * A `FakePage` over an inline document that answers settle's count poll,
+ * `canaries`, `detectWall`'s DOM probe and `extract` — the same expressions the
+ * live code emits, evaluated against the real fixture document.
+ */
+function documentPage(document: Document, url = SERP_URL): FakePage {
   const page = new FakePage({ url, text: bodyText(document) });
   page.setEvaluateHandlers((expression: string) => {
+    const counted = COUNT_CALL.exec(expression);
+    if (counted !== null) {
+      return document.querySelectorAll(JSON.parse(counted[1] as string) as string).length;
+    }
+    if (expression.includes("canaryCountsFromDocument")) {
+      assert.ok(/\(document\)$/.test(expression), "canaries must send only the document");
+      return runInPage(canaryCountsFromDocument, document, null);
+    }
+    if (expression.includes("wallEvidenceFromDocument")) {
+      assert.ok(/\(document\)$/.test(expression), "wall evidence must send only the document");
+      return runInPage(wallEvidenceFromDocument, document, null);
+    }
     const match = EXTRACT_CALL.exec(expression);
     if (match === null) return null;
     return runInPage(EXTRACT_IN_PAGE, document, JSON.parse(match[1] as string));
   });
   return page;
+}
+
+/** Same plumbing for an inline document, for the ad/link/safety cases. */
+function inlinePage(html: string, url = SERP_URL): FakePage {
+  return documentPage(fixtureDocument(html, url), url);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +231,7 @@ test("interaction names a real home page, both search boxes and a structural gat
 
   assert.equal(interaction.homeUrl, HOME_URL);
   assert.deepEqual([...interaction.boxSelectors], ['textarea[name="q"]', 'input[name="q"]']);
-  assert.equal(interaction.selector, "#rso, #search");
+  assert.equal(interaction.selector, READY_SELECTOR);
   assert.equal(interaction.minCount, 1);
   /**
    * Deliberately empty: an empty marker is `waitForMarker`'s documented
@@ -221,7 +255,7 @@ test("settle resolves at once when the SERP container is already there", async (
   const page = new FakePage({
     url: SERP_URL,
     text: "Результатов: примерно 1 234",
-    evaluate: countHandler({ "#rso, #search": 1 }),
+    evaluate: countHandler({ [READY_SELECTOR]: 1 }),
   });
 
   await googleEngine.settle(page, undefined, { clock, deadlineMs: 5_000 });
@@ -283,6 +317,65 @@ test("settle accepts a zero-result SERP: the shell is not a wall and not a timeo
   assert.equal(clock.totalSleptMs(), 0);
 });
 
+test("a /sorry wall settles at once and is then classified as sorry", async () => {
+  const clock = new FakeClock();
+  const { page } = fixturePage("google-wall", WALL_URL);
+
+  await googleEngine.settle(page, undefined, { clock, deadlineMs: 1_000 });
+
+  // Zero polls slept: the wall container is part of the readiness gate. A settle
+  // that only knew `#rso`/`#search` would burn the deadline and report E_TIMEOUT.
+  assert.equal(clock.totalSleptMs(), 0);
+
+  const wall = await googleEngine.detectWall(page);
+  assert.ok(wall !== null, "the /sorry fixture must classify, not time out");
+  assert.equal(wall.kind, "sorry");
+  assert.ok(wall.markers.includes("/sorry"), wall.markers.join(", "));
+  assert.ok(wall.markers.includes("unusual traffic"), wall.markers.join(", "));
+});
+
+test("a consent interstitial settles at once and is then classified as consent", async () => {
+  const clock = new FakeClock();
+  const { page } = fixturePage("google-consent", CONSENT_URL);
+
+  await googleEngine.settle(page, undefined, { clock, deadlineMs: 1_000 });
+  assert.equal(clock.totalSleptMs(), 0);
+
+  const wall = await googleEngine.detectWall(page);
+  assert.ok(wall !== null, "the consent fixture must classify, not time out");
+  assert.equal(wall.kind, "consent");
+  assert.ok(wall.markers.includes("consent.google.com"), wall.markers.join(", "));
+  assert.ok(wall.markers.includes("Before you continue to Google"), wall.markers.join(", "));
+});
+
+test("the ready selector does not match a Google home page, so settle times out honestly", async () => {
+  // A real home document: brand chrome, a search box, no results shell and no
+  // wall container. This is the "stale marker vs home page" trap, asserted on a
+  // document instead of a canned count.
+  const document = fixtureDocument(
+    `<html><body>
+      <div id="gb"><a href="https://mail.google.com/">Gmail</a><a href="https://images.google.com/">Images</a></div>
+      <div class="home"><img alt="Google">
+        <form action="/search" id="tsf" role="search"><textarea name="q"></textarea><button type="submit">Google Search</button></form>
+      </div>
+      <div class="footer">Google offered in: русский</div>
+    </body></html>`,
+    HOME_URL,
+  );
+
+  const interaction = googleEngine.interaction;
+  assert.ok(interaction?.selector !== undefined, "google exposes a structural gate");
+  assert.equal(document.querySelectorAll(interaction.selector).length, 0);
+
+  const clock = new FakeClock();
+  const page = documentPage(document, HOME_URL);
+  await assert.rejects(
+    googleEngine.settle(page, undefined, { clock, deadlineMs: 300, pollMs: 100 }),
+    (error: unknown) => isWebSearchError(error) && error.details.code === "E_TIMEOUT",
+  );
+  assert.ok(clock.totalSleptMs() > 0, "the home page must never settle on the first poll");
+});
+
 test("settle propagates an abort as E_CANCELLED", async () => {
   const clock = new FakeClock();
   const controller = new AbortController();
@@ -324,13 +417,26 @@ test("detectWall classifies the consent page", async () => {
   assert.ok(wall.markers.includes("Before you continue to Google"), wall.markers.join(", "));
 });
 
-test("detectWall reports a captcha block as captcha", async () => {
-  const page = new FakePage({
-    url: "https://www.google.com/search?q=redacted",
-    text: "Наши системы обнаружили необычный трафик. Я не робот — поставьте галочку.",
-  });
+test("detectWall classifies a captcha block from its DOM node despite ordinary text", async () => {
+  const document = fixtureDocument(
+    `<html><body>
+      <form id="captcha-form" action="/sorry/index" method="get"></form>
+      <p>Пожалуйста, подтвердите, что запросы отправляет человек.</p>
+    </body></html>`,
+    SERP_URL,
+  );
 
-  const wall = await googleEngine.detectWall(page);
+  const wall = await googleEngine.detectWall(documentPage(document));
+
+  assert.ok(wall !== null);
+  assert.equal(wall.kind, "captcha");
+  assert.ok(wall.markers.includes("#captcha-form"), wall.markers.join(", "));
+});
+
+test("detectWall needs no URL or node when a captcha phrase meets a page with zero results", async () => {
+  const document = fixtureDocument("<html><body><div>Я не робот — поставьте галочку.</div></body></html>", SERP_URL);
+
+  const wall = await googleEngine.detectWall(documentPage(document));
 
   assert.ok(wall !== null);
   assert.equal(wall.kind, "captcha");
@@ -342,6 +448,41 @@ test("detectWall returns null on both normal SERPs", async () => {
     const url = `https://www.google.com/search?q=${name}&hl=ru`;
     const page = new FakePage({ url, text: fixtureText(name, url) });
     assert.equal(await googleEngine.detectWall(page), null, `${name} must not look like a wall`);
+  }
+});
+
+test("detectWall ignores wall phrases that only appear in SERP snippets", async () => {
+  /**
+   * The false-positive shape: a healthy SERP whose snippet quotes a wall slogan.
+   * Text alone used to turn every one of these into E_WALL. Each document has an
+   * organic anchor, no wall URL and no captcha/consent node, so corroboration
+   * fails and the verdict stays null.
+   */
+  const phrases = [
+    "unusual traffic", // /sorry text marker
+    "Я не робот", // captcha text marker
+    "Before you continue to Google", // consent text marker
+    "подозрительный трафик", // the ru /sorry marker
+  ];
+
+  for (const phrase of phrases) {
+    const document = fixtureDocument(
+      `<html><body><div id="rso">
+        <div data-hveid="o1">
+          <a href="https://example.org/article"><h3>Как работает эта страница</h3></a>
+          <div class="VwiC3b">В статье встречается фраза «${phrase}», но это просто сниппет обычного результата.</div>
+        </div>
+      </div></body></html>`,
+      SERP_URL,
+    );
+    // The page text really carries the phrase; only the context says it is prose.
+    assert.ok(bodyText(document).toLowerCase().includes(phrase.toLowerCase()), phrase);
+
+    assert.equal(
+      await googleEngine.detectWall(documentPage(document)),
+      null,
+      `snippet quoting "${phrase}" must not be a wall`,
+    );
   }
 });
 
@@ -480,6 +621,82 @@ test("extract keeps answer prose that merely mentions a brace pair", async () =>
   assert.ok(serp.ai !== undefined);
   assert.ok(serp.ai.text.includes("{a: 1}"), serp.ai.text);
   assert.match(serp.ai.text, /^Трансформер/);
+});
+
+test("extract does not mistake an organic section mentioning AI Overview for the answer", async () => {
+  /**
+   * The reproduced adversarial document: an ordinary result block whose snippet
+   * discusses "AI Overview". The section used to be re-labelled as the answer and
+   * the snippet's own link became a "source". The label must be in a heading, and
+   * a section carrying organic anchors (`a h3`) is a result block.
+   */
+  const page = inlinePage(`
+    <div id="rso">
+      <section>
+        <a href="https://example.org/ai-overview"><h3>AI Overview: что это такое</h3></a>
+        <div class="VwiC3b">AI Overview is a summary block. Подробнее — в статье <a href="https://example.org/source">example.org</a>.</div>
+      </section>
+    </div>
+  `);
+
+  const serp = await googleEngine.extract(page, makeQuery({ summary: true }));
+
+  assert.equal(serp.ai, undefined, "an organic section is not an AI answer");
+  assert.equal(serp.results.length, 1);
+  assert.equal(serp.results[0]?.url, "https://example.org/ai-overview");
+
+  // A section without organic anchors still needs the label in a heading.
+  const plain = inlinePage(`
+    <div id="rso">
+      <section>
+        <div class="VwiC3b">AI Overview — это краткая сводка, но здесь нет заголовка.</div>
+        <p>Трансформер — это архитектура глубоких нейронных сетей, представленная в 2017 году.</p>
+      </section>
+      <div data-hveid="o1"><a href="https://example.org/one"><h3>Result</h3></a><div class="VwiC3b">Snippet</div></div>
+    </div>
+  `);
+  const plainSerp = await googleEngine.extract(plain, makeQuery({ summary: true }));
+  assert.equal(plainSerp.ai, undefined, "the label must sit in a heading leaf");
+});
+
+test("extract keeps a sentence that opens with a JS-style object literal", async () => {
+  // A prose sentence may start with `{a: 1}`. That is not a CSS/JS declaration
+  // run (no real CSS property is one letter), so the residue guard must leave it
+  // alone instead of eating the opening of the answer.
+  const page = inlinePage(`
+    <div id="rso">
+      <section>
+        <div role="heading"><strong>Обзор от ИИ</strong></div>
+        <div class="answer">{a: 1} — это литерал объекта в JavaScript, а не блок CSS, и он остаётся в ответе.</div>
+      </section>
+    </div>
+  `);
+
+  const serp = await googleEngine.extract(page, makeQuery({ summary: true }));
+  assert.ok(serp.ai !== undefined);
+  assert.ok(serp.ai.text.startsWith("{a: 1}"), serp.ai.text);
+  assert.ok(serp.ai.text.includes("литерал объекта"));
+});
+
+test("extract strips the AI label that sits inside the answer wrapper", async () => {
+  // The layout that needs the label strip: the wrapper itself starts with the
+  // label (a heading rendered inside the prose container), not only with a
+  // separate heading leaf above it.
+  const page = inlinePage(`
+    <div id="rso">
+      <section>
+        <div role="heading"><strong>Обзор от ИИ</strong></div>
+        <div class="answer"><strong>Обзор от ИИ</strong> Трансформер — это архитектура глубоких нейронных сетей, представленная в 2017 году и лежащая в основе современных языковых моделей.</div>
+        <div class="sources"><a href="https://ru.wikipedia.org/wiki/Transformer">Википедия</a></div>
+      </section>
+    </div>
+  `);
+
+  const serp = await googleEngine.extract(page, makeQuery({ summary: true }));
+  assert.ok(serp.ai !== undefined);
+
+  assert.equal(serp.ai.text.startsWith("Обзор от ИИ"), false, serp.ai.text.slice(0, 80));
+  assert.ok(serp.ai.text.includes("архитектура глубоких нейронных сетей"), serp.ai.text);
 });
 
 test("the real google-ai fixture still yields prose-only AI text", async () => {
@@ -672,6 +889,28 @@ test("canaries report zeros on the empty SERP and never throw on an empty body",
   const garbage = new FakePage({ url: SERP_URL });
   garbage.setEvaluateHandlers(() => null);
   assert.deepEqual(await googleEngine.canaries(garbage), { organics: 0, aiBlock: 0, resultsContainer: 0 });
+});
+
+test("canaries ignore an AI label that only lives in a <script>", async () => {
+  // `textContent` counted the label inside a script and reported `aiBlock: 1`
+  // while `extract()` honestly said `ai:no`; the census now uses visible text and
+  // the same heading-leaf rule as extraction.
+  const document = fixtureDocument(`
+    <div id="rso">
+      <section>
+        <script>var s = "Обзор от ИИ";</script>
+        <p>Обычный текст без заголовка.</p>
+      </section>
+      <div data-hveid="o1"><a href="https://example.org/one"><h3>Result</h3></a><div class="VwiC3b">Snippet</div></div>
+    </div>
+  `);
+
+  const page = documentPage(document);
+  const counts = await googleEngine.canaries(page);
+  assert.equal(counts.aiBlock, 0);
+
+  const serp = await googleEngine.extract(page, makeQuery({ summary: true }));
+  assert.equal(serp.ai, undefined, "extraction and canaries must agree");
 });
 
 // ---------------------------------------------------------------------------

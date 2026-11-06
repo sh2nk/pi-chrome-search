@@ -69,7 +69,26 @@ const HOME_URL = "https://www.google.com/";
  * is that module's documented "selector only" mode.
  */
 const SERP_MARKER = "";
-const SERP_SELECTOR = "#rso, #search";
+const SERP_CONTAINER_SELECTOR = "#rso, #search";
+/**
+ * Wall containers, part of the readiness gate on purpose.
+ *
+ * A `/sorry` page and the consent interstitial have no `#rso`/`#search`, so a
+ * settle that knew only the SERP shell would burn its whole deadline there and
+ * report `E_TIMEOUT` — the one verdict that hides both the cause and the remedy.
+ * A wall settles in one poll and `detectWall` does the classification; the probe
+ * below corroborates with the very same nodes, so settle and classify can never
+ * disagree about what a wall looks like.
+ *
+ * `#captcha-form` is the real `/sorry` form, `#recaptcha`/`.g-recaptcha` are the
+ * widget shapes (the fixture renders `#recaptcha`), and the consent form selector
+ * is verified against `tests/fixtures/google-consent.html.gz`
+ * (`<form action="https://consent.google.com/save">`).
+ */
+const WALL_CONTAINER_SELECTOR =
+  '#captcha-form, #recaptcha, .g-recaptcha, form[action*="consent.google.com"]';
+/** Everything `settle()` accepts as "the page rendered something we can classify". */
+const READY_SELECTOR = `${SERP_CONTAINER_SELECTOR}, ${WALL_CONTAINER_SELECTOR}`;
 const SERP_MIN_COUNT = 1;
 /** Bounded wait; a page that is not ready in 8 s is a layout change or a wall. */
 const SETTLE_DEADLINE_MS = 8_000;
@@ -93,6 +112,12 @@ const FRESHNESS_VALUES: readonly Freshness[] = ["d", "w", "m", "y"];
 const SORRY_URL_MARKER = "/sorry";
 const SORRY_TEXT_MARKERS: readonly string[] = ["unusual traffic", "подозрительный трафик"];
 const CONSENT_HOST_MARKER = "consent.google.com";
+/**
+ * YouTube sends its viewers through the same interstitial on a different host;
+ * a Google search can land there through a video result, so the host is wall
+ * evidence for this adapter as well.
+ */
+const CONSENT_YOUTUBE_HOST_MARKER = "consent.youtube.com";
 const CONSENT_TEXT_MARKERS: readonly string[] = [
   "Before you continue to Google",
   "Прежде чем перейти в Google",
@@ -132,7 +157,7 @@ export interface ExtractedSerp {
 export interface CanaryCounts {
   /** `a h3` anchors: one per organic result on a normal SERP. */
   organics: number;
-  /** `section` blocks whose text carries the AI Overview label. */
+  /** `section` blocks whose AI label sits in a heading leaf. */
   aiBlock: number;
   /** `#rso`/`#search` containers: present on a real SERP, including an empty one. */
   resultsContainer: number;
@@ -288,7 +313,16 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
     return normalize(parts.join(""));
   }
 
-  /** `{padding:10px}` / `{a:1}` — a declaration run, not prose with a brace pair. */
+  /**
+   * `{padding:10px}` / `{margin:0}` — a declaration run, not prose with a brace
+   * pair.
+   *
+   * `{a: 1}` used to qualify, so a sentence that opens with a JavaScript object
+   * literal lost its first characters. Two properties separate the shapes: CSS
+   * writes the colon with no space before it, and no CSS property is a single
+   * letter (`margin`, `padding`, `display`, `--custom`). A one-letter key plus
+   * `: ` is the JS-object-in-prose shape and stays in the answer.
+   */
   function isDeclarationBlock(value: string): boolean {
     if (value.length < 3 || value.charAt(0) !== "{" || value.charAt(value.length - 1) !== "}") return false;
     const inner = value.slice(1, value.length - 1);
@@ -297,7 +331,10 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
     for (const part of inner.split(";")) {
       const piece = part.trim();
       if (piece === "") continue;
-      if (!/^-{0,2}[a-zA-Z][a-zA-Z0-9-]*\s*:\s*\S/.test(piece)) return false;
+      // No whitespace before the colon; the name is at least two characters
+      // (every real CSS property, vendor-prefixed or `--custom`, is), so a
+      // one-letter JS key such as `{a: 1}` is not a declaration run.
+      if (!/^(?:--[a-zA-Z][a-zA-Z0-9-]*|-?[a-zA-Z][a-zA-Z0-9-]+):\s*\S[^;]*$/.test(piece)) return false;
       properties += 1;
     }
     return properties > 0;
@@ -400,12 +437,27 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
     return hasAdBadge(scope);
   }
 
+  /**
+   * The AI Overview label must be a heading, not any prose.
+   *
+   * The label used to count anywhere in a section's text, so an organic result
+   * whose *snippet* discusses "AI Overview" was re-labelled as the answer — the
+   * snippet's own link even became a "source". Two guards make the label
+   * structural: it sits in a heading leaf (`h1`–`h4` or `[role="heading"]`), and a
+   * section that carries organic result anchors (`a h3`) is a result block, never
+   * the answer. The live capture puts the label in
+   * `<div role="heading" aria-level="2"><strong>Обзор от ИИ</strong></div>`.
+   */
   function findAiSection(): Element | null {
+    const HEADING_SELECTOR = 'h1, h2, h3, h4, [role="heading"]';
     for (const section of Array.from(doc.querySelectorAll("section"))) {
-      const text = visibleText(section);
-      if (text === "") continue;
-      for (const label of AI_LABELS) {
-        if (text.indexOf(label) !== -1) return section;
+      if (section.querySelectorAll("a h3").length > 0) continue;
+      for (const heading of Array.from(section.querySelectorAll(HEADING_SELECTOR))) {
+        const text = visibleText(heading);
+        if (text === "") continue;
+        for (const label of AI_LABELS) {
+          if (text.indexOf(label) === 0) return section;
+        }
       }
     }
     return null;
@@ -559,20 +611,56 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
  * error: an empty SERP and a broken selector look the same here and the doctor
  * exists to show the difference next to a live result.
  *
- * The AI labels are literals again on purpose: this function is stringified,
- * so it cannot share them with `extractFromDocument`.
+ * The AI labels and the visible-text walker are duplicated on purpose: this
+ * function is stringified, so it cannot share them with `extractFromDocument`.
+ * Matching on `textContent` reported `aiBlock: 1` for a `<script>` that merely
+ * contained the label while `extract()` honestly returned `ai:no`; the census
+ * must count what extraction would see, i.e. a label in a heading leaf.
  */
 export function canaryCountsFromDocument(doc: Document): CanaryCounts {
   const AI_LABELS = ["Обзор от ИИ", "AI Overview"];
+  const HEADING_SELECTOR = 'h1, h2, h3, h4, [role="heading"]';
   const body = doc.body;
   if (body === null || body === undefined) return { organics: 0, aiBlock: 0, resultsContainer: 0 };
 
+  /** Same prose rules as the extractor: <style>/<script> text is not visible. */
+  function visibleText(node: Node | null): string {
+    const SKIP_TAGS = ["STYLE", "SCRIPT", "NOSCRIPT", "TEMPLATE", "SVG", "LINK", "META"];
+    const parts: string[] = [];
+    function walk(current: Node | null): void {
+      if (current === null) return;
+      if (current.nodeType === 3) {
+        parts.push(current.nodeValue === null ? "" : current.nodeValue);
+        return;
+      }
+      if (current.nodeType !== 1) return;
+      const element = current as Element;
+      if (SKIP_TAGS.indexOf(element.tagName.toUpperCase()) !== -1) {
+        parts.push(" ");
+        return;
+      }
+      const children = current.childNodes;
+      for (let index = 0; index < children.length; index += 1) walk(children[index]);
+    }
+    walk(node);
+    return parts.join("").replace(/\s+/g, " ").trim();
+  }
+
   let aiBlock = 0;
   for (const section of Array.from(doc.querySelectorAll("section"))) {
-    const text = (section.textContent === null ? "" : section.textContent).replace(/\s+/g, " ").trim();
-    if (text === "") continue;
-    for (const label of AI_LABELS) {
-      if (text.indexOf(label) !== -1) {
+    // A result block that mentions the label in a snippet is not an AI answer.
+    if (section.querySelectorAll("a h3").length > 0) continue;
+    for (const heading of Array.from(section.querySelectorAll(HEADING_SELECTOR))) {
+      const text = visibleText(heading);
+      if (text === "") continue;
+      let labelled = false;
+      for (const label of AI_LABELS) {
+        if (text.indexOf(label) === 0) {
+          labelled = true;
+          break;
+        }
+      }
+      if (labelled) {
         aiBlock += 1;
         break;
       }
@@ -584,6 +672,46 @@ export function canaryCountsFromDocument(doc: Document): CanaryCounts {
     aiBlock,
     resultsContainer: doc.querySelectorAll("#rso, #search").length,
   };
+}
+
+// ---------------------------------------------------------------------------
+// In-page wall evidence — self-contained as well
+// ---------------------------------------------------------------------------
+
+export interface WallEvidence {
+  /** `a h3` anchors: a normal SERP has them, a wall page has none. */
+  organics: number;
+  /** Captcha containers that matched, by selector (diagnostics, not prose). */
+  captcha: string[];
+  /** Consent containers that matched, by selector. */
+  consent: string[];
+}
+
+/**
+ * The DOM half of the wall verdict.
+ *
+ * Wall phrases are not safe markers on their own: a snippet may quote "unusual
+ * traffic", "Я не робот" or "Before you continue to Google", and a healthy SERP
+ * would become `E_WALL`. Text therefore needs corroboration — a captcha/consent
+ * node, the absence of organic results, or a wall URL — and this probe supplies
+ * the node part. It returns selectors rather than prose so the verdict stays
+ * diagnosable in artifacts and `web_doctor`.
+ *
+ * Self-contained like the extractor: stringified into `Runtime.evaluate`, so no
+ * imports, no closures, no module constants.
+ */
+export function wallEvidenceFromDocument(doc: Document): WallEvidence {
+  const CAPTCHA_SELECTORS = ["#captcha-form", ".g-recaptcha", "#recaptcha"];
+  const CONSENT_SELECTORS = ['form[action*="consent.google.com"]'];
+  const captcha: string[] = [];
+  const consent: string[] = [];
+  for (const selector of CAPTCHA_SELECTORS) {
+    if (doc.querySelector(selector) !== null) captcha.push(selector);
+  }
+  for (const selector of CONSENT_SELECTORS) {
+    if (doc.querySelector(selector) !== null) consent.push(selector);
+  }
+  return { organics: doc.querySelectorAll("a h3").length, captcha, consent };
 }
 
 // ---------------------------------------------------------------------------
@@ -603,9 +731,9 @@ export interface GoogleSettleOptions {
 }
 
 /**
- * Wait until the SERP is ready: the text marker plus `minCount` of the results
- * containers. The deadline is bounded and an abort propagates as E_CANCELLED;
- * nothing here sleeps for a fixed amount or retries.
+ * Wait until the page is ready to classify: the SERP shell *or* a wall container
+ * (see `READY_SELECTOR`). The deadline is bounded and an abort propagates as
+ * E_CANCELLED; nothing here sleeps for a fixed amount or retries.
  */
 export async function settleGoogleSerp(
   page: CdpPage,
@@ -615,7 +743,7 @@ export async function settleGoogleSerp(
   try {
     await waitForMarker(page, {
       marker: SERP_MARKER,
-      selector: SERP_SELECTOR,
+      selector: READY_SELECTOR,
       minCount: SERP_MIN_COUNT,
       deadlineMs: options.deadlineMs ?? SETTLE_DEADLINE_MS,
       ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
@@ -635,44 +763,96 @@ function parseUrl(raw: string): URL | null {
   }
 }
 
+/** Text markers present in the haystack, reported verbatim (original casing). */
+function textMarkers(haystack: string, markers: readonly string[]): string[] {
+  const found: string[] = [];
+  for (const marker of markers) {
+    if (haystack.indexOf(marker.toLowerCase()) !== -1) found.push(marker);
+  }
+  return found;
+}
+
+/** Which consent host the page is on, as the reported marker (or null). */
+function consentHostMarker(host: string): string | null {
+  for (const marker of [CONSENT_HOST_MARKER, CONSENT_YOUTUBE_HOST_MARKER]) {
+    if (host === marker || host.endsWith(`.${marker}`)) return marker;
+  }
+  return null;
+}
+
 /**
- * Classify a wall from the current URL and visible text.
+ * Classify a wall from the URL, the visible text and the DOM evidence.
+ *
+ * A text phrase alone is never enough: a snippet can quote every wall slogan
+ * without the page being a wall, so a text marker must be corroborated by zero
+ * organic results. URL evidence (`/sorry`, a consent host, `/recaptcha`) and a
+ * captcha/consent DOM node stand on their own — they are what the page *is*,
+ * not what it talks about.
  *
  * Order matters: Google's `/sorry` page also renders a reCAPTCHA widget and the
  * words "not a robot", so a `captcha` verdict would lose the actionable fact
  * (rate-limited) and send the user to the wrong remedy. The returned markers are
  * the exact fragments that fired, for artifacts and `web_doctor`.
+ *
+ * `evidence === null` means the probe could not run: no DOM corroboration, and
+ * "zero organic results" is unknown rather than assumed.
  */
-function detectWallFromPage(url: string, text: string): Wall | null {
+function detectWallFromPage(url: string, text: string, evidence: WallEvidence | null): Wall | null {
   const parsed = parseUrl(url);
   const host = parsed === null ? "" : parsed.hostname.toLowerCase();
   const path = parsed === null ? "" : parsed.pathname.toLowerCase();
   const haystack = text.toLowerCase();
+  const organics = evidence === null ? null : evidence.organics;
+  const emptySerp = organics === 0;
+  const captchaNodes = evidence === null ? [] : evidence.captcha;
+  const consentNodes = evidence === null ? [] : evidence.consent;
 
-  const sorryMarkers: string[] = [];
-  if (path.indexOf(SORRY_URL_MARKER) === 0) sorryMarkers.push(SORRY_URL_MARKER);
-  for (const marker of SORRY_TEXT_MARKERS) {
-    if (haystack.indexOf(marker.toLowerCase()) !== -1) sorryMarkers.push(marker);
+  const sorryUrl = path.indexOf(SORRY_URL_MARKER) === 0;
+  const sorryText = textMarkers(haystack, SORRY_TEXT_MARKERS);
+  if (sorryUrl || (emptySerp && sorryText.length > 0)) {
+    return {
+      kind: "sorry",
+      url,
+      markers: sorryUrl ? [SORRY_URL_MARKER, ...sorryText] : sorryText,
+    };
   }
-  if (sorryMarkers.length > 0) return { kind: "sorry", url, markers: sorryMarkers };
 
-  const consentMarkers: string[] = [];
-  if (host === CONSENT_HOST_MARKER || host.endsWith(`.${CONSENT_HOST_MARKER}`)) {
-    consentMarkers.push(CONSENT_HOST_MARKER);
+  const consentHost = consentHostMarker(host);
+  const consentText = textMarkers(haystack, CONSENT_TEXT_MARKERS);
+  if (consentHost !== null || consentNodes.length > 0 || (emptySerp && consentText.length > 0)) {
+    return {
+      kind: "consent",
+      url,
+      markers: [...(consentHost === null ? [] : [consentHost]), ...consentNodes, ...consentText],
+    };
   }
-  for (const marker of CONSENT_TEXT_MARKERS) {
-    if (haystack.indexOf(marker.toLowerCase()) !== -1) consentMarkers.push(marker);
-  }
-  if (consentMarkers.length > 0) return { kind: "consent", url, markers: consentMarkers };
 
-  const captchaMarkers: string[] = [];
-  if (path.indexOf(CAPTCHA_URL_MARKER) !== -1) captchaMarkers.push(CAPTCHA_URL_MARKER);
-  for (const marker of CAPTCHA_TEXT_MARKERS) {
-    if (haystack.indexOf(marker.toLowerCase()) !== -1) captchaMarkers.push(marker);
+  const captchaUrl = path.indexOf(CAPTCHA_URL_MARKER) !== -1;
+  const captchaText = textMarkers(haystack, CAPTCHA_TEXT_MARKERS);
+  if (captchaUrl || captchaNodes.length > 0 || (emptySerp && captchaText.length > 0)) {
+    return {
+      kind: "captcha",
+      url,
+      markers: [...(captchaUrl ? [CAPTCHA_URL_MARKER] : []), ...captchaNodes, ...captchaText],
+    };
   }
-  if (captchaMarkers.length > 0) return { kind: "captcha", url, markers: captchaMarkers };
 
   return null;
+}
+
+/** The probe payload crosses a CDP boundary, so it is validated as plain JSON. */
+function asWallEvidence(value: unknown): WallEvidence | null {
+  if (!isRecord(value)) return null;
+  const organics = value.organics;
+  if (typeof organics !== "number" || !Number.isFinite(organics)) return null;
+  const selectorList = (input: unknown): string[] | null => {
+    if (!Array.isArray(input)) return null;
+    return input.filter((entry): entry is string => typeof entry === "string");
+  };
+  const captcha = selectorList(value.captcha);
+  const consent = selectorList(value.consent);
+  if (captcha === null || consent === null) return null;
+  return { organics: Math.max(0, Math.floor(organics)), captcha, consent };
 }
 
 async function detectGoogleWall(page: CdpPage): Promise<Wall | null> {
@@ -683,7 +863,14 @@ async function detectGoogleWall(page: CdpPage): Promise<Wall | null> {
   } catch (error) {
     throw asEngineFailure(error, "extract");
   }
-  return detectWallFromPage(url, text);
+  let evidence: WallEvidence | null;
+  try {
+    const raw = await page.evaluate<unknown>(`(${wallEvidenceFromDocument})(document)`);
+    evidence = asWallEvidence(raw);
+  } catch (error) {
+    throw asEngineFailure(error, "extract");
+  }
+  return detectWallFromPage(url, text, evidence);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -802,7 +989,7 @@ const GOOGLE_INTERACTION: EngineInteraction = Object.freeze({
   // direct SERP URL.
   boxSelectors: Object.freeze(['textarea[name="q"]', 'input[name="q"]']),
   marker: SERP_MARKER,
-  selector: SERP_SELECTOR,
+  selector: READY_SELECTOR,
   minCount: SERP_MIN_COUNT,
 });
 
