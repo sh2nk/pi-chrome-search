@@ -339,3 +339,16 @@ test("describeRegistry without a config reports registered-only availability", (
   assert.deepEqual(status.auto, ["yandex"]);
   assert.equal(status.ready, 1);
 });
+
+test("the shipped registry wires all three adapters in canonical order", () => {
+  // P3 adds one line per adapter to DEFAULT_ENGINES. The CLI doctor and the
+  // extension both read this map, so a missing line silently turns a working
+  // engine into "unavailable" — exactly what happened to the doctor CLI before
+  // it stopped building an empty registry.
+  const registry = createDefaultRegistry(DEFAULT_CONFIG);
+  assert.deepEqual(registry.enabled(), ["google", "duckduckgo", "yandex"]);
+  for (const id of ENGINE_IDS) {
+    assert.equal(registry.has(id), true, `${id} must be registered`);
+    assert.equal(registry.get(id).id, id);
+  }
+});

@@ -34,7 +34,7 @@ import { defaultLockPath } from "../cdp/browser.ts";
 import { discoverEndpoint } from "../cdp/discovery.ts";
 import { loadConfig, resolveConfigPath } from "../config.ts";
 import type { Config } from "../config.ts";
-import { createEngineRegistry } from "../engines/index.ts";
+import { createDefaultRegistry, createEngineRegistry } from "../engines/index.ts";
 import type { EngineRegistry } from "../engines/types.ts";
 import { systemClock } from "../runtime/clock.ts";
 import {
@@ -326,7 +326,9 @@ export async function runDoctorCli(
     return DOCTOR_BLOCKED_EXIT_CODE;
   }
 
-  const registry = deps.registry ?? createEngineRegistry({}, config);
+  // The CLI must report the same registry the extension uses: an empty map made
+  // every engine look unregistered even after P3 shipped the adapters.
+  const registry = deps.registry ?? createDefaultRegistry(config);
 
   if (args.fix) {
     const actions = await applyFix(connector, config, deps.artifacts);

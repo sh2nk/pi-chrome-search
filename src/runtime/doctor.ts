@@ -498,7 +498,7 @@ async function engineEntry(
       id,
       enabled: true,
       verdict: "unavailable",
-      note: "no adapter registered (E_UNSUPPORTED); adapters land in P3",
+      note: "no adapter registered (E_UNSUPPORTED)",
     };
   }
 
