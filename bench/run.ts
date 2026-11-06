@@ -10,14 +10,20 @@
  * of retrying it: the whole point of this project is to keep the profile out of
  * captcha jail.
  *
- * The reflex layer does not exist yet in P5-A, so `abstainRate` is an honest
- * placeholder and `reads` is 0 unless a result file from a later phase carries
- * it. `--compare` reads two result files and applies the SPEC §9.4 ship rule
- * without knowing which code produced them.
+ * `--reflex rules` closes the gap that made V5.6 unmeasurable offline: the
+ * rules triage (`src/reflex/rules.ts`) runs on the fixture candidates before
+ * compaction, exactly where the tool-level reflex sits, so the token delta is
+ * measured by the same code path that would ship. Rules never abstain, so
+ * `abstainRate` stays 0 in both modes and the report says why. `reads` is 0
+ * unless a result file from a later phase carries it. `--compare` reads two
+ * result files and applies the SPEC §9.4 ship rule without knowing which code
+ * produced them.
  *
  * Usage:
  *   node bench/run.ts                      # offline replay, writes results/<ts>-offline.json
  *   node bench/run.ts --no-write           # offline replay, print only
+ *   node bench/run.ts --reflex rules       # same corpus through rules triage (keep 6)
+ *   node bench/run.ts --reflex rules --reflex-keep 4
  *   node bench/run.ts --self-test          # fixture + metric + verdict self-checks
  *   PI_CHROME_LIVE=1 node bench/run.ts --live --limit 1
  *   node bench/run.ts --compare a.json b.json
@@ -32,6 +38,8 @@ import { fileURLToPath } from "node:url";
 import type { EngineId, EngineSelection, RawSerp } from "../src/engines/types.ts";
 import { compactSerps } from "../src/extract/compact.ts";
 import { domainOf } from "../src/extract/urls.ts";
+import { createRules, DEFAULT_TRIAGE_KEEP } from "../src/reflex/rules.ts";
+import type { Candidate } from "../src/reflex/types.ts";
 import { isWebSearchError } from "../src/runtime/error-codes.ts";
 import { fail } from "../src/runtime/errors.ts";
 
@@ -69,6 +77,22 @@ type BenchClass = (typeof CLASSES)[number];
 const LANGS = ["en", "ru"] as const;
 type BenchLang = (typeof LANGS)[number];
 const ENGINES: readonly EngineId[] = ["google", "duckduckgo", "yandex"];
+const REFLEX_MODES = ["off", "rules"] as const;
+type ReflexMode = (typeof REFLEX_MODES)[number];
+/**
+ * What a result file records: the two offline modes, plus `"config"` for a live
+ * run, whose reflex state is whatever the extension config said. The bench
+ * cannot claim more than that about a live run.
+ */
+type RecordedReflexMode = ReflexMode | "config";
+
+interface ReflexRun {
+  mode: RecordedReflexMode;
+  /** Triage top-k; only present when `mode === "rules"`. */
+  keep?: number;
+  /** Results kept / dropped by triage over the whole run; rules only. */
+  triaged?: { kept: number; dropped: number };
+}
 
 interface QueryRow {
   id: string;
@@ -125,6 +149,8 @@ interface QueryRun {
   cached: boolean;
   topDomains: string[];
   spam: "caught" | "leaked" | "absent";
+  /** Set only when rules triage ran: how many fixture results survived. */
+  triage?: { kept: number; dropped: number };
   reads?: number;
   error?: { code: string; stage: string; hint?: string };
 }
@@ -156,6 +182,8 @@ interface BenchReport {
   n: number;
   limit: number | null;
   engineOverride: EngineId | null;
+  /** Reflex configuration this run measured. Additive; absent means "off". */
+  reflex?: ReflexRun;
   queries: QueryRun[];
   metrics: Metrics;
   stopped: { at: string; code: string; stage: string } | null;
@@ -172,8 +200,20 @@ interface Verdict {
 
 interface Comparison {
   schema: typeof COMPARE_SCHEMA;
-  baseline: { file: string; mode: string; metrics: Metrics };
-  reflex: { file: string; mode: string; metrics: Metrics };
+  baseline: {
+    file: string;
+    mode: string;
+    reflexMode: RecordedReflexMode;
+    keep?: number;
+    metrics: Metrics;
+  };
+  reflex: {
+    file: string;
+    mode: string;
+    reflexMode: RecordedReflexMode;
+    keep?: number;
+    metrics: Metrics;
+  };
   verdict: Verdict;
 }
 
@@ -188,6 +228,8 @@ interface CliOptions {
   allowMore: boolean;
   classFilter: BenchClass | null;
   engine: EngineId | null;
+  reflex: ReflexMode;
+  reflexKeep: number | null;
   compare: [string, string] | null;
 }
 
@@ -200,6 +242,7 @@ function usage(): string {
     "usage:",
     "  node bench/run.ts [--queries <file>] [--serp-source <dir>] [--n 5]",
     "                    [--class factual|technical|commercial|news|ambiguous]",
+    "                    [--reflex off|rules] [--reflex-keep <1..10>]",
     "                    [--out <file>] [--no-write]",
     "  node bench/run.ts --self-test [--serp-source <dir>] [--queries <file>]",
     "  PI_CHROME_LIVE=1 node bench/run.ts --live --limit <1..30> [--allow-more]",
@@ -207,6 +250,8 @@ function usage(): string {
     "  node bench/run.ts --compare <baseline.json> <reflex.json>",
     "",
     "offline replay is the default and never touches the network or Chrome.",
+    "--reflex rules applies the deterministic rules triage before compaction,",
+    "so the token delta for SPEC 9.4 is measured offline, not by a live run.",
   ].join("\n");
 }
 
@@ -222,6 +267,8 @@ function parseArgs(argv: readonly string[]): CliOptions {
     allowMore: false,
     classFilter: null,
     engine: null,
+    reflex: "off",
+    reflexKeep: null,
     compare: null,
   };
 
@@ -314,6 +361,29 @@ function parseArgs(argv: readonly string[]): CliOptions {
         index += 1;
         break;
       }
+      case "--reflex": {
+        const raw = valueAfter(arg, index);
+        if (!isReflexMode(raw)) {
+          throw fail("E_CONFIG", "config", {
+            hint: `--reflex must be one of ${REFLEX_MODES.join(", ")}`,
+          });
+        }
+        options.reflex = raw;
+        index += 1;
+        break;
+      }
+      case "--reflex-keep": {
+        const raw = valueAfter(arg, index);
+        const parsed = Number(raw);
+        if (!Number.isInteger(parsed) || parsed < 1 || parsed > MAX_N) {
+          throw fail("E_CONFIG", "config", {
+            hint: `--reflex-keep must be an integer between 1 and ${MAX_N}`,
+          });
+        }
+        options.reflexKeep = parsed;
+        index += 1;
+        break;
+      }
       case "--compare": {
         const left = valueAfter(arg, index);
         const right = argv[index + 2];
@@ -352,12 +422,29 @@ function parseArgs(argv: readonly string[]): CliOptions {
   if (options.mode === "compare" && options.out !== null) {
     throw fail("E_CONFIG", "config", { hint: "--compare prints to stdout; --out is not used" });
   }
+  if (options.reflexKeep !== null && options.reflex !== "rules") {
+    throw fail("E_CONFIG", "config", { hint: "--reflex-keep needs --reflex rules" });
+  }
+  if (options.mode === "live" && (options.reflex !== "off" || options.reflexKeep !== null)) {
+    throw fail("E_CONFIG", "config", {
+      hint: "live mode measures the extension's real config; --reflex/--reflex-keep are offline-only",
+    });
+  }
+  if (options.mode === "compare" && (options.reflex !== "off" || options.reflexKeep !== null)) {
+    throw fail("E_CONFIG", "config", {
+      hint: "the reflex mode is recorded in each result file; --compare reads it, it does not take --reflex",
+    });
+  }
 
   return options;
 }
 
 function isClass(value: string): value is BenchClass {
   return (CLASSES as readonly string[]).includes(value);
+}
+
+function isReflexMode(value: string): value is ReflexMode {
+  return (REFLEX_MODES as readonly string[]).includes(value);
 }
 
 function isEngineId(value: string): value is EngineId {
@@ -699,11 +786,15 @@ function pickFixture(query: QueryRow, fixtures: readonly LoadedFixture[]): Loade
   return best;
 }
 
-function toRawSerp(query: QueryRow, fixture: LoadedFixture): RawSerp {
+function toRawSerp(
+  query: QueryRow,
+  fixture: LoadedFixture,
+  results: readonly FixtureResult[] = fixture.results,
+): RawSerp {
   const raw: RawSerp = {
     engine: fixture.engine,
     query: query.q,
-    results: fixture.results.map((result) => ({
+    results: results.map((result) => ({
       title: result.title,
       url: result.url,
       snippet: result.snippet,
@@ -717,9 +808,65 @@ function toRawSerp(query: QueryRow, fixture: LoadedFixture): RawSerp {
   return raw;
 }
 
-function replayQuery(query: QueryRow, fixture: LoadedFixture, n: number): QueryRun {
+interface ReflexOptions {
+  mode: ReflexMode;
+  keep: number;
+}
+
+/**
+ * Rules triage in the same place the tool runs it: on the candidate list, before
+ * compaction. Returns the fixture's results in the triage order with the dropped
+ * tail removed. A non-empty SERP always keeps at least one result (rules.ts
+ * guarantees it), but an empty or out-of-range verdict falls back to the full
+ * list instead of silently emptying the answer.
+ */
+async function triageFixtureResults(
+  query: QueryRow,
+  fixture: LoadedFixture,
+  keep: number,
+): Promise<{ results: readonly FixtureResult[]; triage?: { kept: number; dropped: number } }> {
+  const candidates: Candidate[] = fixture.results.map((result) => ({
+    title: result.title,
+    url: result.url,
+    snippet: result.snippet,
+    engine: fixture.engine,
+  }));
+  const verdict = await createRules({ keep }).triage(query.q, candidates);
+
+  const order: number[] = [];
+  for (const index of verdict.keep) {
+    if (!Number.isInteger(index) || index < 0 || index >= candidates.length) continue;
+    if (order.includes(index)) continue;
+    order.push(index);
+  }
+  if (order.length === 0) {
+    // Keep the full list, but do not invent a triage record: the self-test treats
+    // a rules run without one as a failure, so a broken verdict cannot pass quietly.
+    return { results: fixture.results };
+  }
+  const results = order.map((index) => fixture.results[index] as FixtureResult);
+  return {
+    results,
+    triage: { kept: results.length, dropped: fixture.results.length - results.length },
+  };
+}
+
+async function replayQuery(
+  query: QueryRow,
+  fixture: LoadedFixture,
+  n: number,
+  reflex: ReflexOptions,
+): Promise<QueryRun> {
   const started = performance.now();
-  const compact = compactSerps([toRawSerp(query, fixture)], {
+  let results: readonly FixtureResult[] = fixture.results;
+  let triage: { kept: number; dropped: number } | undefined;
+  if (reflex.mode === "rules") {
+    const triaged = await triageFixtureResults(query, fixture, reflex.keep);
+    results = triaged.results;
+    triage = triaged.triage;
+  }
+
+  const compact = compactSerps([toRawSerp(query, fixture, results)], {
     n,
     summaryMaxChars: COMPACT_DEFAULTS.summaryMaxChars,
     snippetMaxChars: COMPACT_DEFAULTS.snippetMaxChars,
@@ -734,6 +881,9 @@ function replayQuery(query: QueryRow, fixture: LoadedFixture, n: number): QueryR
   const goldensHit = query.goldenDomains.filter((golden) =>
     topDomains.some((domain) => domainMatches(domain, golden)),
   ).length;
+  // Spam presence is a property of the recorded SERP; leakage is a property of
+  // what survived compaction. Triage that removes the spam item therefore counts
+  // as "caught", which is exactly the effect the metric should show.
   const fixtureHasSpam = fixture.results.some((result) => domainOf(result.url) === SPAM_DOMAIN);
   const spamLeaked =
     topDomains.includes(SPAM_DOMAIN) || compact.items.some((item) => item.title.includes(SPAM_MARKER));
@@ -757,6 +907,7 @@ function replayQuery(query: QueryRow, fixture: LoadedFixture, n: number): QueryR
     cached: false,
     topDomains,
     spam: fixtureHasSpam ? (spamLeaked ? "leaked" : "caught") : "absent",
+    ...(triage === undefined ? {} : { triage }),
   };
 }
 
@@ -857,8 +1008,8 @@ function displayPath(path: string): string {
   return relativePath.length > 0 && !relativePath.startsWith("..") ? relative(BENCH_DIR, path) : path;
 }
 
-function defaultResultPath(mode: "offline" | "live"): string {
-  return join(RESULTS_DIR, `${stamp(new Date())}-${mode}.json`);
+function defaultResultPath(mode: "offline" | "live", suffix = ""): string {
+  return join(RESULTS_DIR, `${stamp(new Date())}-${mode}${suffix}.json`);
 }
 
 function writeReport(report: BenchReport, path: string): void {
@@ -882,7 +1033,7 @@ function filterQueries(queries: readonly QueryRow[], klass: BenchClass | null): 
 // Offline mode
 // ---------------------------------------------------------------------------
 
-function runOffline(options: CliOptions): number {
+async function runOffline(options: CliOptions): Promise<number> {
   const queries = filterQueries(loadQueries(options.queriesPath), options.classFilter);
   if (queries.length === 0) {
     throw fail("E_CONFIG", "config", {
@@ -891,14 +1042,47 @@ function runOffline(options: CliOptions): number {
   }
   const fixtures = loadFixtures(options.serpSource);
 
+  const reflex: ReflexOptions = {
+    mode: options.reflex,
+    keep: options.reflexKeep ?? DEFAULT_TRIAGE_KEEP,
+  };
+
   const runs: QueryRun[] = [];
   const started = performance.now();
+  // Sequential on purpose: triage is async, and a parallel batch would make
+  // latencyMs measure the scheduler instead of the work.
   for (const query of queries) {
     const fixture = pickFixture(query, fixtures);
-    runs.push(replayQuery(query, fixture, options.n));
+    runs.push(await replayQuery(query, fixture, options.n, reflex));
   }
   const elapsedMs = performance.now() - started;
   const metrics = summarise(runs);
+
+  const reflexRun: ReflexRun =
+    reflex.mode === "rules"
+      ? {
+          mode: "rules",
+          keep: reflex.keep,
+          triaged: {
+            kept: runs.reduce((sum, run) => sum + (run.triage?.kept ?? 0), 0),
+            dropped: runs.reduce((sum, run) => sum + (run.triage?.dropped ?? 0), 0),
+          },
+        }
+      : { mode: "off" };
+
+  const notes = [
+    "offline replay: recorded SERPs through src/extract/compact.ts with SPEC defaults",
+    reflex.mode === "rules"
+      ? `reflex: rules triage ran on the fixture candidates before compaction (keep ${reflex.keep}); the token delta is measured, not simulated`
+      : "reflex: off (no triage); pass --reflex rules for the V5.6 triage measurement",
+    "abstainRate is 0: rules never abstains by design, and no classifier runs offline",
+    "reads is 0 offline; the read-gate half of V5.6 needs a live/reflex result file",
+  ];
+  if (reflex.mode === "rules") {
+    notes.push(
+      `triage kept ${reflexRun.triaged?.kept ?? 0} of ${fixtureResultTotal(runs)} fixture results; ${reflexRun.triaged?.dropped ?? 0} dropped before output`,
+    );
+  }
 
   const report: BenchReport = {
     schema: SCHEMA,
@@ -910,18 +1094,15 @@ function runOffline(options: CliOptions): number {
     n: options.n,
     limit: null,
     engineOverride: null,
+    reflex: reflexRun,
     queries: runs,
     metrics,
     stopped: null,
-    notes: [
-      "offline replay: recorded SERPs through src/extract/compact.ts with SPEC defaults",
-      "abstainRate is a placeholder (0) until the reflex layer lands in P5-B/C",
-      "reads is 0 offline; reflex gate numbers must come from a live/reflex result file",
-    ],
+    notes,
   };
 
   if (options.write) {
-    const out = options.out ?? defaultResultPath("offline");
+    const out = options.out ?? defaultResultPath("offline", reflex.mode === "rules" ? "-rules" : "");
     writeReport(report, out);
     process.stdout.write(`written: ${displayPath(out)}\n`);
   }
@@ -930,9 +1111,14 @@ function runOffline(options: CliOptions): number {
     metrics.spam.checked === 0
       ? "spam n/a"
       : `spam leaked ${metrics.spam.leaked}/${metrics.spam.checked}`;
+  const reflexLine =
+    reflex.mode === "rules"
+      ? `reflex rules (keep ${reflex.keep}): kept ${reflexRun.triaged?.kept ?? 0}/${fixtureResultTotal(runs)} results, dropped ${reflexRun.triaged?.dropped ?? 0}`
+      : "reflex off";
   process.stdout.write(
     [
       `bench offline: ${metrics.queries} queries (${metrics.ok} ok) in ${Math.round(elapsedMs)} ms`,
+      reflexLine,
       `recall@5 ${metrics.recallAt5.toFixed(3)} (${metrics.goldensHit}/${metrics.goldensTotal} goldens in top 5)`,
       `tokens ${metrics.tokens} (chars ${metrics.chars}, avg ${metrics.avgTokens}/query)`,
       `latency p50 ${metrics.latencyP50Ms} ms / p95 ${metrics.latencyP95Ms} ms`,
@@ -940,6 +1126,11 @@ function runOffline(options: CliOptions): number {
     ].join("\n") + "\n",
   );
   return 0;
+}
+
+/** Fixture results the replay saw, i.e. kept + dropped before compaction. */
+function fixtureResultTotal(runs: readonly QueryRun[]): number {
+  return runs.reduce((sum, run) => sum + (run.triage?.kept ?? 0) + (run.triage?.dropped ?? 0), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,12 +1407,16 @@ async function runLive(options: CliOptions): Promise<number> {
     n: options.n,
     limit,
     engineOverride: options.engine,
+    // A live run's reflex state is whatever the user's config says; the bench
+    // did not choose it, so it must not pretend otherwise.
+    reflex: { mode: "config" },
     queries: runs,
     metrics,
     stopped,
     notes: [
       "live run: real web_search through the extension stack, one query at a time",
       "no wall retry; a stop code ends the run and the window is left for the user",
+      "reflex mode is the extension config, not a bench flag; recorded as \"config\"",
       "spam is not injected live, so the spam metric is null here",
       "cache hits are reported per query; a cached run is fast but not a fresh SERP",
     ],
@@ -1272,20 +1467,55 @@ function loadReport(path: string): BenchReport {
       });
     }
   }
+  if (parsed.reflex !== undefined) {
+    if (!isRecord(parsed.reflex)) {
+      throw fail("E_CONFIG", "config", { hint: `${displayPath(path)}: reflex must be an object` });
+    }
+    const mode = textOf(parsed.reflex.mode);
+    if (mode === undefined || !isRecordedReflexMode(mode)) {
+      throw fail("E_CONFIG", "config", {
+        hint: `${displayPath(path)}: reflex.mode must be off, rules or config`,
+      });
+    }
+    const keep = parsed.reflex.keep;
+    if (keep !== undefined && (typeof keep !== "number" || !Number.isInteger(keep) || keep < 1)) {
+      throw fail("E_CONFIG", "config", {
+        hint: `${displayPath(path)}: reflex.keep must be a positive integer`,
+      });
+    }
+  }
   return parsed as unknown as BenchReport;
 }
 
-function runCompare(options: CliOptions): number {
-  const pair = options.compare;
-  if (pair === null) {
-    throw fail("E_CONFIG", "config", { hint: "--compare needs two result files" });
-  }
-  const baseline = loadReport(pair[0]);
-  const reflex = loadReport(pair[1]);
-  const verdict = compareMetrics(baseline.metrics, reflex.metrics);
+function isRecordedReflexMode(value: string): value is RecordedReflexMode {
+  return value === "config" || (REFLEX_MODES as readonly string[]).includes(value);
+}
 
-  // A verdict is only meaningful like-for-like: same mode, same render, same
-  // query set. Crossing any of those silently would make a number look like a win.
+function reflexModeOf(report: BenchReport): RecordedReflexMode {
+  return report.reflex?.mode ?? "off";
+}
+
+function reflexLabel(report: BenchReport): string {
+  const mode = reflexModeOf(report);
+  const keep = report.reflex?.keep;
+  return mode === "rules" && keep !== undefined ? `${mode} (keep ${keep})` : mode;
+}
+
+/**
+ * The whole guard set behind `--compare`, kept separate from file I/O so the
+ * self-test can run it on in-memory reports.
+ *
+ * A reflex-mode difference (off vs rules) is *the measurement*, not a reason to
+ * refuse: it is named in the verdict reasons and the metric deltas decide. What
+ * still refuses is a difference that makes the delta meaningless — render,
+ * offline vs live, or a different query set.
+ */
+function compareReports(baseline: BenchReport, reflex: BenchReport): Verdict {
+  const verdict = compareMetrics(baseline.metrics, reflex.metrics);
+  const baselineMode = reflexModeOf(baseline);
+  const reflexMode = reflexModeOf(reflex);
+  verdict.reasons.unshift(`reflex ${reflexLabel(baseline)} -> ${reflexLabel(reflex)}`);
+
   const baselineIds = baseline.queries.map((run) => run.id).join(",");
   const reflexIds = reflex.queries.map((run) => run.id).join(",");
   if (baseline.mode !== reflex.mode) {
@@ -1302,16 +1532,45 @@ function runCompare(options: CliOptions): number {
       `query sets differ (baseline ${baseline.queries.length}, reflex ${reflex.queries.length}); a partial run cannot ship`,
     );
   }
+  // Reversed direction: the "baseline" already has triage. Not a like-for-like
+  // measurement of turning the reflex on, so the numbers cannot ship.
+  if (baselineMode === "rules" && reflexMode === "off") {
+    verdict.ship = false;
+    verdict.reasons.push("reversed comparison: baseline already runs rules; put off first, rules second");
+  }
+  return verdict;
+}
+
+function runCompare(options: CliOptions): number {
+  const pair = options.compare;
+  if (pair === null) {
+    throw fail("E_CONFIG", "config", { hint: "--compare needs two result files" });
+  }
+  const baseline = loadReport(pair[0]);
+  const reflex = loadReport(pair[1]);
+  const verdict = compareReports(baseline, reflex);
 
   const comparison: Comparison = {
     schema: COMPARE_SCHEMA,
-    baseline: { file: pair[0], mode: baseline.mode, metrics: baseline.metrics },
-    reflex: { file: pair[1], mode: reflex.mode, metrics: reflex.metrics },
+    baseline: {
+      file: pair[0],
+      mode: baseline.mode,
+      reflexMode: reflexModeOf(baseline),
+      ...(baseline.reflex?.keep === undefined ? {} : { keep: baseline.reflex.keep }),
+      metrics: baseline.metrics,
+    },
+    reflex: {
+      file: pair[1],
+      mode: reflex.mode,
+      reflexMode: reflexModeOf(reflex),
+      ...(reflex.reflex?.keep === undefined ? {} : { keep: reflex.reflex.keep }),
+      metrics: reflex.metrics,
+    },
     verdict,
   };
   process.stdout.write(`${JSON.stringify(comparison, null, 2)}\n`);
   process.stdout.write(
-    `verdict: ${verdict.ship ? "SHIP" : "KEEP OFF"} (recall ${verdict.recallDelta} pts, tokens ${verdict.tokenDeltaPct ?? "n/a"}%, reads ${verdict.readsDeltaPct ?? "n/a"}%)\n`,
+    `verdict: ${verdict.ship ? "SHIP" : "KEEP OFF"} (reflex ${reflexLabel(baseline)} -> ${reflexLabel(reflex)}, recall ${verdict.recallDelta} pts, tokens ${verdict.tokenDeltaPct ?? "n/a"}%, reads ${verdict.readsDeltaPct ?? "n/a"}%)\n`,
   );
   return 0;
 }
@@ -1334,11 +1593,49 @@ const PERSONAL_MARKERS = [
   /rostelecom/i,
 ];
 
-function runSelfTest(options: CliOptions): number {
+/** In-memory report for the self-test; the real runner builds the same shape. */
+function makeOfflineReport(
+  runs: readonly QueryRun[],
+  options: CliOptions,
+  reflex: ReflexRun,
+  metrics: Metrics = summarise(runs),
+): BenchReport {
+  return {
+    schema: SCHEMA,
+    mode: "offline",
+    render: "md",
+    generatedAt: new Date(0).toISOString(),
+    queriesFile: displayPath(options.queriesPath),
+    serpSource: displayPath(options.serpSource),
+    n: options.n,
+    limit: null,
+    engineOverride: null,
+    reflex,
+    queries: [...runs],
+    metrics,
+    stopped: null,
+    notes: [],
+  };
+}
+
+async function replayAll(
+  queries: readonly QueryRow[],
+  fixtures: readonly LoadedFixture[],
+  n: number,
+  reflex: ReflexOptions,
+): Promise<QueryRun[]> {
+  const runs: QueryRun[] = [];
+  for (const query of queries) {
+    runs.push(await replayQuery(query, pickFixture(query, fixtures), n, reflex));
+  }
+  return runs;
+}
+
+async function runSelfTest(options: CliOptions): Promise<number> {
   const results: CheckResult[] = [];
-  const check = (name: string, fn: () => string): void => {
+  const check = async (name: string, fn: () => string | Promise<string>): Promise<void> => {
     try {
-      results.push({ name, ok: true, detail: fn() });
+      results.push({ name, ok: true, detail: await fn() });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       results.push({ name, ok: false, detail: message });
@@ -1353,7 +1650,7 @@ function runSelfTest(options: CliOptions): number {
   let queries: QueryRow[] = [];
   let fixtures: LoadedFixture[] = [];
 
-  check("queries: structure and no personal data", () => {
+  await check("queries: structure and no personal data", () => {
     queries = loadQueries(options.queriesPath);
     assert(queries.length >= 28 && queries.length <= 32, `expected ~30 queries, found ${queries.length}`);
     const ids = new Set<string>();
@@ -1368,7 +1665,7 @@ function runSelfTest(options: CliOptions): number {
     return `${queries.length} queries, unique ids`;
   });
 
-  check("queries: class and language mix", () => {
+  await check("queries: class and language mix", () => {
     for (const klass of CLASSES) {
       const count = queries.filter((query) => query.class === klass).length;
       assert(count >= 5, `${klass}: only ${count} queries`);
@@ -1382,7 +1679,7 @@ function runSelfTest(options: CliOptions): number {
     ).join(" ");
   });
 
-  check("fixtures: load and spam sentinel", () => {
+  await check("fixtures: load and spam sentinel", () => {
     fixtures = loadFixtures(options.serpSource);
     for (const klass of CLASSES) {
       const count = fixtures.filter((fixture) => fixture.class === klass).length;
@@ -1399,7 +1696,7 @@ function runSelfTest(options: CliOptions): number {
     return `${fixtures.length} SERPs, ${fixtures.reduce((sum, fixture) => sum + fixture.results.length, 0)} results`;
   });
 
-  check("fixtures: every query has a plausible SERP", () => {
+  await check("fixtures: every query has a plausible SERP", () => {
     for (const query of queries) {
       const fixture = pickFixture(query, fixtures);
       const fixtureDomains = fixture.results.map((result) => domainOf(result.url));
@@ -1413,9 +1710,13 @@ function runSelfTest(options: CliOptions): number {
 
   let runs: QueryRun[] = [];
   let elapsedMs = 0;
-  check("replay: deterministic and capped", () => {
-    const first = queries.map((query) => replayQuery(query, pickFixture(query, fixtures), options.n));
-    const second = queries.map((query) => replayQuery(query, pickFixture(query, fixtures), options.n));
+  await check("replay: deterministic and capped", async () => {
+    const off: ReflexOptions = { mode: "off", keep: DEFAULT_TRIAGE_KEEP };
+    const rules: ReflexOptions = { mode: "rules", keep: DEFAULT_TRIAGE_KEEP };
+    const first = await replayAll(queries, fixtures, options.n, off);
+    const second = await replayAll(queries, fixtures, options.n, off);
+    const rulesFirst = await replayAll(queries, fixtures, options.n, rules);
+    const rulesSecond = await replayAll(queries, fixtures, options.n, rules);
     const key = (run: QueryRun): string =>
       JSON.stringify({
         id: run.id,
@@ -1429,36 +1730,132 @@ function runSelfTest(options: CliOptions): number {
       first.map(key).join("\n") === second.map(key).join("\n"),
       "two replays of the same corpus disagree",
     );
-    for (const run of first) {
+    assert(
+      rulesFirst.map(key).join("\n") === rulesSecond.map(key).join("\n"),
+      "two rules-triage replays of the same corpus disagree",
+    );
+    for (const run of [...first, ...rulesFirst]) {
       assert(run.chars <= COMPACT_DEFAULTS.outputMaxChars, `${run.id}: ${run.chars} chars over cap`);
       assert(run.results <= options.n, `${run.id}: ${run.results} results over n=${options.n}`);
       assert(run.tokens === Math.ceil(run.chars / 4), `${run.id}: token estimate drift`);
       assert(run.recallAt5 >= 0 && run.recallAt5 <= 1, `${run.id}: recall out of range`);
     }
     runs = first;
-    return `${queries.length} replays identical, all <= ${COMPACT_DEFAULTS.outputMaxChars} chars`;
+    return `${queries.length} replays identical in both modes, all <= ${COMPACT_DEFAULTS.outputMaxChars} chars`;
   });
 
-  check("replay: under 2 s wall clock", () => {
+  await check("replay: under 2 s wall clock", async () => {
     const started = performance.now();
-    for (const query of queries) replayQuery(query, pickFixture(query, fixtures), options.n);
+    await replayAll(queries, fixtures, options.n, { mode: "off", keep: DEFAULT_TRIAGE_KEEP });
     elapsedMs = performance.now() - started;
     assert(elapsedMs < 2_000, `offline replay took ${Math.round(elapsedMs)} ms`);
     return `${Math.round(elapsedMs)} ms for ${queries.length} queries`;
   });
 
-  check("metrics: spam and abstain placeholders are honest", () => {
+  /**
+   * The point of `--reflex rules`: with a keep below `n`, the triaged run must
+   * return no more than `keep` results and no more tokens than the same fixtures
+   * without triage. A probe of 3 is used because `n=5` would hide the cut.
+   */
+  const probeKeep = Math.min(3, options.n);
+  await check("reflex: rules triage caps results and tokens", async () => {
+    const baselineRuns = await replayAll(queries, fixtures, options.n, {
+      mode: "off",
+      keep: DEFAULT_TRIAGE_KEEP,
+    });
+    const reflexRuns = await replayAll(queries, fixtures, options.n, {
+      mode: "rules",
+      keep: probeKeep,
+    });
+    for (const run of reflexRuns) {
+      assert(run.triage !== undefined, `${run.id}: rules run recorded no triage`);
+      assert(run.triage.kept <= probeKeep, `${run.id}: kept ${run.triage.kept} results over keep=${probeKeep}`);
+      assert(run.results <= probeKeep, `${run.id}: ${run.results} results over keep=${probeKeep}`);
+      assert(run.tokens === Math.ceil(run.chars / 4), `${run.id}: token estimate drift`);
+    }
+    const baselineMetrics = summarise(baselineRuns);
+    const reflexMetrics = summarise(reflexRuns);
+    assert(
+      reflexRuns.some((run) => (run.triage?.dropped ?? 0) > 0),
+      "triage never dropped a result, so the fixture corpus cannot show a token cut",
+    );
+    assert(
+      reflexMetrics.tokens <= baselineMetrics.tokens,
+      `rules tokens ${reflexMetrics.tokens} exceed baseline ${baselineMetrics.tokens}`,
+    );
+    return `keep ${probeKeep}: results <= ${probeKeep}, tokens ${reflexMetrics.tokens} <= ${baselineMetrics.tokens}, abstain ${reflexMetrics.abstainRate}`;
+  });
+
+  await check("compare: reflex mode is named and does not block a real cut", async () => {
+    const baselineRuns = await replayAll(queries, fixtures, options.n, {
+      mode: "off",
+      keep: DEFAULT_TRIAGE_KEEP,
+    });
+    const reflexRuns = await replayAll(queries, fixtures, options.n, {
+      mode: "rules",
+      keep: probeKeep,
+    });
+    const baselineReport = makeOfflineReport(baselineRuns, options, { mode: "off" });
+    const reflexReport = makeOfflineReport(reflexRuns, options, {
+      mode: "rules",
+      keep: probeKeep,
+      triaged: {
+        kept: reflexRuns.reduce((sum, run) => sum + (run.triage?.kept ?? 0), 0),
+        dropped: reflexRuns.reduce((sum, run) => sum + (run.triage?.dropped ?? 0), 0),
+      },
+    });
+
+    const measured = compareReports(baselineReport, reflexReport);
+    const modeReason = `reflex off -> rules (keep ${probeKeep})`;
+    assert(measured.reasons[0] === modeReason, `verdict does not name the mode: ${measured.reasons[0]}`);
+
+    // A reflex-mode difference on its own is not a veto: a genuine 25% token cut
+    // with unchanged recall must still ship.
+    const baselineMetrics = summarise(baselineRuns);
+    const cutMetrics: Metrics = {
+      ...baselineMetrics,
+      tokens: Math.round(baselineMetrics.tokens * 0.75),
+    };
+    const cutVerdict = compareReports(baselineReport, {
+      ...baselineReport,
+      metrics: cutMetrics,
+      reflex: { mode: "rules", keep: probeKeep },
+    });
+    assert(cutVerdict.ship === true, "mode difference alone blocked a real token cut");
+    assert(cutVerdict.reasons[0] === modeReason, "token-cut verdict lost the mode reason");
+
+    // Cross-render/mode still refuses even when the numbers look like a win.
+    const crossMode = compareReports(baselineReport, {
+      ...baselineReport,
+      mode: "live",
+      render: "json",
+      metrics: cutMetrics,
+      reflex: { mode: "config" },
+    });
+    assert(crossMode.ship === false, "offline vs live comparison must refuse");
+
+    // Reversed direction refuses even when the numbers look like a win.
+    const reversed = compareReports(
+      { ...reflexReport, metrics: baselineMetrics },
+      { ...baselineReport, metrics: cutMetrics },
+    );
+    assert(reversed.ship === false, "reversed reflex comparison must refuse");
+
+    return `${modeReason}; cut ships, cross-mode and reversed refuse`;
+  });
+
+  await check("metrics: spam and abstain are honest", () => {
     const metrics = summarise(runs);
     assert(metrics.queries === queries.length, "query count drift");
     assert(metrics.spam.checked === queries.length, "every replay should carry one synthetic spam sentinel");
     assert(metrics.spam.leaked >= 1, "fixtures never leak spam, so the metric cannot be trusted");
     assert(metrics.spam.caught + metrics.spam.leaked === metrics.spam.checked, "spam totals do not add up");
-    assert(metrics.abstainRate === 0, "abstain must stay a placeholder until P5-B/C");
+    assert(metrics.abstainRate === 0, "rules never abstains and no classifier runs offline");
     assert(metrics.reads === 0, "offline runs must not invent reads");
-    return `spam leaked ${metrics.spam.leaked}/${metrics.spam.checked}, abstain 0 (placeholder)`;
+    return `spam leaked ${metrics.spam.leaked}/${metrics.spam.checked}, abstain 0 (rules never abstains)`;
   });
 
-  check("verdict: SPEC 9.4 ship rule", () => {
+  await check("verdict: SPEC 9.4 ship rule", () => {
     const baseline = summarise(runs);
     const same = compareMetrics(baseline, baseline);
     assert(same.ship === false, "identical results must not ship");
@@ -1486,7 +1883,7 @@ function runSelfTest(options: CliOptions): number {
     return "4 negative cases + 3 positive cases";
   });
 
-  check("live: limit guard", () => {
+  await check("live: limit guard", () => {
     assert(validateLiveLimit(1, false, 30) === 1, "limit 1 must pass");
     assert(validateLiveLimit(5, false, 30) === 5, "limit 5 must pass");
     assert(validateLiveLimit(6, true, 30) === 6, "explicit allow-more must pass");
@@ -1508,30 +1905,18 @@ function runSelfTest(options: CliOptions): number {
     return "requires --limit, caps at 5 unless --allow-more, clamps to set size";
   });
 
-  check("report: JSON shape round-trips", () => {
-    const metrics = summarise(runs);
-    const report: BenchReport = {
-      schema: SCHEMA,
-      mode: "offline",
-      render: "md",
-      generatedAt: new Date(0).toISOString(),
-      queriesFile: displayPath(options.queriesPath),
-      serpSource: displayPath(options.serpSource),
-      n: options.n,
-      limit: null,
-      engineOverride: null,
-      queries: runs,
-      metrics,
-      stopped: null,
-      notes: [],
-    };
+  await check("report: JSON shape round-trips", () => {
+    const report = makeOfflineReport(runs, options, { mode: "off" });
     const roundTripped = JSON.parse(JSON.stringify(report)) as unknown;
     assert(isRecord(roundTripped), "report did not round-trip");
     assert(roundTripped.schema === SCHEMA, "schema lost");
     assert(isRecord(roundTripped.metrics), "metrics lost");
     assert(Array.isArray(roundTripped.queries), "queries lost");
+    assert(isRecord(roundTripped.reflex), "reflex mode lost");
+    assert(roundTripped.reflex.mode === "off", "reflex mode drifted");
     return `${JSON.stringify(report).length} bytes serialized`;
   });
+
 
   const failed = results.filter((result) => !result.ok);
   for (const result of results) {

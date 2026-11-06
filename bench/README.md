@@ -9,7 +9,7 @@ one query at a time, and stop at the first wall.
 bench/
   queries.jsonl          30 RU/EN queries, 2–4 golden domains each, no personal queries
   fixtures/<class>.json  15 hand-written synthetic SERPs (3 per class) + one synthetic spam item each
-  run.ts                 offline replay, live run, self-test, comparison
+  run.ts                 offline replay (+ rules triage), live run, self-test, comparison
   results/               local output only — never commit (see Honesty rules)
   README.md              this file
 ```
@@ -22,27 +22,48 @@ node bench/run.ts --no-write  # same numbers, nothing written
 node bench/run.ts --n 5       # SPEC default; 1–10 allowed
 node bench/run.ts --class technical
 node bench/run.ts --serp-source ./bench/fixtures   # explicit control corpus
+node bench/run.ts --reflex rules                   # same corpus through rules triage
 ```
 
 What happens per query: the runner picks one recorded SERP (explicit `covers` wins, otherwise
-the SERP sharing the most golden domains, ties by fixture id), then compacts it through
-`src/extract/compact.ts` with the SPEC defaults (`n=5`, summary ≤1200, snippet ≤140, total
-≤2500). No network, no CDP, no config file: two runs of the same corpus produce identical
-recall/token/spam numbers. The only non-deterministic field is `latencyMs`.
+the SERP sharing the most golden domains, ties by fixture id), optionally triages it, then
+compacts it through `src/extract/compact.ts` with the SPEC defaults (`n=5`, summary ≤1200,
+snippet ≤140, total ≤2500). No network, no CDP, no config file: two runs of the same corpus
+produce identical recall/token/spam numbers. The only non-deterministic field is `latencyMs`.
 
 `--serp-source <dir>` is the control knob: the same query set and the same code against a
 different recorded corpus. Use it when you change fixtures or want to prove the pipeline
 (not the network) is doing the work. Every `*.json` under the directory is loaded recursively.
 
-Self-check (fixtures, determinism, caps, verdict rules, live guards):
+`--reflex off|rules` (default `off`) is the other knob, and the reason V5.6 is measurable
+offline. With `rules`, the fixture results become `Candidate[]` (`engine` from the fixture) and
+go through the real `createRules().triage()` before compaction — the same rules layer the tool
+uses when `reflex.enabled:false` or a classifier abstains. The returned `keep` order is applied
+by reordering results and dropping the tail, so `results`, `chars`/`tokens`, `recall@5` and the
+spam metric all describe the triaged set. Triage never returns an empty keep for a non-empty
+SERP; if it ever did, the runner falls back to the full list rather than returning nothing.
+
+`--reflex-keep <1..10>` sets the triage top-k (default 6, matching `reflex.triage.keep`).
+It only means something below the compaction `n`: `keep 6` with `n 5` still returns five
+results and barely moves tokens, while `keep 3` shows the token effect the gate cares about.
+Write the two runs to different files and compare them (see §3); with no `--out` the default
+name gets a `-rules` suffix so a same-second pair cannot overwrite itself.
+
+`--reflex` is offline-only: a live run measures the extension's real config, and `--compare`
+reads the mode from each result file instead of taking the flag.
+
+Self-check (fixtures, determinism, caps, triage, verdict rules, live guards):
 
 ```bash
 node bench/run.ts --self-test
 ```
 
 It exits non-zero if the query set loses a class/language, a fixture loses its spam sentinel,
-two replays disagree, output exceeds 2500 chars, the offline run exceeds 2 s, or the SPEC §9.4
-verdict rules change behaviour.
+two replays disagree (in either reflex mode), output exceeds 2500 chars, the offline run
+exceeds 2 s, or the SPEC §9.4 verdict rules change behaviour. Two checks are reflex-specific:
+a `rules` run with `keep 3` must return at most 3 results and no more tokens than the same
+fixtures untriaged, and an `off` vs `rules` comparison must name the mode in its reasons while
+still shipping a genuine token cut.
 
 ## 2. One live query (opt-in)
 
@@ -71,13 +92,18 @@ Rules enforced by the runner:
 
 ## 3. Baseline vs reflex
 
-P5-A ships the harness; P5-B/C ship the rules/classifier and P5-D wires them. Until then a
-"reflex" result file is produced by that later phase (or by a candidate build) with the same
-schema. Comparison is deliberately dumb and honest — it reads two files and applies the SPEC:
+The baseline is `--reflex off`; the candidate is `--reflex rules` (optionally with
+`--reflex-keep`). Both are offline, deterministic, and share the corpus, so the comparison is
+a real measurement of triage rather than a simulation:
 
 ```bash
-node bench/run.ts --compare bench/results/a.json bench/results/b.json
+node bench/run.ts --out bench/results/base.json
+node bench/run.ts --reflex rules --out bench/results/rules.json
+node bench/run.ts --compare bench/results/base.json bench/results/rules.json
 ```
+
+Classifier-backed reflex runs (P5-C/D) can also write the same schema; the comparison does not
+care which code produced a file, it applies the SPEC:
 
 ```
 recallDelta    = (reflex.recall@5 − baseline.recall@5) × 100        (points)
@@ -88,20 +114,27 @@ ship = recallDelta ≥ −2  AND  (tokenDeltaPct ≤ −20  OR  readsDeltaPct �
 
 `ship` is the only gate: recall may not drop more than 2 points, and either returned tokens
 drop ≥20 % (triage) or page reads drop ≥30 % (read gate). The comparison prints every reason,
-including "unavailable" deltas (e.g. no reads recorded in an offline baseline). `ship` is forced
-to `false` when the two files differ in mode (`offline` vs `live`), render (`md` vs `json`) or
-query set — a partial live run must never look like a win. A comparison is per-run evidence, not
-a promise; re-run it on the same corpus before enabling `reflex.enabled`.
+including "unavailable" deltas (e.g. no reads recorded in an offline baseline). The first
+reason always names the reflex modes, e.g. `reflex off -> rules (keep 6)`.
+
+A **different reflex mode is not a mismatch** — off vs rules is the experiment. `ship` is
+forced to `false` only when the delta would be meaningless: the two files differ in mode
+(`offline` vs `live`), render (`md` vs `json`), query set, or when the "baseline" already runs
+rules and the "reflex" run is off (reversed direction). A partial live run must never look like
+a win. A comparison is per-run evidence, not a promise; re-run it on the same corpus before
+enabling `reflex.enabled`.
 
 ## 4. Metrics
 
 | Field | Meaning |
 |---|---|
-| `recall@5` | fraction of a query's `goldenDomains` present in the top 5 result domains; aggregate is goldens-hit / goldens-total over successful runs |
-| `chars` / `tokens` | summed compact output; `tokens = ceil(chars / 4)` (a cheap estimate, not a tokenizer) |
-| `latencyP50Ms` / `latencyP95Ms` | wall time of the measured step (offline: compaction; live: one `web_search` call) |
-| `spam` | synthetic spam items checked / leaked / caught; offline only, since live search does not inject spam |
-| `abstainRate` | **placeholder 0** until P5-B/C exist; the comparison ignores it |
+| `recall@5` | fraction of a query's `goldenDomains` present in the top 5 result domains; aggregate is goldens-hit / goldens-total over successful runs. With `--reflex rules` this is measured on the triaged, compacted set |
+| `chars` / `tokens` | summed compact output; `tokens = ceil(chars / 4)` (a cheap estimate, not a tokenizer). After triage these describe what survived `keep` |
+| `results` | results returned per query (≤ `n`, and ≤ `keep` when triage ran) |
+| `triage` | per-query `{ kept, dropped }` when `--reflex rules`; `reflex.triaged` carries the run total |
+| `latencyP50Ms` / `latencyP95Ms` | wall time of the measured step (offline: triage + compaction; live: one `web_search` call) |
+| `spam` | synthetic spam items checked / leaked / caught; offline only, since live search does not inject spam. A spam item removed before output counts as `caught`, so triage moves this number too |
+| `abstainRate` | always 0 here: `rules` never abstains by design and no classifier runs in the offline bench. A classifier-backed result file may carry a real value |
 | `reads` | total page reads recorded by the producer; 0 offline, filled by P5-D result files |
 | `cached` | per-query live flag; cached runs are reported, not hidden |
 
@@ -121,6 +154,11 @@ Domain matching is suffix-aware: `wikipedia.org` matches `en.wikipedia.org` and 
   "n": 5,
   "limit": null,                      // live: resolved query count
   "engineOverride": null,
+  "reflex": {                          // additive; absent == off
+    "mode": "rules",                   // "off" | "rules" | "config" (live)
+    "keep": 6,
+    "triaged": { "kept": 178, "dropped": 20 }
+  },
   "queries": [
     {
       "id": "t1", "q": "typescript satisfies operator",
@@ -132,6 +170,7 @@ Domain matching is suffix-aware: `wikipedia.org` matches `en.wikipedia.org` and 
       "results": 5, "ai": false, "cached": false,
       "topDomains": ["typescriptlang.org", "developer.mozilla.org", "..."],
       "spam": "leaked"                          // "caught" | "leaked" | "absent"
+      // "triage": { "kept": 6, "dropped": 1 }  // rules mode only
       // "reads": 2, "error": { "code": "E_WALL", "stage": "settle" } when applicable
     }
   ],
@@ -144,7 +183,7 @@ Domain matching is suffix-aware: `wikipedia.org` matches `en.wikipedia.org` and 
     "spam": { "checked": 30, "leaked": 16, "caught": 14, "caughtRate": 0.4667 }
   },
   "stopped": null,                    // live: { "at": "n1", "code": "E_WALL", "stage": "settle" }
-  "notes": ["offline replay: ...", "abstainRate is a placeholder ..."]
+  "notes": ["offline replay: ...", "abstainRate is 0: rules never abstains ..."]
 }
 ```
 
@@ -153,12 +192,18 @@ Domain matching is suffix-aware: `wikipedia.org` matches `en.wikipedia.org` and 
 ```jsonc
 {
   "schema": "pi-chrome-search/bench-compare@1",
-  "baseline": { "file": "a.json", "mode": "offline", "metrics": { /* … */ } },
-  "reflex":   { "file": "b.json", "mode": "offline", "metrics": { /* … */ } },
+  "baseline": { "file": "a.json", "mode": "offline", "reflexMode": "off", "metrics": { /* … */ } },
+  "reflex":   { "file": "b.json", "mode": "offline", "reflexMode": "rules", "keep": 6,
+                "metrics": { /* … */ } },
   "verdict": {
     "recallDelta": 0.0, "tokenDeltaPct": -21.4, "readsDeltaPct": null,
     "ship": true,
-    "reasons": ["recall within 2 points (0 pts)", "tokens cut 21.4% (need >=20%)", "..."]
+    "reasons": [
+      "reflex off -> rules (keep 6)",
+      "recall within 2 points (0 pts)",
+      "tokens cut 21.4% (need >=20%)",
+      "..."
+    ]
   }
 }
 ```
@@ -195,9 +240,12 @@ Fixtures are synthetic: no copied SERP HTML, no cookies, no profile identity fie
    file path and query count with every claim.
 4. **A reflex ships only if `--compare` says `ship: true`** on the same corpus, recall within
    2 points and the token/read threshold met. Otherwise `reflex.enabled` stays `false`, and the
-   numbers are recorded anyway (a negative result is a result).
-5. **No invented metrics.** `abstainRate` is 0 because the reflex does not exist yet; `reads`
-   is 0 offline because nothing was read. Do not fill gaps with guesses.
+   numbers are recorded anyway (a negative result is a result). Turning triage on is the
+   experiment, not a mismatch; a cross-render, offline-vs-live, partial-set or reversed
+   comparison still cannot ship.
+5. **No invented metrics.** `abstainRate` is 0 because rules never abstains by design and no
+   classifier runs offline — the report notes say exactly that. `reads` is 0 offline because
+   nothing was read. Do not fill gaps with guesses.
 6. **Do not commit `bench/results/`.** It is local output; the same run is reproducible from the
    fixtures. (Add `bench/results/` to `.gitignore` if it is not there yet.)
 7. **No new dependencies, no browser automation.** `run.ts` imports compaction and, in live
