@@ -339,9 +339,16 @@ export function extractImagesFromDocument(doc: Document, arg: ImagesExtractionAr
    * preview URL whose `img_url` query holds the *source image* URL; that is the
    * only non-Yandex URL the tile discloses, so it becomes `pageUrl`. The cover
    * href is the fallback for a layout that drops `img_url`.
+   *
+   * The two selectors are queried separately on purpose: a comma-joined
+   * `"a.ImagesContentImage-Cover[href], a[href]"` resolves in tree order, so an
+   * unrelated earlier anchor (title, source badge) would win and report the
+   * wrong `pageUrl`. The cover query is independent of tree position; the
+   * generic anchor is only consulted when no cover anchor exists at all.
    */
   function yandexPageUrl(card: Element): string {
-    const anchor = card.querySelector("a.ImagesContentImage-Cover[href], a[href]");
+    const cover = card.querySelector("a.ImagesContentImage-Cover[href]");
+    const anchor = cover === null ? card.querySelector("a[href]") : cover;
     if (anchor === null) return "";
     const raw = anchor.getAttribute("href");
     if (raw === null) return "";

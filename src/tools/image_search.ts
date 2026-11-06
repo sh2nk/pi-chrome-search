@@ -10,11 +10,13 @@
  *
  *     alt — pageUrl (thumbUrl)
  *
- * `attach: true` is OFF by default (vision tokens are expensive). pi's local
- * tool-result contract in this repo only carries text blocks, so attachments are
- * emitted as plain thumbnail URLs after the item lines rather than faking image
- * content; the handoff records the limitation. The URLs are already present in
- * each line, so nothing is lost beyond the block type itself.
+ * `attach: true` is OFF by default (vision tokens are expensive). pi's tool
+ * result can carry image blocks and SPEC §7.3 expects them, but an image block
+ * needs the thumbnail *bytes* and this adapter never fetches them: it reads
+ * URLs out of the image SERP and never downloads an asset. Rather than emit a
+ * block for a payload we do not have, `attach` appends up to four thumbnail
+ * URLs as text after the item lines. Fetching the bytes (network + vision
+ * tokens) is a deliberate later change, not a limitation of the result type.
  *
  * Failures leave through `renderToolFailure` with code + stage + hint (+ an
  * artifact for a wall/parse), exactly like `web_search`.
@@ -63,6 +65,7 @@ export interface ImageSearchDetails {
   /** Item lines actually rendered, after the output cap. */
   items: number;
   chars: number;
+  /** True when items were dropped, by `n` on the page or by the output budget. */
   pageCarried: boolean;
   attach: boolean;
 }
@@ -102,7 +105,7 @@ export interface ImageSearchTool {
  * about the two engines, the line shape and the expensive `attach` flag.
  */
 export const IMAGE_SEARCH_DESCRIPTION =
-  "Search images through the user's visible Chrome (Google Images or Yandex Images). Returns compact lines: alt — pageUrl (thumbUrl); n<=12, default 4. attach:true appends up to 4 thumbnail URLs (text only); off by default because images are expensive.";
+  "Search images through the user's visible Chrome (Google Images or Yandex Images). Returns compact lines: alt — pageUrl (thumbUrl); n<=12, default 4. attach:true appends up to 4 thumbnail URLs (not image bytes); off by default because images are expensive.";
 
 const DEFAULT_N = 4;
 const MAX_N = 12;
@@ -115,7 +118,7 @@ const MAX_ALT_CHARS = 200;
  */
 const MIN_OUTPUT_CHARS = 600;
 const MAX_OUTPUT_CHARS = 4_000;
-const ATTACH_HEADER = "attach (text URLs only — this result type has no image blocks):";
+const ATTACH_HEADER = "attach (thumbnail URLs, not image bytes):";
 
 const INPUT_HINT =
   'check the image_search arguments: q (non-empty), n 1..12, engine "google"|"yandex", attach boolean';
@@ -483,11 +486,16 @@ async function search(
   }
 
   const rendered = renderImages(extraction.items, input.attach, outputBudget(deps.config));
+  // "pageCarried" answers "did the caller get less than was available?". Two
+  // independent places shorten the list: the page (more usable tiles than `n`)
+  // and this renderer (whole lines dropped by the output budget). Reporting
+  // only the page half would say `false` while the result visibly stops early.
+  const pageCarried = extraction.pageCarried || extraction.items.length > rendered.items;
   const details: ImageSearchDetails = {
     engine,
     items: rendered.items,
     chars: rendered.text.length,
-    pageCarried: extraction.pageCarried,
+    pageCarried,
     attach: input.attach,
   };
   return { content: [{ type: "text", text: rendered.text }], details };

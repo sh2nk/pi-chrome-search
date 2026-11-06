@@ -386,6 +386,33 @@ test("page-side canaries evaluate the same source through CdpPage", async () => 
   assert.equal(counts.legacySerpItem, 0);
 });
 
+test("Yandex pageUrl prefers the cover anchor over an earlier generic anchor", () => {
+  // A tile can carry a title/source anchor before the cover. A comma-joined
+  // selector resolves in tree order and would report the earlier link, so the
+  // cover must be queried on its own; the generic anchor stays as the fallback
+  // for a tile that has no cover at all.
+  const coverHref =
+    "https://yandex.ru/images/search?rpt=imageview&img_url=https%3A%2F%2Fcdn.example.test%2Fcover.jpg";
+  const html = `
+    <div class="SerpItem">
+      <a class="SerpItem-Title" href="https://example.test/earlier">An earlier link</a>
+      <a class="ImagesContentImage-Cover" href="${coverHref}">
+        <img class="SerpItem-Thumb" src="//avatars.mds.yandex.net/get-images/1" alt="Cover">
+      </a>
+    </div>
+    <div class="SerpItem">
+      <a class="SerpItem-Title" href="https://example.test/fallback">No cover here</a>
+      <img class="SerpItem-Thumb" src="//avatars.mds.yandex.net/get-images/2" alt="Fallback">
+    </div>`;
+  const extraction = extractFrom(fixtureDocument(html, YANDEX_URL), { engine: "yandex", n: 4 });
+
+  assert.equal(extraction.items.length, 2);
+  assert.equal(extraction.items[0]?.pageUrl, "https://cdn.example.test/cover.jpg");
+  assert.equal(extraction.items[0]?.domain, "cdn.example.test");
+  assert.equal(extraction.items[1]?.pageUrl, "https://example.test/fallback");
+  assert.equal(extraction.items[1]?.domain, "example.test");
+});
+
 // ---------------------------------------------------------------------------
 // Wall detection
 // ---------------------------------------------------------------------------
@@ -477,10 +504,16 @@ test("image_search description stays inside the 350-char budget", () => {
 // Tool: happy path
 // ---------------------------------------------------------------------------
 
-test("happy path: Google fixture returns exactly n lines and the deferred tool shape", async () => {
+test("happy path: Google fixture returns exactly n lines and the deferred tool shape", async (t) => {
   const harness = makeHarness({ page: fixturePage("images-google", "google", GOOGLE_URL).page });
   const result = await run(harness, { q: "red panda" });
   const success = expectSuccess(result);
+
+  // Printed so the evidence file can quote a number that is reproducible with
+  // one offline command (`node --test --test-name-pattern "happy path: Google"`).
+  t.diagnostic(
+    `google fixture n=4: ${success.details.items} items, ${success.details.chars} chars, pageCarried=${success.details.pageCarried}`,
+  );
 
   assert.equal(success.details.engine, "google");
   assert.equal(success.details.items, 4);
@@ -503,7 +536,7 @@ test("happy path: Google fixture returns exactly n lines and the deferred tool s
   assert.equal(text.includes("data:"), false);
 });
 
-test("happy path: Yandex fixture uses the engine and config locale", async () => {
+test("happy path: Yandex fixture uses the engine and config locale", async (t) => {
   const harness = makeHarness({
     page: fixturePage("images-yandex", "yandex", YANDEX_URL).page,
     config: (config) => {
@@ -512,6 +545,10 @@ test("happy path: Yandex fixture uses the engine and config locale", async () =>
   });
   const result = await run(harness, { q: "красная панда", engine: "yandex" });
   const success = expectSuccess(result);
+
+  t.diagnostic(
+    `yandex fixture n=4: ${success.details.items} items, ${success.details.chars} chars, pageCarried=${success.details.pageCarried}`,
+  );
 
   assert.equal(success.details.engine, "yandex");
   assert.equal(success.details.items, 4);
@@ -540,6 +577,41 @@ test("n above 12 is clamped, not rejected, for a codemode caller", async () => {
   assert.equal(textOf(result).split("\n").length, 12);
 });
 
+test("renderer truncation is reported as pageCarried, not as a short page", async (t) => {
+  // 12 items with realistic long URLs overflow the 2500-char output budget, so
+  // the renderer keeps whole lines and drops the tail. The page carried all 12;
+  // `details.pageCarried` must reflect that the caller still lost items.
+  const longUrl = (kind: string, index: number): string =>
+    `https://example.test/${kind}/${"x".repeat(200)}${index}`;
+  const cards = Array.from({ length: 12 }, (_, index) =>
+    `<div data-attrid="images universal" data-lpage="${longUrl("p", index)}">
+       <img src="${longUrl("t", index)}" alt="Tile ${index}">
+     </div>`,
+  ).join("");
+  const doc = fixtureDocument(cards, GOOGLE_URL);
+
+  const extraction = extractFrom(doc, { engine: "google", n: 12 });
+  assert.equal(extraction.items.length, 12);
+  assert.equal(extraction.pageCarried, false, "the page itself carried exactly 12");
+
+  const harness = makeHarness({ page: pageFor(doc, GOOGLE_URL) });
+  const success = expectSuccess(await run(harness, { q: "red panda", n: 12 }));
+
+  assert.equal(success.details.pageCarried, true, "dropping a line means more were available");
+  assert.ok(
+    success.details.items > 0 && success.details.items < 12,
+    `expected a truncated result, got ${success.details.items} items`,
+  );
+  const lines = textOf(success).split("\n");
+  assert.equal(lines.length, success.details.items);
+  assert.ok(success.details.chars <= harness.deps.config.search.outputMaxChars);
+  t.diagnostic(
+    `n=12 long URLs: rendered ${success.details.items} of 12 items, ${success.details.chars} chars, pageCarried=${success.details.pageCarried}`,
+  );
+  // Whole lines only: no URL is cut to make the budget.
+  for (const line of lines) assert.match(line, /^.+ — https?:\/\/\S+ \(https?:\/\/\S+\)$/);
+});
+
 test("attach is off by default and emits up to 4 text thumbnail URLs when asked", async () => {
   const harness = makeHarness({ page: fixturePage("images-google", "google", GOOGLE_URL).page });
   const off = expectSuccess(await run(harness, { q: "red panda" }));
@@ -549,8 +621,11 @@ test("attach is off by default and emits up to 4 text thumbnail URLs when asked"
   const on = expectSuccess(await run(harness, { q: "red panda", attach: true }));
   const text = textOf(on);
   assert.equal(on.details.attach, true);
-  assert.ok(text.includes("attach (text URLs only"));
-  const attachLines = text.split("\n").slice(text.split("\n").indexOf("attach (text URLs only — this result type has no image blocks):") + 1);
+  assert.ok(text.includes("attach (thumbnail URLs, not image bytes)"));
+  assert.equal(text.includes("no image blocks"), false, "the result type does allow image blocks");
+  const attachLines = text
+    .split("\n")
+    .slice(text.split("\n").indexOf("attach (thumbnail URLs, not image bytes):") + 1);
   assert.equal(attachLines.length, 4);
   for (const url of attachLines) assert.match(url, /^https:\/\/encrypted-tbn/);
 });
