@@ -71,8 +71,18 @@ test("V14.2: the rules gate reaches the recall and false-skip bar on the corpus"
   assert.ok(!report.bySource.fixture.skipped, "no recorded good URL is skipped");
 });
 
-test("V14.3: the read simulation removes junk, never a golden source", () => {
+test("V14.3: the observed-SERP population saves reads and never loses a golden source", () => {
   const rows = loadCorpus(CORPUS);
+  const normal = simulateReads(rows, 4, "serp");
+  assert.equal(normal.groups, 3, "the live population is the three observed SERPs");
+  assert.ok(normal.savedPct >= 25, `saved ${normal.savedPct}% of observed reads`);
+  assert.ok(normal.goldensAfter >= normal.goldensBefore, "a golden source was lost");
+
+  // The aggregate is context, not the gate: it averages in synthetic fixtures
+  // that contain no real slop, so it must stay visible and unmodified.
+  const aggregate = simulateReads(rows, 4);
+  assert.equal(aggregate.groups, 18);
+  assert.ok(aggregate.savedPct <= normal.savedPct, "the synthetic fixtures can only dilute the saving");
   for (const k of [2, 4, 8]) {
     const simulation = simulateReads(rows, k);
     assert.equal(simulation.k, k);
@@ -113,6 +123,11 @@ test("V14.3: a slop-heavy window saves reads; a clean one costs nothing", () => 
 
 test("V14.4/V14.5: cost is marked unmeasured offline and rules latency is far below the bar", () => {
   const report = evaluateCorpus(loadCorpus(CORPUS), CORPUS);
+  const v143 = report.checks.find((check) => check.id === "V14.3");
+  assert.ok(v143);
+  assert.equal(v143.verdict, "PASS");
+  assert.match(v143.detail, /observed-SERP population/);
+  assert.equal(report.readsContext.aggregate.length, 3, "the aggregate stays in the report");
   const cost = report.checks.find((check) => check.id === "V14.4");
   assert.ok(cost);
   assert.equal(cost.verdict, "UNMEASURED", "the classifier price cannot be measured offline");

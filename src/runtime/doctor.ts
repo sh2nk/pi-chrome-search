@@ -323,6 +323,8 @@ export interface DoctorEngine {
 
 export interface DoctorReflexInfo {
   enabled: boolean;
+  /** P14: the offline page gate can be on while the rest of the reflex is off. */
+  pageGate: boolean;
   backend: ReflexBackend;
   localOnly: boolean;
   /** `disabled` when reflex is off; `unavailable` until P5 injects a classifier probe. */
@@ -1022,6 +1024,7 @@ export async function buildDoctorReport(
     engines,
     reflex: {
       enabled: deps.config.reflex.enabled,
+      pageGate: deps.config.reflex.pageGate,
       backend: deps.config.reflex.backend,
       localOnly: deps.config.reflex.localOnly,
       classifier: deps.config.reflex.enabled ? "unavailable" : "disabled",
@@ -1108,7 +1111,8 @@ export function renderDoctorText(
 
   lines.push(
     `reflex: ${report.reflex.enabled ? "enabled" : "disabled"} (backend=${report.reflex.backend}, ` +
-      `localOnly=${report.reflex.localOnly ? "on" : "off"}, classifier=${report.reflex.classifier})`,
+      `localOnly=${report.reflex.localOnly ? "on" : "off"}, pageGate=${report.reflex.pageGate ? "on" : "off"}, ` +
+      `classifier=${report.reflex.classifier})`,
   );
   if (attention !== undefined) {
     lines.push(

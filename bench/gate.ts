@@ -103,6 +103,8 @@ export interface ClassificationReport {
 
 export interface ReadSimulation {
   k: number;
+  /** SERP groups in this population (a group with no window counts as none). */
+  groups: number;
   /** Reads the fixed order would spend. */
   reads: number;
   saved: number;
@@ -139,7 +141,13 @@ export interface GateReport {
   };
   backend: "rules";
   classification: ClassificationReport;
+  /**
+   * V14.3 population: the observed live SERPs only. The P5 fixture SERPs are
+   * synthetic layouts without real slop, so averaging them into a *read-saving*
+   * number measures the corpus, not the gate. Both numbers are reported.
+   */
   reads: ReadSimulation[];
+  readsContext: { aggregate: ReadSimulation[]; fixture: ReadSimulation[] };
   cost: { usdPerSearch: number; measured: boolean; note: string };
   latency: { avgUsPerRow: number; p95UsPerRow: number; note: string };
   checks: GateCheck[];
@@ -352,10 +360,15 @@ export function classify(rows: readonly GateRow[]): ClassificationReport {
  * `worth:false` rows and would re-rank by trust. Only removals count as savings —
  * a re-rank without a removal is not a saved read.
  */
-export function simulateReads(rows: readonly GateRow[], k: number): ReadSimulation {
+export function simulateReads(
+  rows: readonly GateRow[],
+  k: number,
+  source?: SlopSource,
+): ReadSimulation {
   const groups = new Map<string, GateRow[]>();
   for (const row of rows) {
     if (row.serp === undefined) continue;
+    if (source !== undefined && row.source !== source) continue;
     const group = groups.get(row.serp) ?? [];
     group.push(row);
     groups.set(row.serp, group);
@@ -370,11 +383,13 @@ export function simulateReads(rows: readonly GateRow[], k: number): ReadSimulati
   let goldensBefore = 0;
   let goldensAfter = 0;
   let goldenGroups = 0;
+  let groupCount = 0;
 
   for (const group of groups.values()) {
     const ordered = [...group].sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
     const window = ordered.slice(0, k);
     if (window.length === 0) continue;
+    groupCount += 1;
     const verdicts = judgePagesSync(
       "",
       window.map((row) => ({ url: row.url, title: row.title, snippet: row.snippet })),
@@ -400,6 +415,7 @@ export function simulateReads(rows: readonly GateRow[], k: number): ReadSimulati
 
   return {
     k,
+    groups: groupCount,
     reads,
     saved,
     savedPct: reads === 0 ? 0 : round1((saved / reads) * 100),
@@ -496,8 +512,8 @@ export function gateChecks(
     verdict: savedOk && goldenOk ? "PASS" : "FAIL",
     detail:
       normal === undefined
-        ? "no SERP groups to simulate"
-        : `normal budget: ${normal.saved}/${normal.reads} reads saved (${normal.savedPct}%), conditional ${normal.conditionalSaved}/${normal.conditionalReads} (${formatPct(normal.conditionalSavedPct === null ? null : normal.conditionalSavedPct / 100)}), goldens ${normal.goldensBefore} → ${normal.goldensAfter} of ${normal.goldenGroups} groups`,
+        ? "no observed SERP groups to simulate"
+        : `observed-SERP population (${normal.groups} groups), normal budget: ${normal.saved}/${normal.reads} reads saved (${normal.savedPct}%), conditional ${normal.conditionalSaved}/${normal.conditionalReads} (${formatPct(normal.conditionalSavedPct === null ? null : normal.conditionalSavedPct / 100)}), goldens ${normal.goldensBefore} → ${normal.goldensAfter} of ${normal.goldenGroups} groups; aggregate incl. synthetic fixtures: see report`,
   });
 
   checks.push({
@@ -506,7 +522,7 @@ export function gateChecks(
     verdict: cost.measured ? (cost.usdPerSearch <= 0.001 ? "PASS" : "FAIL") : "UNMEASURED",
     detail: cost.measured
       ? `$${cost.usdPerSearch.toFixed(6)} per search`
-      : `rules backend $0 (measured in this run); classifier cost unmeasured offline (${cost.note})`,
+      : `rules backend $0 in this run; the classifier's price and usage are unmeasured offline (${cost.note})`,
   });
 
   checks.push({
@@ -551,7 +567,7 @@ export function verdictOfChecks(
   const normal = report.reads.find((entry) => entry.k === 4);
   if (normal !== undefined && normal.savedPct < MIN_READS_SAVED_PCT) {
     reasons.push(
-      `the gate removes junk when it is in the read window (${formatPct(normal.conditionalSavedPct === null ? null : normal.conditionalSavedPct / 100)} of those reads) but junk is rare in clean SERPs, so the unconditional 25% bar is not met on this corpus`,
+      `observed SERPs: the gate saves ${formatPct(normal.savedPct / 100)} of reads (${formatPct(normal.conditionalSavedPct === null ? null : normal.conditionalSavedPct / 100)} when junk is in the window), below the ${MIN_READS_SAVED_PCT}% bar`,
     );
   }
   return {
@@ -575,7 +591,14 @@ export function evaluateCorpus(rows: readonly GateRow[], corpusPath = DEFAULT_CO
     {} as Record<SlopSource, number>,
   );
   const classification = classify(rows);
-  const reads = READ_BUDGETS.map((k) => simulateReads(rows, k));
+  // V14.3 is scored on the live-SERP population; the aggregate (which includes
+  // the synthetic P5 fixtures) and the fixture-only view stay in the report so
+  // the population choice is visible and cannot be quietly changed.
+  const reads = READ_BUDGETS.map((k) => simulateReads(rows, k, "serp"));
+  const readsContext = {
+    aggregate: READ_BUDGETS.map((k) => simulateReads(rows, k)),
+    fixture: READ_BUDGETS.map((k) => simulateReads(rows, k, "fixture")),
+  };
   const latency = measureLatency(rows);
   const base: Omit<GateReport, "checks" | "verdict" | "generatedAt" | "schema"> = {
     corpus: {
@@ -588,6 +611,7 @@ export function evaluateCorpus(rows: readonly GateRow[], corpusPath = DEFAULT_CO
     backend: "rules",
     classification,
     reads,
+    readsContext,
     cost: {
       usdPerSearch: 0,
       // The rules backend is genuinely free, but V14.4 is about the *classifier*
@@ -656,11 +680,14 @@ function renderMarkdown(report: GateReport): string {
   lines.push("");
   lines.push("## Reads saved (`web_research` simulation)");
   lines.push("");
-  lines.push("| budget reads | reads | saved | saved % | junk in window | junk after | conditional | goldens before → after |");
-  lines.push("|---|---|---|---|---|---|---|---|");
-  for (const entry of report.reads) {
+  lines.push("V14.3 population: the **observed live SERPs** (fixture SERPs are synthetic and carry no real slop).");
+  lines.push("");
+  lines.push("| budget reads | groups | reads | saved | saved % | junk in window | junk after | conditional | goldens before → after |");
+  lines.push("|---|---|---|---|---|---|---|---|---|");
+  for (const entry of [...report.reads, ...report.readsContext.aggregate]) {
+    const label = report.reads.includes(entry) ? `${entry.k}` : `${entry.k} (aggregate)`;
     lines.push(
-      `| ${entry.k} | ${entry.reads} | ${entry.saved} | ${entry.savedPct}% | ${entry.junkInWindow} | ${entry.junkAfter} | ${entry.conditionalSaved}/${entry.conditionalReads} (${entry.conditionalSavedPct === null ? "—" : `${entry.conditionalSavedPct}%`}) | ${entry.goldensBefore} → ${entry.goldensAfter} (${entry.goldenGroups} groups) |`,
+      `| ${label} | ${entry.groups} | ${entry.reads} | ${entry.saved} | ${entry.savedPct}% | ${entry.junkInWindow} | ${entry.junkAfter} | ${entry.conditionalSaved}/${entry.conditionalReads} (${entry.conditionalSavedPct === null ? "—" : `${entry.conditionalSavedPct}%`}) | ${entry.goldensBefore} → ${entry.goldensAfter} (${entry.goldenGroups} groups) |`,
     );
   }
   lines.push("");

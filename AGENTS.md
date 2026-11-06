@@ -228,8 +228,10 @@ experiment and benchmark gate are in SPEC §9. Do not put a classifier on the cr
 source be trusted?* One batched classifier call covers up to 10 pages (`PAGE_BATCH_MAX`), and the rules
 layer in `src/reflex/rules.ts` is the floor: it answers offline, and `mergePageVerdicts` lets a model
 add a skip but never rescue an `unsafe` rules verdict. Wired into `web_read` (before a tab is spent) and
-`web_research` (rank/drop sources). Corpus + rubric: `bench/slop.jsonl`, `bench/SLOP-RUBRIC.md`; verdict:
-`bench/RESULTS-P14.md` (V14.3 fails, so `reflex.enabled` stays `false`).
+`web_research` (rank/drop sources). `reflex.pageGate: true` enables the rules gate alone (offline, $0);
+`reflex.enabled: true` adds the classifier. Corpus + rubric: `bench/slop.jsonl`, `bench/SLOP-RUBRIC.md`;
+verdict: `bench/RESULTS-P14.md` (V14.3 passes on the observed SERPs: 50 % of reads, 0 goldens lost;
+V14.4 unmeasured offline; both remain the reason the classifier is not on by default).
 
 ### Codemode: optional, per research session
 

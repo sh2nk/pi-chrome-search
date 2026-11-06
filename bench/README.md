@@ -300,5 +300,6 @@ node bench/gate.ts --self-test        # corpus shape, metric arithmetic, verdict
 The report, the V14.1–V14.5 table and the decision live in
 [`RESULTS-P14.md`](./RESULTS-P14.md). The rules backend is measured offline; the classifier backend's
 accuracy and price are marked **unmeasured** because they need a live `pi` session with the user's
-classifier provider. `--gate` exits `1` when a measured gate fails, so a script cannot mistake a
-"KEEP OFF" verdict for success.
+classifier provider. `--gate` exits `1` when a measured gate fails, so a script cannot mistake a failed
+gate for success. The gate ships behind its own `reflex.pageGate` switch (default `false`; rules-only and
+free with `reflex.enabled:false`, classifier-assisted when both are on).

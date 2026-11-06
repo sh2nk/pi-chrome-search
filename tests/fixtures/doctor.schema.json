@@ -394,12 +394,16 @@
       "additionalProperties": false,
       "required": [
         "enabled",
+        "pageGate",
         "backend",
         "localOnly",
         "classifier"
       ],
       "properties": {
         "enabled": {
+          "type": "boolean"
+        },
+        "pageGate": {
           "type": "boolean"
         },
         "backend": {

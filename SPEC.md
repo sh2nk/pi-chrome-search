@@ -523,6 +523,9 @@ const PAGE_BATCH_MAX = 10;
   page only, and the policy abstains on low confidence/error exactly as for the other decisions.
 - **Off by default:** `reflex.enabled: false`. When off, `rules.ts` is used for routing/dedup and no model
   runs.
+- **Page gate has its own switch:** `reflex.pageGate: false`. Turning it on runs the offline rules gate
+  (farm host, off-topic path, unsafe URL, login/cart, thin excerpt) on `web_read`/`web_research` with no
+  model call and no cost; `reflex.enabled: true` additionally lets the classifier judge and rank pages.
 - **Backends:** `auto` = local decision model → OpenRouter classifier → rules. `localOnly: true` forbids
   remote calls entirely. `provider`/`model` pin one classifier; `prefer` reorders `auto`.
 - **Abstain:** if `confidence < reflex.abstainBelow` (default 0.55), `stopReason !== "stop"`, or latency

@@ -1041,6 +1041,21 @@ test("P14 page gate: an allowed page reads normally and is not gated twice", asy
   assert.equal(reflex.readGateCalls, 0);
 });
 
+test("P14 page gate: reflex.pageGate turns the gate on without the rest of the reflex", async () => {
+  const reflex = pageGateSpy({ verdict: { worth: false, trust: 0.15, kind: "slop", reasons: ["host:farm"] } });
+  const harness = makeHarness();
+  harness.deps.reflex = reflex;
+  harness.deps.config.reflex.enabled = false;
+  harness.deps.config.reflex.pageGate = true;
+
+  const result = failure(await run(harness, { url: "https://sonnik.ru/kot/" }));
+
+  assert.equal(result.details.code, "E_UNSUPPORTED");
+  assert.equal(harness.pagesRequested, 0);
+  assert.equal(reflex.pageCalls.length, 1);
+  assert.equal(reflex.readGateCalls, 0, "the page gate replaced the P5 gate");
+});
+
 test("P14 page gate: a disabled reflex is never consulted", async () => {
   const reflex = pageGateSpy({ verdict: { worth: false, trust: 0, kind: "unsafe", reasons: ["url:punycode"] } });
   const harness = makeHarness({ config: (config) => { config.reflex.enabled = false; } });

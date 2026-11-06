@@ -606,10 +606,10 @@ function sanitizeKeep(keep: unknown, length: number): number[] {
 async function pageGateOrder(
   query: string,
   batch: readonly Candidate[],
-  reflexOn: boolean,
   deps: ToolDeps,
 ): Promise<{ keep: number[]; judged: number; skipped: number; refused: string[] } | null> {
-  if (!reflexOn || deps.reflex === undefined || typeof deps.reflex.judgePages !== "function") {
+  const gateOn = deps.config.reflex.enabled || deps.config.reflex.pageGate;
+  if (!gateOn || deps.reflex === undefined || typeof deps.reflex.judgePages !== "function") {
     return null;
   }
   const subjects = batch.slice(0, PAGE_BATCH_MAX).map((item) => ({
@@ -685,7 +685,7 @@ async function pickCandidates(
     }
   }
 
-  const gated = await pageGateOrder(query, keep.map((index) => candidates[index]!), reflexOn, deps);
+  const gated = await pageGateOrder(query, keep.map((index) => candidates[index]!), deps);
   if (gated !== null) {
     state.gateJudged += gated.judged;
     state.gateSkipped += gated.skipped;

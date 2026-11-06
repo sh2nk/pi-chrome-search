@@ -944,6 +944,33 @@ test("P14 page gate skips a refused source and ranks the rest", async () => {
   assert.ok((result.details.gate?.skipped ?? 0) >= 1);
 });
 
+test("P14 page gate runs on reflex.pageGate alone (no triage/coverage traffic)", async () => {
+  const reflex = spyReflex({
+    judgePages: async (_query: string, subjects: readonly PageSubject[]): Promise<PageVerdict[]> =>
+      subjects.map((subject) => ({
+        worth: !subject.url.includes("docs.example.test"),
+        trust: 0.5,
+        kind: "unknown",
+        reasons: ["test"],
+      })),
+  });
+  const harness = makeHarness({
+    fixture: BASIC,
+    reflex,
+    config: (config) => {
+      config.reflex.enabled = false;
+      config.reflex.pageGate = true;
+    },
+  });
+
+  const result = success(await run(harness, { q: BASIC.query, budget: "quick" }));
+
+  assert.equal(reflex.triageCalls.length, 0, "pageGate must not enable the old triage");
+  assert.equal(reflex.coverageCalls.length, 0, "pageGate must not enable model coverage");
+  assert.ok(result.details.gate !== undefined, "the gate ran");
+  assert.ok(harness.calls.read.every((call) => !call.url.includes("docs.example.test")));
+});
+
 test("P14 page gate never reads a refused source twice: all-refused spends no read", async () => {
   const reflex = spyReflex({
     judgePages: async (_query: string, subjects: readonly PageSubject[]): Promise<PageVerdict[]> =>

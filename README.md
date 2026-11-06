@@ -156,6 +156,7 @@ a partial file is deep-merged over the defaults.
 | `captcha.waitMs`, `captcha.retryYandexOnce` | `0`, `true` | Extra grace after the one Yandex retry for you to solve a wall (0 = no extra wait); the retry waits ~3 s |
 | `artifacts.enabled`, `artifacts.keep`, `artifacts.maxBytes` | `true`, `30`, `52428800` | Save failure artifacts; retention in dirs / bytes (50 MB) |
 | `reflex.enabled`, `reflex.backend` | `false`, `"auto"` | Optional System 1 layer; `auto` \| `local` \| `openrouter` \| `rules` |
+| `reflex.pageGate` | `false` | P14 page-quality gate on `web_read`/`web_research` (farm/unsafe/off-topic pages are refused before a read). Rules-only and free with `enabled:false`; with `enabled:true` the classifier also judges/ranks pages |
 | `reflex.localOnly` | `false` | `true` forbids all remote classifier calls |
 | `reflex.provider`, `reflex.model`, `reflex.prefer` | `"auto"`, `null`, `["llama.cpp", "openrouter"]` | Classifier pinning and `auto` backend order |
 | `reflex.openrouter.primary`, `reflex.openrouter.fallback` | `"~typesafe/jev-latest"`; clef-flash, pplx-decider-flash, span-01-lite (full ids in `src/config.ts`) | Remote classifier and its fallback chain |
@@ -188,6 +189,13 @@ result did not clear that bar honestly, so the flag stayed off — see [`bench/R
 for the numbers and the reasoning. Turning it on is your call; the deterministic rules fallback always works,
 and `reflex.localOnly: true` forbids remote calls.
 
+**The page gate is a separate switch.** P14 measured a quality gate, not a compressor: it skipped 42/42
+labelled slop/unsafe sources with 0 false skips, and saved 50 % of the reads on the observed SERPs
+([`bench/RESULTS-P14.md`](bench/RESULTS-P14.md)). Because its classifier half is unmeasured offline and the
+rules carry hand-maintained lists, `reflex.pageGate` also defaults to `false`. `{"reflex":{"pageGate":true}}`
+turns on the offline rules gate alone — no model call, no cost; add `"enabled": true` to let the classifier
+judge and rank pages too.
+
 ## Commands
 
 ```bash
@@ -196,6 +204,7 @@ npm test                          # node --test tests/unit/**/*.test.ts (offline
 npm run audit                     # hard rules, secrets, fixture data, tool budget
 node src/cli/doctor.ts --json     # headless doctor; --no-probe --fix --config <path>
 npm run bench                     # offline replay; --reflex rules / --compare are offline too
+node bench/run.ts --gate          # P14 page-gate bench on bench/slop.jsonl (offline)
 PI_CHROME_LIVE=1 npm run test:live   # opt-in live suite (tests/live/**), one query per engine
 ```
 

@@ -164,6 +164,13 @@ export interface TriageConfig {
 
 export interface ReflexConfig {
   enabled: boolean;
+  /**
+   * P14 page gate, independent of `enabled` (default false). With `enabled:false`
+   * the gate runs the offline rules only: no model call, no cost, and a read is
+   * refused only for a named reason (farm host, off-topic path, unsafe URL, …).
+   * Turning `enabled` on additionally lets the classifier judge/rank pages.
+   */
+  pageGate: boolean;
   backend: ReflexBackend;
   localOnly: boolean;
   provider: string;
@@ -230,6 +237,7 @@ export const DEFAULT_CONFIG: Config = {
   artifacts: { enabled: true, keep: 30, maxBytes: 52428800 },
   reflex: {
     enabled: false,
+    pageGate: false,
     backend: "auto",
     localOnly: false,
     provider: "auto",
@@ -369,6 +377,7 @@ const CONFIG_SPEC: Spec = {
       kind: "object",
       fields: {
         enabled: BOOL,
+        pageGate: BOOL,
         backend: { kind: "enum", values: ["auto", "local", "openrouter", "rules"] },
         localOnly: BOOL,
         provider: STRING_NE,

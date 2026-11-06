@@ -542,9 +542,11 @@ export function createWebReadTool(
     );
 
     // Reflex page gate (P14): after the SSRF guard, before a tab is acquired, so
-    // a refused page costs no navigation at all. A pre-P14 reflex has no
+    // a refused page costs no navigation at all. `reflex.pageGate` turns it on
+    // without the rest of the reflex; with `enabled:false` the policy still
+    // answers from rules, so this costs no model call. A pre-P14 reflex has no
     // `judgePages`; the older `gateRead` then answers instead (P5-D).
-    if (deps.config.reflex.enabled && deps.reflex !== undefined) {
+    if ((deps.config.reflex.enabled || deps.config.reflex.pageGate) && deps.reflex !== undefined) {
       const verdict = await pageGateVerdict(deps.reflex, requested.href);
       if (verdict !== null && !verdict.worth) {
         throw fail("E_UNSUPPORTED", "read", {

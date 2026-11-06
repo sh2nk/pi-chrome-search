@@ -617,6 +617,7 @@ test("reflex reports disabled off and unavailable (no probe yet) when on", async
   const off = await buildDoctorReport(depsFor({ connector: new FakeConnector() }));
   assert.equal(off.reflex.classifier, "disabled");
   assert.equal(off.reflex.enabled, false);
+  assert.equal(off.reflex.pageGate, false, "P14: the gate has its own switch");
 
   const config = configWith((cfg) => {
     cfg.reflex.enabled = true;
@@ -625,6 +626,16 @@ test("reflex reports disabled off and unavailable (no probe yet) when on", async
   const on = await buildDoctorReport(depsFor({ config, connector: new FakeConnector() }));
   assert.equal(on.reflex.classifier, "unavailable");
   assert.equal(on.reflex.backend, "rules");
+
+  // The gate can be on while the reflex is off: one flag, no classifier traffic.
+  const gateOnly = configWith((cfg) => {
+    cfg.reflex.enabled = false;
+    cfg.reflex.pageGate = true;
+  });
+  const report = await buildDoctorReport(depsFor({ config: gateOnly, connector: new FakeConnector() }));
+  assert.equal(report.reflex.enabled, false);
+  assert.equal(report.reflex.pageGate, true);
+  assert.equal(report.reflex.classifier, "disabled");
 });
 
 test("report carries no cookies, HTML or non-loopback address", async () => {

@@ -83,6 +83,13 @@ test("defaults load when the config file is missing", () => {
   assert.equal(config.reflex.enabled, false);
 });
 
+test("P14 reflex.pageGate defaults off and parses independently of reflex.enabled", () => {
+  assert.equal(DEFAULT_CONFIG.reflex.pageGate, false);
+  const on = parseConfig({ reflex: { pageGate: true } });
+  assert.equal(on.reflex.pageGate, true);
+  assert.equal(on.reflex.enabled, false, "the gate flag must not switch the whole reflex on");
+});
+
 test("unknown top-level key is rejected with the key path", () => {
   expectConfigError(() => parseConfig({ nope: 1 }), "config.nope");
 });
