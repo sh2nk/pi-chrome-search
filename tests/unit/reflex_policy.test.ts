@@ -211,7 +211,9 @@ test("abstains below abstainBelow and returns the rules verdict", async () => {
   assert.equal(row.fallback, true);
   assert.equal(row.reason, "low_confidence");
   assert.equal(row.confidence, 0.4);
-  assert.equal(row.model, "fake-jev");
+  // The verdict is the rules one; the rejected model stays visible separately.
+  assert.equal(row.model, "rules");
+  assert.equal(row.attemptedModel, "fake-jev");
 });
 
 test("abstains when stopReason is not \"stop\"", async () => {

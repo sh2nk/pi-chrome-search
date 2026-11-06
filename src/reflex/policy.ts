@@ -407,7 +407,9 @@ export function createPolicy(deps: PolicyDeps): ReflexPolicy {
     return {
       confidence: safeConfidence(meta.confidence),
       latencyMs,
-      model: meta.model ?? UNKNOWN_MODEL,
+      // The verdict below is produced by the rules layer, so `model` must say
+      // rules; the model that was asked and rejected stays visible separately.
+      attemptedModel: meta.model ?? UNKNOWN_MODEL,
       usage: meta.usage ?? zeroUsage(),
       costUsd,
     };

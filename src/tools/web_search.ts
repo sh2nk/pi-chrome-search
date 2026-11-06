@@ -702,8 +702,36 @@ async function notifySearching(update: UpdateFn | undefined, engine: EngineId): 
  */
 export const TRIAGE_N_THRESHOLD = 10;
 
-export function triageWanted(multiEngine: boolean, n: number): boolean {
-  return multiEngine || n > TRIAGE_N_THRESHOLD;
+/** The trigger expressions `reflex.triage.when` accepts. */
+export type TriageWhen = "multi-engine-or-n>10" | "multi-engine" | "n>10" | "always" | "never";
+
+const TRIAGE_WHEN_VALUES: ReadonlySet<string> = new Set([
+  "multi-engine-or-n>10",
+  "multi-engine",
+  "n>10",
+  "always",
+  "never",
+]);
+
+/**
+ * `reflex.triage.when` is a config expression, not decoration: a user who sets
+ * `"never"` must not pay classifier latency, and `"always"` must not silently
+ * fall back to the default. An unknown string keeps the documented default.
+ */
+export function triageWanted(when: string, multiEngine: boolean, n: number): boolean {
+  const mode = TRIAGE_WHEN_VALUES.has(when) ? (when as TriageWhen) : "multi-engine-or-n>10";
+  switch (mode) {
+    case "always":
+      return true;
+    case "never":
+      return false;
+    case "multi-engine":
+      return multiEngine;
+    case "n>10":
+      return n > TRIAGE_N_THRESHOLD;
+    default:
+      return multiEngine || n > TRIAGE_N_THRESHOLD;
+  }
 }
 
 /**
@@ -1149,7 +1177,11 @@ export function createWebSearchTool(
     // One user search = one budget. The policy also resets on a query change,
     // but an explicit reset keeps two identical searches independent.
     const reflex = deps.reflex;
-    reflex?.beginSearch?.();
+    try {
+      reflex?.beginSearch?.();
+    } catch {
+      // Telemetry plumbing must never turn a good search into a failure.
+    }
     const reflexOn = deps.config.reflex.enabled && reflex !== undefined;
 
     let order: EngineId[];
@@ -1240,7 +1272,9 @@ export function createWebSearchTool(
     // unrefined SERPs are returned, so the model can never break a working search.
     const multiEngine = merge && order.length >= 2;
     const refined =
-      reflexOn && reflex !== undefined && triageWanted(multiEngine, input.n)
+      reflexOn &&
+      reflex !== undefined &&
+      triageWanted(deps.config.reflex.triage.when, multiEngine, input.n)
         ? await refineSerps(reflex, input.q, serps, deps)
         : serps;
 

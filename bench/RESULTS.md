@@ -6,7 +6,9 @@ Command: `npm run bench` (offline replay; live is opt-in with `--limit` and not 
 
 ## Numbers
 
-| Run | recall@5 | tokens | spam leaked | results/query | p95 |
+p95 is indicative only (single-digit milliseconds of compaction work; the value moves with machine noise).
+
+| Run | recall@5 | tokens | spam leaked | results/query | p95 (indicative) |
 |---|---|---|---|---|---|
 | baseline (`--reflex off`) | 0.789 (71/90) | 8702 | 16/30 | 5 | 0.43 ms |
 | rules triage, `keep 6` (default) | 0.867 (78/90) | 8686 | 12/30 | 5 | 2.12 ms |
@@ -28,7 +30,7 @@ That is not the feature SPEC §9.4 is trying to buy (it is about dropping *irrel
 it would silently degrade every search.
 
 The honest configuration — triage that still returns the requested `n` (`keep 6` ≥ n) — keeps recall and
-halves spam leakage (16 → 12 of 30) but cuts tokens by 0.2%, so it fails the ≥20% bar.
+cuts spam leakage from 16 to 12 of 30 (−25%), but cuts tokens by only 0.2%, so it fails the ≥20% bar.
 
 Therefore:
 
@@ -38,6 +40,9 @@ Therefore:
   rules` documents how to re-measure;
 - the read-gate half of V5.6 (reads ≥30% down) has no honest offline measurement; it needs a live result
   file and is recorded as unmeasured rather than invented.
+
+Scope note: `--reflex rules` triages every replay query, including single-engine `auto` searches that the
+tool would skip, so its token delta is an **upper bound** on what wiring would save.
 
 Re-run: `npm run bench` (baseline), `node bench/run.ts --reflex rules`, then
 `node bench/run.ts --compare bench/results/<baseline>.json bench/results/<rules>.json`.

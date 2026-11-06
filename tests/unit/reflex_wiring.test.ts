@@ -307,10 +307,17 @@ test("disabled: zero reflex decisions and byte-identical output", async () => {
 });
 
 test("triage trigger: merged or n>10 only", () => {
-  assert.equal(triageWanted(false, 5), false, "a plain n=5 single-engine search stays cheap");
-  assert.equal(triageWanted(false, 10), false);
-  assert.equal(triageWanted(false, 11), true, "n above the schema ceiling still trips the rule");
-  assert.equal(triageWanted(true, 5), true);
+  assert.equal(triageWanted("multi-engine-or-n>10", false, 5), false, "a plain n=5 single-engine search stays cheap");
+  assert.equal(triageWanted("multi-engine-or-n>10", false, 10), false);
+  assert.equal(triageWanted("multi-engine-or-n>10", false, 11), true, "n above the schema ceiling still trips the rule");
+  assert.equal(triageWanted("multi-engine-or-n>10", true, 5), true);
+  // The expression is honoured, not just validated.
+  assert.equal(triageWanted("never", true, 50), false, '"never" must not pay classifier latency');
+  assert.equal(triageWanted("always", false, 5), true, '"always" must run triage even for n=5');
+  assert.equal(triageWanted("multi-engine", false, 50), false);
+  assert.equal(triageWanted("n>10", true, 5), false);
+  assert.equal(triageWanted("nonsense", false, 5), false, "an unknown value keeps the documented default");
+  assert.equal(triageWanted("nonsense", true, 5), true);
 });
 
 // ---------------------------------------------------------------------------
