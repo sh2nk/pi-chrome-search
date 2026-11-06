@@ -417,7 +417,10 @@ export function extractReadableDocument(doc: Document): ReadableDocument {
     if (INLINE_SKIP_TAGS[tag] === true) return;
     if (attr(el, "aria-hidden").toLowerCase() === "true") return;
     const ci = classAndId(el);
-    if (/(^|[-_ ])(reference|mw-ref|mw-editsection)([-_ ]|$)/.test(ci)) return;
+    // `reference` alone also matched `.reference-text`, which dropped the
+    // citation bodies and kept only "Перейти обратно" backlinks; `mw-ref` and
+    // `mw-editsection` are the navigation-shaped parts.
+    if (/(^|[-_ ])(mw-ref|mw-editsection|mw-cite-backlink)([-_ ]|$)/.test(ci)) return;
 
     if (tag === "BR") {
       appendText(out, " ");

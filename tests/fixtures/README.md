@@ -20,6 +20,12 @@ Later waves add `read-*`, `images-*`, `goto-*` and `research-*` fixtures with th
 same rules. A fixture is the *page after settle*, not a raw `curl` response:
 AI summaries are client-rendered, so the HTML must come from a real headed tab.
 
+`read-*` fixtures are ordinary article pages, not SERPs: they are `<name>.html.gz`
+only, with **no** `meta.json` — an `engine` field would have to lie. They are
+captured with `research/probes/09-capture-page.mjs`; `read-docs` (MDN),
+`read-blog` (Rust blog) and `read-wiki` (Russian Wikipedia) cover docs, code and
+Cyrillic prose with real navigation/footer boilerplate.
+
 `ai`/`assist`/`neuro` absence is a valid A/B outcome — record it as `ai: "no"`,
 never delete the fixture and never fabricate a summary.
 

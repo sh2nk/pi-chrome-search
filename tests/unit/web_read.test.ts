@@ -77,6 +77,7 @@ interface Harness {
   page: FakePage;
   rows: Record<string, unknown>[];
   pagesRequested: number;
+  pageKeys: string[];
 }
 
 function makeHarness(options: HarnessOptions = {}): Harness {
@@ -117,12 +118,14 @@ function makeHarness(options: HarnessOptions = {}): Harness {
 
   const cache: Cache = createCache({ maxEntries: 10, clock });
   let pagesRequested = 0;
+  const pageKeys: string[] = [];
   const cdp: CdpConnector = {
     async connect() {
       throw new Error("connect() is not used by web_read unit tests");
     },
-    async acquirePage(): Promise<CdpPage> {
+    async acquirePage(key): Promise<CdpPage> {
       pagesRequested += 1;
+      pageKeys.push(key);
       if (options.acquireError !== undefined) throw options.acquireError;
       return page;
     },
@@ -157,6 +160,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     get pagesRequested(): number {
       return pagesRequested;
     },
+    pageKeys,
   };
 }
 
@@ -240,6 +244,7 @@ test("reads a public page and returns Markdown plus details", async () => {
   const result = success(await run(harness, { url: "https://example.test/docs/page" }));
 
   assert.equal(harness.pagesRequested, 1);
+  assert.deepEqual(harness.pageKeys, ["read"], "a read must use its own work tab, not an engine tab");
   assert.deepEqual(harness.page.navigations(), ["https://example.test/docs/page"]);
   assert.equal(harness.page.callCount("html"), 0, "raw HTML must never be fetched");
   assert.equal(harness.page.callCount("evaluate"), 1);

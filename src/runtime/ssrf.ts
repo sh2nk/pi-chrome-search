@@ -147,10 +147,29 @@ function isPublicIpv6(groups: readonly number[]): boolean {
   if (groups.length !== 8) return false;
   const g = groups;
   if (g.every((part) => part === 0)) return false; // :: unspecified
+  const embedded = (hi: number, lo: number): number[] => [
+    (hi >> 8) & 0xff,
+    hi & 0xff,
+    (lo >> 8) & 0xff,
+    lo & 0xff,
+  ];
+
   // ::1 and the deprecated IPv4-compatible ::/96 range share this shape.
   if (g.slice(0, 5).every((part) => part === 0) && (g[5] === 0 || g[5] === 0xffff)) {
-    const mapped = [(g[6] ?? 0) >> 8, (g[6] ?? 0) & 0xff, (g[7] ?? 0) >> 8, (g[7] ?? 0) & 0xff];
-    return isPublicIpv4(mapped);
+    return isPublicIpv4(embedded(g[6] ?? 0, g[7] ?? 0));
+  }
+  // SIIT-translated `::ffff:0:a.b.c.d` hides an IPv4 address in the last two
+  // groups with a zero `ffff` group *after* the prefix (g[4] === ffff).
+  if (g[0] === 0 && g[1] === 0 && g[2] === 0 && g[3] === 0 && g[4] === 0xffff && g[5] === 0) {
+    return isPublicIpv4(embedded(g[6] ?? 0, g[7] ?? 0));
+  }
+  // NAT64 `64:ff9b::/96` and 6to4 `2002::/16` embed an IPv4 address the browser
+  // will actually reach; a private one must not slip through as "public IPv6".
+  if (g[0] === 0x64 && g[1] === 0xff9b && g[2] === 0 && g[3] === 0 && g[4] === 0 && g[5] === 0) {
+    return isPublicIpv4(embedded(g[6] ?? 0, g[7] ?? 0));
+  }
+  if (g[0] === 0x2002) {
+    return isPublicIpv4(embedded(g[1] ?? 0, g[2] ?? 0));
   }
   if (((g[0] ?? 0) & 0xfe00) === 0xfc00) return false; // fc00::/7 unique local
   if (((g[0] ?? 0) & 0xffc0) === 0xfe80) return false; // fe80::/10 link-local

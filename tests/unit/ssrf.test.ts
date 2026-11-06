@@ -256,3 +256,14 @@ test("the redirect re-check blocks a landing page the first URL never revealed",
   await expectBlocked("https://internal.example.test/", { resolve: viaName.resolve });
   await expectBlocked("file:///etc/shadow");
 });
+
+test("isPublicAddress rejects IPv6 forms that embed a private IPv4 address", () => {
+  // SIIT, NAT64 and 6to4 each carry an IPv4 address the browser will reach; a
+  // private one must not pass as "just a public IPv6".
+  for (const address of ["::ffff:0:127.0.0.1", "::ffff:0:10.0.0.1", "64:ff9b::127.0.0.1", "64:ff9b::a00:1", "2002:7f00:1::"]) {
+    assert.equal(isPublicAddress(address), false, address);
+  }
+  for (const address of ["64:ff9b::8.8.8.8", "2002:808:808::"]) {
+    assert.equal(isPublicAddress(address), true, address);
+  }
+});
