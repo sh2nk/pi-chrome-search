@@ -56,7 +56,7 @@ lane did not materialise).
 | Chars | 852 (cap 2500) |
 | Latency | 7.01 s |
 | Wall | none — no captcha, so no retry transition to record |
-| Note | the 5th organic was a `yandex.*`-hosted link and was dropped by the adapter's host rule (ads and redirects share that host); `pageCarried` stayed honest. V3.5 sets no yandex result floor |
+| Note | 4 of the organics survived the ad/redirect filters (`jsredir`, `/clck/`, promo labels); `pageCarried` stayed honest. The validator confirmed there is no result-host filter, so the earlier 'dropped by host rule' wording was wrong — corrected here. V3.5 sets no yandex result floor |
 
 ## V3.6 — artifacts on E_PARSE/E_WALL
 

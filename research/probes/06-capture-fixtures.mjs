@@ -100,7 +100,15 @@ try {
   }
 
   const ai = /Обзор от ИИ|AI Overview|Быстрый ответ|Search Assist|Нейро/i.test(text);
-  const results = (text.match(/\bh3\b/gi) ?? []).length;
+  // Count result markers in the HTML, not `h3` in innerText: text has no tags, so
+  // the earlier counter always wrote 0 and the meta contradicted the capture.
+  // This is a marker census, not the adapter's result count (ads are still in).
+  const results =
+    engine === "duckduckgo"
+      ? (html.match(/data-testid="result-title-a"/g) ?? []).length
+      : engine === "yandex"
+        ? (html.match(/OrganicTitle/g) ?? []).length
+        : (html.match(/<h3\b/gi) ?? []).length;
 
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, `${name}.html.gz`), gzip(html));
@@ -114,7 +122,9 @@ try {
         capturedAt: new Date().toISOString(),
         ai: ai ? "yes" : "no",
         results,
-        notes: wall ? "wall captured" : undefined,
+        notes: wall
+          ? "wall captured"
+          : "results = marker census in the HTML; ai = text heuristic (adapter detection is authoritative)",
         capturedWith: "research/probes/06-capture-fixtures.mjs",
       },
       null,
