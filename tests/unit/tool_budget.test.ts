@@ -45,8 +45,13 @@ const TOOL_BUDGET_CHARS = 900;
 /** PLAN V2.6: `web_search` alone is capped at 350 chars (P2-D contract). */
 const WEB_SEARCH_DESCRIPTION_MAX = 350;
 
-const tools = createTools(() => {
-  throw new Error("tool_budget: a shape probe must not resolve tool dependencies");
+const tools = createTools({
+  getDeps: () => {
+    throw new Error("tool_budget: a shape probe must not resolve tool dependencies");
+  },
+  getDoctorDeps: () => {
+    throw new Error("tool_budget: a shape probe must not resolve tool dependencies");
+  },
 });
 const webSearchTool = tools.find((tool) => tool.name === "web_search");
 if (webSearchTool === undefined) throw new Error("tool_budget: web_search is not exported by createTools");

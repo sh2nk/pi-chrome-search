@@ -13,7 +13,8 @@
  */
 
 import type { DoctorDeps, DoctorReport } from "../runtime/doctor.ts";
-import { buildDoctorReport } from "../runtime/doctor.ts";
+import { applyDoctorFix, buildDoctorReport, createEngineProbe } from "../runtime/doctor.ts";
+import { createArtifacts } from "../runtime/artifacts.ts";
 import { toFailure } from "../runtime/errors.ts";
 
 /** The slice of pi's `ExtensionCommandContext` this module needs. */
@@ -32,6 +33,44 @@ export interface DoctorCommandOptions {
 
 function parsedProbe(args: string): boolean {
   return !args.split(/\s+/).includes("--no-probe");
+}
+
+function hasFlag(args: string, flag: string): boolean {
+  return args.split(/\s+/).includes(flag);
+}
+
+/**
+ * Wire the same lazy probe the CLI uses. The deps factory may hand over a
+ * connector this command did not open (the extension's shared runtime), so the
+ * command never releases it: the probe only acquires the existing owned work
+ * tab, and the session shutdown path closes it.
+ *
+ * Artifacts get the same treatment: the extension runtime may not pass them
+ * (the command surface predates the artifact lane), but `/web-doctor --fix`
+ * must prune to retention. `createArtifacts` is stateless and touches the disk
+ * only when `size()` or `prune()` runs.
+ */
+function withDefaults(deps: DoctorDeps): DoctorDeps {
+  const probe =
+    deps.probe !== undefined || deps.connector === undefined
+      ? deps.probe
+      : createEngineProbe({
+          config: deps.config,
+          connector: deps.connector,
+          registry: deps.registry,
+          clock: deps.clock,
+        });
+  return {
+    ...deps,
+    ...(probe === undefined ? {} : { probe }),
+    artifacts:
+      deps.artifacts ??
+      createArtifacts({
+        config: deps.config,
+        clock: deps.clock,
+        ...(deps.env === undefined ? {} : { env: deps.env }),
+      }),
+  };
 }
 
 function engineSummary(report: DoctorReport): string {
@@ -62,7 +101,16 @@ export async function handleDoctorCommand(
       return;
     }
 
-    const deps = await depsFactory();
+    const deps = withDefaults(await depsFactory());
+
+    if (hasFlag(args, "--fix")) {
+      const actions = await applyDoctorFix(deps);
+      if (actions.length > 0) {
+        // One notification, not one per action: the command stays non-blocking.
+        ctx.ui.notify(`web-doctor fix: ${actions.join("; ")}`, "warning");
+      }
+    }
+
     const report = await buildDoctorReport(deps, { probe: parsedProbe(args) });
     const type = report.verdict === "ok" ? "info" : report.verdict === "degraded" ? "warning" : "error";
     ctx.ui.notify(statusLine(report), type);

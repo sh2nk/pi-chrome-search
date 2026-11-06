@@ -11,14 +11,14 @@
  *
  *  - **One probe per enabled, registered engine, sequentially.** Probing is a
  *    live browser action (SPEC §5.5): parallel probes would hammer the profile,
- *    and a probe for an engine without an adapter can only invent data. Before
- *    P3 every configured engine is therefore `unavailable` with a note, and no
- *    canaries are reported.
+ *    and a probe for an engine without an adapter can only invent data. The
+ *    probe itself is injected (`createEngineProbe` is the production factory);
+ *    the report stays offline-testable because no probe means no browser.
  *
  *  - **Probe absence is not health.** A registered adapter with no injected
- *    probe (or `--no-probe`) is `unavailable`, never `ok`: the report must not
- *    claim an engine works when nothing was exercised. P4-C injects the real
- *    probe; P5 extends `reflex` the same way.
+ *    probe (or `--no-probe`, or an unreachable CDP) is `unavailable`, never
+ *    `ok`: the report must not claim an engine works when nothing was
+ *    exercised. P4-C injects the real probe; P5 extends `reflex` the same way.
  *
  * The report is plain JSON with a fixed key order (no Maps, no class instances)
  * so `--json` output is diffable and the schema test can validate it. It never
@@ -26,13 +26,13 @@
  * are the loopback CDP endpoint the user already owns and local paths.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 
 import type { Connector, ConnectorInfo } from "../cdp/browser.ts";
-import { defaultLockPath, parseLockRecord } from "../cdp/browser.ts";
+import { defaultLockPath, parseLockRecord, pidAlive } from "../cdp/browser.ts";
 import type { CdpSource } from "../cdp/types.ts";
 import type { Config, FocusPolicy, HumanizeMode, Mode, ReflexBackend } from "../config.ts";
-import type { EngineId, EngineRegistry, WallKind } from "../engines/types.ts";
+import type { EngineId, EngineRegistry, Query, WallKind } from "../engines/types.ts";
 import { ENGINE_IDS } from "../engines/types.ts";
 import { ERROR_HINTS, type FailureDetails } from "./error-codes.ts";
 import { fail, toFailure } from "./errors.ts";
@@ -73,6 +73,104 @@ export interface EngineProbeResult {
 
 /** Injected by P4-C; absent means probes are unavailable, not that engines are fine. */
 export type EngineProbe = (id: EngineId) => Promise<EngineProbeResult>;
+
+/** Stable, non-personal query: the probe is a smoke test, not a user search. */
+export const DOCTOR_PROBE_QUERY = "pi-chrome-search doctor probe";
+
+export interface EngineProbeOptions {
+  config: Config;
+  connector: Connector;
+  registry: EngineRegistry;
+  clock: Clock;
+  /** Test seam; production keeps {@link DOCTOR_PROBE_QUERY}. */
+  query?: string;
+}
+
+/** `"auto"`/empty means "let the engine decide", never a literal sentinel (same rule as web_search). */
+function resolveProbeLocale(value: string): string | undefined {
+  const trimmed = value.trim();
+  return trimmed === "" || trimmed.toLowerCase() === "auto" ? undefined : trimmed;
+}
+
+/** Mirror `web_search`'s locale mapping so the probe exercises the same URLs a real search would. */
+function probeLocale(engine: EngineId, config: Config): Pick<Query, "lang" | "region"> {
+  switch (engine) {
+    case "google": {
+      const lang = resolveProbeLocale(config.engines.google.lang);
+      const region = resolveProbeLocale(config.engines.google.gl);
+      return {
+        ...(lang === undefined ? {} : { lang }),
+        ...(region === undefined ? {} : { region }),
+      };
+    }
+    case "duckduckgo": {
+      const region = resolveProbeLocale(config.engines.duckduckgo.kl);
+      return region === undefined ? {} : { region };
+    }
+    case "yandex": {
+      const region = resolveProbeLocale(config.engines.yandex.lr);
+      return region === undefined ? {} : { region };
+    }
+  }
+}
+
+/**
+ * The production probe: one `n=1`, summary-off search per engine through the
+ * same connector + registry the tools use.
+ *
+ * The probe never throws a browser failure at the doctor: it returns
+ * `error: { code, stage, hint }` so the report keeps the latency and the verdict
+ * mapper owns the interpretation. A wall detected after a settle timeout is
+ * promoted to `wall` — a captcha page usually fails the adapter's readiness
+ * marker before `detectWall()` is ever reached.
+ */
+export function createEngineProbe(options: EngineProbeOptions): EngineProbe {
+  const text = options.query ?? DOCTOR_PROBE_QUERY;
+
+  return async (id) => {
+    const startedAt = options.clock.now();
+    const elapsed = (): number => Math.max(0, Math.round(options.clock.now() - startedAt));
+
+    try {
+      const engine = options.registry.get(id);
+      const query: Query = { text, n: 1, summary: false, ...probeLocale(id, options.config) };
+      const page = await options.connector.acquirePage(id);
+      await page.navigate(engine.buildUrl(query));
+
+      try {
+        await engine.settle(page);
+      } catch (error) {
+        const failure = toFailure(error, { code: "E_TIMEOUT", stage: "settle" });
+        const wall =
+          failure.code === "E_TIMEOUT" || failure.code === "E_PARSE"
+            ? await engine.detectWall(page).catch(() => null)
+            : null;
+        if (wall === null) throw error;
+        return { ms: elapsed(), results: 0, ai: false, wall: wall.kind };
+      }
+
+      const wall = await engine.detectWall(page);
+      if (wall !== null) return { ms: elapsed(), results: 0, ai: false, wall: wall.kind };
+
+      const serp = await engine.extract(page, query);
+      const canaries = await engine.canaries(page).catch(() => undefined);
+      return {
+        ms: elapsed(),
+        results: serp.results.length,
+        ai: serp.ai !== undefined && serp.ai.text.trim() !== "",
+        ...(canaries === undefined ? {} : { canaries }),
+      };
+    } catch (error) {
+      const details = toFailure(error, { code: "E_CDP_UNAVAILABLE", stage: "connect" });
+      return {
+        ms: elapsed(),
+        results: 0,
+        ai: false,
+        error: { code: details.code, stage: details.stage, hint: details.hint },
+      };
+    }
+  };
+}
 
 export interface DoctorDeps {
   config: Config;
@@ -260,6 +358,130 @@ async function withDeadline<T>(task: Promise<T>, timeoutMs: number): Promise<T> 
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Safe `--fix`
+// ---------------------------------------------------------------------------
+
+export interface DoctorFixOptions {
+  /** Test seam; defaults to the signal-free `/proc` liveness check. */
+  alive?: (pid: number) => boolean;
+  /** Test seam; defaults to `fs.unlink`. */
+  remove?: (path: string) => Promise<void>;
+}
+
+function isConnected(connector: Connector | undefined): boolean {
+  if (connector === undefined) return false;
+  try {
+    return connector.isConnected();
+  } catch {
+    return false;
+  }
+}
+
+/** Connect once with the same deadline the report uses, so `--fix` cannot hang either. */
+async function boundedConnect(connector: Connector, config: Config): Promise<void> {
+  await withDeadline(connector.connect(), config.cdp.connectTimeoutMs + CONNECT_GRACE_MS);
+}
+
+/**
+ * The actions `--fix` may take (SPEC §10.3): reconnect once, close only targets
+ * this connector created (never a foreign tab), prune artifacts, and remove a
+ * lock whose owner is provably dead.
+ *
+ * It never signals a process, never launches or restarts Chrome and never
+ * touches the profile: a lock reported as `E_BUSY` was judged live by the
+ * connector itself and is left alone even if a platform cannot prove liveness.
+ * Every action is returned as a line so the CLI/tool can report what happened;
+ * a failure never aborts the run, because the report that follows is the product.
+ */
+export async function applyDoctorFix(
+  deps: DoctorDeps,
+  options: DoctorFixOptions = {},
+): Promise<string[]> {
+  const actions: string[] = [];
+  const connector = deps.connector;
+  const alive = options.alive ?? pidAlive;
+  const remove = options.remove ?? ((path: string) => unlink(path));
+  let busy = false;
+
+  if (connector !== undefined) {
+    if (!isConnected(connector)) {
+      try {
+        await boundedConnect(connector, deps.config);
+        actions.push("connected to CDP");
+      } catch (error) {
+        const details = toFailure(error, { code: "E_CDP_UNAVAILABLE", stage: "connect" });
+        if (details.code === "E_BUSY") busy = true;
+        actions.push(`connect failed: ${details.code}`);
+        // Exactly one retry (SPEC §10.3: reconnect), never a loop.
+        try {
+          await boundedConnect(connector, deps.config);
+          actions.push("reconnected to CDP once");
+        } catch (retryError) {
+          const retry = toFailure(retryError, { code: "E_CDP_UNAVAILABLE", stage: "connect" });
+          if (retry.code === "E_BUSY") busy = true;
+          actions.push(`reconnect failed: ${retry.code}`);
+        }
+      }
+    }
+
+    if (isConnected(connector)) {
+      let owned = 0;
+      try {
+        owned = connector.ownedTargets().length;
+      } catch {
+        owned = 0;
+      }
+      try {
+        // `releaseAll` closes only targets this connector created and releases its
+        // own lock; a tab the user opened can never be in that set.
+        await connector.releaseAll();
+        actions.push(owned > 0 ? `closed ${owned} owned tab(s)` : "released connector state");
+      } catch (error) {
+        const details = toFailure(error, { code: "E_CDP_DISCONNECTED", stage: "connect" });
+        actions.push(`release failed: ${details.code}`);
+      }
+
+      try {
+        await boundedConnect(connector, deps.config);
+        actions.push("reconnected to CDP once");
+      } catch (error) {
+        const details = toFailure(error, { code: "E_CDP_UNAVAILABLE", stage: "connect" });
+        if (details.code === "E_BUSY") busy = true;
+        actions.push(`reconnect failed: ${details.code}`);
+      }
+    }
+  }
+
+  if (deps.artifacts !== undefined) {
+    try {
+      const pruned = await deps.artifacts.prune();
+      actions.push(`pruned artifacts: ${pruned.removed} removed, ${pruned.kept} kept`);
+    } catch (error) {
+      const details = toFailure(error, { code: "E_CONFIG", stage: "config" });
+      actions.push(`artifact prune failed: ${details.code}`);
+    }
+  }
+
+  // A connector that answered `E_BUSY` has already judged the holder live; never
+  // override that judgement from a liveness heuristic we cannot prove.
+  if (!busy) {
+    const path = lockPathOf(connector, deps.env ?? process.env);
+    const record = await readLockRecord(path);
+    if (record !== null && record.pid !== process.pid && !alive(record.pid)) {
+      try {
+        await remove(path);
+        actions.push(`cleared stale lock (pid ${record.pid} is not running)`);
+      } catch (error) {
+        const details = toFailure(error, { code: "E_CONFIG", stage: "config" });
+        actions.push(`stale lock clear failed: ${details.code}`);
+      }
+    }
+  }
+
+  return actions;
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +709,7 @@ async function engineEntry(
   id: EngineId,
   deps: DoctorDeps,
   probeEnabled: boolean,
+  cdpStatus: CdpStatus,
 ): Promise<DoctorEngine> {
   const enabled = deps.config.engines[id].enabled;
   if (!enabled) {
@@ -514,6 +737,17 @@ async function engineEntry(
   if (!probeEnabled) {
     return { id, enabled: true, verdict: "unavailable", note: "probe skipped (--no-probe)" };
   }
+  // Without a live CDP session every probe would just repeat the same failed
+  // connect (three times, each up to connectTimeoutMs). Report the truthful
+  // reason instead of hammering discovery.
+  if (cdpStatus !== "ok") {
+    return {
+      id,
+      enabled: true,
+      verdict: "unavailable",
+      note: `probe skipped: CDP is ${cdpStatus}`,
+    };
+  }
 
   let result: EngineProbeResult;
   try {
@@ -539,7 +773,11 @@ async function engineEntry(
   };
 }
 
-async function collectEngines(deps: DoctorDeps, probeEnabled: boolean): Promise<DoctorEngine[]> {
+async function collectEngines(
+  deps: DoctorDeps,
+  probeEnabled: boolean,
+  cdpStatus: CdpStatus,
+): Promise<DoctorEngine[]> {
   const engines: DoctorEngine[] = [];
   for (const id of ENGINE_IDS) {
     let enabled = false;
@@ -549,7 +787,7 @@ async function collectEngines(deps: DoctorDeps, probeEnabled: boolean): Promise<
       // A hostile config object must not take down the doctor; report it disabled.
     }
     try {
-      engines.push(await engineEntry(id, deps, probeEnabled));
+      engines.push(await engineEntry(id, deps, probeEnabled, cdpStatus));
     } catch (error) {
       const details = toFailure(error, { code: "E_UNSUPPORTED", stage: "resolve" });
       engines.push({
@@ -640,7 +878,7 @@ export async function buildDoctorReport(
     );
   }
 
-  const engines = await collectEngines(deps, opts.probe !== false);
+  const engines = await collectEngines(deps, opts.probe !== false, cdp.status);
   const cache = readCache(deps.cache);
   const artifacts = await readArtifacts(deps.artifacts);
   const verdict = overallVerdict(cdp, engines);

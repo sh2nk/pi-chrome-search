@@ -11,10 +11,12 @@
  *    only when this process builds the connector (an injected test connector
  *    must not write into the user's agent dir).
  *
- *  - **`--fix`.** Reconnect once, close only tabs this connector owns
- *    (`releaseAll`), let `connect()` reclaim a stale lock, prune artifacts when
- *    available. It never restarts/kills Chrome and never touches a captcha
- *    (AGENTS §2 rules 2 and 6); a live foreign lock is left alone.
+ *  - **`--fix`.** The safe action set lives in `runtime/doctor.ts`
+ *    (`applyDoctorFix`): reconnect once, close only tabs this connector owns
+ *    (`releaseAll`), prune artifacts to retention, and remove a lock whose owner
+ *    is provably dead. It never signals a process, restarts/kills Chrome or
+ *    touches a captcha (AGENTS §2 rules 2 and 6); a lock the connector reports
+ *    as `E_BUSY` is left alone.
  *
  *  - **Cleanup and exit codes.** The doctor closes the window it opened before
  *    exiting, so a diagnostic does not leave an `about:blank` tab behind. Exit
@@ -34,11 +36,14 @@ import { defaultLockPath } from "../cdp/browser.ts";
 import { discoverEndpoint } from "../cdp/discovery.ts";
 import { loadConfig, resolveConfigPath } from "../config.ts";
 import type { Config } from "../config.ts";
-import { createDefaultRegistry, createEngineRegistry } from "../engines/index.ts";
+import { createDefaultRegistry } from "../engines/index.ts";
 import type { EngineRegistry } from "../engines/types.ts";
+import { createArtifacts } from "../runtime/artifacts.ts";
 import { systemClock } from "../runtime/clock.ts";
 import {
+  applyDoctorFix,
   buildDoctorReport,
+  createEngineProbe,
   renderDoctorText,
   DOCTOR_BLOCKED_EXIT_CODE,
 } from "../runtime/doctor.ts";
@@ -88,6 +93,13 @@ export interface DoctorCliDeps {
   cache?: Cache;
   artifacts?: Artifacts;
   probe?: EngineProbe;
+  /**
+   * Test seams for the safe `--fix` stale-lock reclaim. Production leaves both
+   * unset and gets `/proc` liveness plus `fs.unlink`; no code here ever signals
+   * a process.
+   */
+  alive?: (pid: number) => boolean;
+  removeLock?: (path: string) => Promise<void>;
   /** Stdout sink; defaults to `process.stdout.write`. */
   write?: (text: string) => void;
   /** Stderr sink for `--fix` notes in `--json` mode; defaults to `process.stderr.write`. */
@@ -142,97 +154,6 @@ export function parseDoctorArgs(argv: readonly string[]): DoctorCliArgs {
   }
 
   return args;
-}
-
-/**
- * `connect()` once with the same bound the report uses, so `--fix` cannot hang
- * either. The connector itself already times out the socket.
- */
-async function boundedConnect(connector: Connector, config: Config): Promise<void> {
-  const timeoutMs = config.cdp.connectTimeoutMs + 2_000;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      connector.connect(),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          const error = new Error(`the CDP connect did not settle within ${timeoutMs}ms`);
-          error.name = "TimeoutError";
-          reject(error);
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
-/**
- * `--fix` actions, in order. Each is best-effort and reported as a line; a
- * failure never aborts the run because the report that follows is the product.
- */
-async function applyFix(
-  connector: Connector,
-  config: Config,
-  artifacts: Artifacts | undefined,
-): Promise<string[]> {
-  const actions: string[] = [];
-
-  if (!connector.isConnected()) {
-    try {
-      await boundedConnect(connector, config);
-      actions.push("connected to CDP");
-    } catch (error) {
-      actions.push(`connect failed: ${toFailure(error, { code: "E_CDP_UNAVAILABLE", stage: "connect" }).code}`);
-      // Exactly one retry (SPEC §10.3: reconnect), never a loop.
-      try {
-        await boundedConnect(connector, config);
-        actions.push("reconnected to CDP once");
-      } catch (retryError) {
-        const details = toFailure(retryError, { code: "E_CDP_UNAVAILABLE", stage: "connect" });
-        actions.push(`reconnect failed: ${details.code}`);
-      }
-    }
-  }
-
-  if (connector.isConnected()) {
-    let owned = 0;
-    try {
-      owned = connector.ownedTargets().length;
-    } catch {
-      owned = 0;
-    }
-    try {
-      // `releaseAll` closes only targets this connector created and releases its
-      // own lock; orphan tabs from a crashed session are the connector's `#owned`
-      // set, never a foreign tab.
-      await connector.releaseAll();
-      actions.push(owned > 0 ? `closed ${owned} owned tab(s)` : "released connector state");
-    } catch (error) {
-      const details = toFailure(error, { code: "E_CDP_DISCONNECTED", stage: "connect" });
-      actions.push(`release failed: ${details.code}`);
-    }
-
-    try {
-      await boundedConnect(connector, config);
-      actions.push("reconnected to CDP once");
-    } catch (error) {
-      const details = toFailure(error, { code: "E_CDP_UNAVAILABLE", stage: "connect" });
-      actions.push(`reconnect failed: ${details.code}`);
-    }
-  }
-
-  if (artifacts !== undefined) {
-    try {
-      const pruned = await artifacts.prune();
-      actions.push(`pruned artifacts: ${pruned.removed} removed, ${pruned.kept} kept`);
-    } catch (error) {
-      const details = toFailure(error, { code: "E_CONFIG", stage: "config" });
-      actions.push(`artifact prune failed: ${details.code}`);
-    }
-  }
-
-  return actions;
 }
 
 function detailsOf(error: unknown): FailureDetails {
@@ -330,15 +251,15 @@ export async function runDoctorCli(
   // every engine look unregistered even after P3 shipped the adapters.
   const registry = deps.registry ?? createDefaultRegistry(config);
 
-  if (args.fix) {
-    const actions = await applyFix(connector, config, deps.artifacts);
-    if (actions.length > 0) {
-      const text = actions.map((action) => `fix: ${action}\n`).join("");
-      // JSON on stdout must stay schema-valid, so fix notes go to stderr there.
-      if (json) writeError(text);
-      else write(text);
-    }
-  }
+  // The same runtime objects the extension uses: the probe acquires an owned
+  // work tab through this connector and extracts with the real adapters. The
+  // factory itself is lazy, so `--no-probe` never touches the browser.
+  const probe: EngineProbe = deps.probe ?? createEngineProbe({ config, connector, registry, clock });
+
+  // Artifacts are reported and pruned through the same root the tools use. An
+  // injected instance (tests) always wins; nothing is created on disk until a
+  // `save()` or `prune()` actually runs.
+  const artifacts = deps.artifacts ?? createArtifacts({ config, clock, env });
 
   const doctorDeps: DoctorDeps = {
     config,
@@ -347,10 +268,23 @@ export async function runDoctorCli(
     registry,
     clock,
     ...(deps.cache === undefined ? {} : { cache: deps.cache }),
-    ...(deps.artifacts === undefined ? {} : { artifacts: deps.artifacts }),
-    ...(deps.probe === undefined ? {} : { probe: deps.probe }),
+    artifacts,
+    probe,
     env,
   };
+
+  if (args.fix) {
+    const actions = await applyDoctorFix(doctorDeps, {
+      ...(deps.alive === undefined ? {} : { alive: deps.alive }),
+      ...(deps.removeLock === undefined ? {} : { remove: deps.removeLock }),
+    });
+    if (actions.length > 0) {
+      const text = actions.map((action) => `fix: ${action}\n`).join("");
+      // JSON on stdout must stay schema-valid, so fix notes go to stderr there.
+      if (json) writeError(text);
+      else write(text);
+    }
+  }
 
   let report: DoctorReport;
   try {

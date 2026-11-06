@@ -94,7 +94,24 @@ function getRuntime(): Promise<Runtime> {
 }
 
 export default function register(pi: ExtensionAPI): void {
-  for (const tool of createTools(async () => toToolDeps(await getRuntime()))) {
+  const tools = createTools({
+    getDeps: async () => toToolDeps(await getRuntime()),
+    getDoctorDeps: async () => {
+      const runtime = await getRuntime();
+      return {
+        config: runtime.config,
+        configPath: runtime.configPath,
+        connector: runtime.connector,
+        registry: runtime.registry,
+        cache: runtime.cache,
+        artifacts: runtime.artifacts,
+        clock: runtime.clock,
+        extensionVersion: EXTENSION_VERSION,
+        nodeVersion: process.version,
+      };
+    },
+  });
+  for (const tool of tools) {
     // ToolDetails is success | failure details; pi's inference pins it to the
     // success branch of the union, so register the structural definition.
     pi.registerTool(tool as ToolDefinition);
@@ -123,6 +140,7 @@ export default function register(pi: ExtensionAPI): void {
             connector: runtime.connector,
             registry: runtime.registry,
             cache: runtime.cache,
+            artifacts: runtime.artifacts,
             clock: runtime.clock,
             extensionVersion: EXTENSION_VERSION,
             nodeVersion: process.version,
