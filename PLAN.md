@@ -503,8 +503,8 @@ hard rules were broken along the way.
 | P3 engines | `[x]` | `evidence/P3.md`, `evidence/P3-live.md` | google/ddg/yandex registered; live V3.5 pass; artifacts proven offline, live wall not provoked |
 | P4 read/images/doctor | `[x]` | `evidence/P4.md`, `evidence/P4-surface.md` | V4.1–V4.7 pass; live doctor/--fix, read and image query recorded |
 | P5 reflex | `[x]` | `evidence/P5.md`, `bench/RESULTS.md` | built and wired; bench says keep `enabled:false` (tokens −0.2% at honest keep) |
-| P6 research | `[ ]` | `evidence/P6.md` | — |
-| P7 packaging | `[ ]` | `evidence/P7.md` | — |
+| P6 research | `[x]` | `evidence/P6.md`, `bench/RESULTS-CODEMODE.md` | V6.1–V6.5 pass; three-path comparison recorded |
+| P7 packaging | `[x]` | `evidence/P7.md` | V7.1–V7.6 pass; tarball 46 files, install + load verified, final live smoke recorded |
 
 Status values: `[ ]` not started · `[~]` in progress · `[x]` gates pass · `[!]` blocked (reason
 required) · `[-]` waived (orchestrator + user approve, reason required).

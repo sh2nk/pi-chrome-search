@@ -46,3 +46,12 @@ tool would skip, so its token delta is an **upper bound** on what wiring would s
 
 Re-run: `npm run bench` (baseline), `node bench/run.ts --reflex rules`, then
 `node bench/run.ts --compare bench/results/<baseline>.json bench/results/<rules>.json`.
+
+## Codemode comparison (P6-B)
+
+`bench/RESULTS-CODEMODE.md` measures what the model reads on the same 30-query corpus through three paths
+(direct tool calls, one codemode script, one `web_research` call). Reproduce with
+`node bench/codemode.ts` (`--self-test` for its own checks). Headline: direct 391 660 chars, codemode
+98 971 (−74.7%, but that path truncates read bodies to 600 chars — at 6000 chars it costs **+8.4%**), research
+60 793 (−84.5%) with recall 0.644 vs 0.789. Recommendation there: direct by default, codemode only when the
+agent can pre-filter a large intermediate result, `web_research` when citations matter more than recall@5.

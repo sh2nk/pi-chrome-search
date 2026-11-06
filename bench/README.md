@@ -10,6 +10,8 @@ bench/
   queries.jsonl          30 RU/EN queries, 2–4 golden domains each, no personal queries
   fixtures/<class>.json  15 hand-written synthetic SERPs (3 per class) + one synthetic spam item each
   run.ts                 offline replay (+ rules triage), live run, self-test, comparison
+  codemode.ts            direct vs codemode vs web_research: output chars/calls/recall (P6-B)
+  RESULTS-CODEMODE.md    what the three paths cost the model, and the recommendation (V6.4)
   results/               local output only — never commit (see Honesty rules)
   README.md              this file
 ```
@@ -249,4 +251,35 @@ Fixtures are synthetic: no copied SERP HTML, no cookies, no profile identity fie
 6. **Do not commit `bench/results/`.** It is local output; the same run is reproducible from the
    fixtures. (Add `bench/results/` to `.gitignore` if it is not there yet.)
 7. **No new dependencies, no browser automation.** `run.ts` imports compaction and, in live
-   mode, the existing extension stack — never Playwright and never a launcher.
+   mode, the existing extension stack — never Playwright and never a launcher. `codemode.ts` adds
+   nothing either: it reuses the `linkedom` harness in `tests/helpers/dom.ts` to run the in-page
+   readability pass offline, exactly like the read fixture tests do.
+
+## 8. Codemode comparison (P6-B, V6.4)
+
+`bench/codemode.ts` answers a different question from §1: not "does the reflex help", but **what does
+the model actually read** after three ways of doing the same research job on the same queries.
+
+```bash
+node bench/codemode.ts              # aggregate + per-query report on stdout
+node bench/codemode.ts --json       # same numbers, machine-readable
+node bench/codemode.ts --self-test  # corpus, caps, determinism, honesty checks
+```
+
+| Path | Agent calls | Charged to the model |
+|---|---:|---|
+| `direct` | 3 | `web_search(q, n=5)` markdown + 2 × `web_read` at 6000 chars |
+| `codemode` | 1 | one script (796 chars, charged per query) + its returned JSON |
+| `research` | 1 | one `web_research` bundle, hard cap 2500 chars |
+
+The paths reuse production code (`src/extract/compact.ts`, `src/extract/read.ts`, the real
+`createWebResearchTool` with injected seams, `reflex.enabled:false`). No model, no network, no Chrome:
+a codemode run without an agent loop cannot be measured, so the harness measures deterministic output
+characters instead and says so. Read payloads are served from the three committed read fixtures
+(`read-docs` / `read-blog` / `read-wiki`) through the real readability pass, mapped by domain — that
+measures the cost shape of a page read, not that URL's content.
+
+Numbers, the read-head sensitivity that decides the verdict, and the recommendation live in
+[`RESULTS-CODEMODE.md`](./RESULTS-CODEMODE.md). The headline: codemode's saving is the 90 % of every
+page the script throws away *before any model sees it*; `web_research` is the cheaper one-call path for
+evidence-shaped questions; plain `web_search` stays the default. `codemode` is never required.
