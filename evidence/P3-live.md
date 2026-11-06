@@ -22,7 +22,9 @@ Two runs of the same query, because the first one found a real bug.
 | | Sources | `ru.wikipedia.org`, `bigdataschool.ru`, `huggingface.co`, `contest.yandex.ru`, `deepmachinelearning.ru` |
 | | Results | `ru.wikipedia.org`, `habr.com`, `deepmachinelearning.ru`, `contest.yandex.ru`, `huggingface.co` — direct URLs, `/goto` wrappers resolved by the tool layer |
 
-The second run is the gate: `ai:yes` with a real overview, ≥5 results, ≤2500 chars. The first run is kept
+The second run is the gate: `ai:yes` with a real overview, ≥5 results, ≤2500 chars. A third run after the
+wall/AI evidence repair (`fix(google)`) still returned `ai:yes`, 5 results, 2500 chars in 4.53 s with the same
+1092-char prose — the stricter "label must be a heading" rule did not cost the live overview. The first run is kept
 here because "it worked offline" is not the same as "it works on the live DOM", and the fixture could not
 reproduce it (the capture strips `<style>` before storing).
 
@@ -43,6 +45,11 @@ reproduce it (the capture strips `<style>` before storing).
 First live page after the navigate rewrite: commit-then-readiness resolved without a load-event timeout, and
 the settle marker/selector combination from the adapter was found on the real SERP (the risk flagged by the
 lane did not materialise).
+
+Re-run after the wall-aware settle repair (`fix(duckduckgo)`): `ok`, 5 results, 1406 chars, 6.34 s, **`ai:no`**
+— the Search Assist block was not rendered/extracted on that page load. DDG assist is A/B, `ai:no` is a
+normal outcome (SPEC §6.3), and the fixture test still proves extraction when the block is present; recorded
+rather than papered over.
 
 ## V3.5 (c) — Yandex live
 
