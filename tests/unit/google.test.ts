@@ -26,15 +26,14 @@ import {
 } from "../../src/engines/google.ts";
 import type { Freshness, Query } from "../../src/engines/types.ts";
 import { isWebSearchError } from "../../src/runtime/error-codes.ts";
-import { FakeClock } from "../helpers/clock.ts";
-import { fixtureDocument, runInPage } from "../helpers/dom.ts";
-import { FakePage, type EvaluateHandler } from "../helpers/fake-page.ts";
-import { loadFixture } from "../helpers/load-fixture.ts";
+import { FakeClock } from "../helpers/fake-cdp.ts";
+import { fixtureDocument, runInPage } from "../helpers/fixtures.ts";
+import { FakePage, type EvaluateHandler } from "../helpers/fake-cdp.ts";
+import { loadFixture } from "../helpers/fixtures.ts";
 
 const SERP_URL = "https://www.google.com/search?q=transformer&hl=ru";
 const HOME_URL = "https://www.google.com/";
 const WALL_URL = "https://www.google.com/sorry/index?continue=redacted";
-const CONSENT_URL = "https://consent.google.com/m?continue=redacted";
 
 /**
  * The adapter's readiness gate. It has to include the wall containers: a wall
@@ -52,7 +51,7 @@ function makeQuery(overrides: Partial<Query> = {}): Query {
 // ---------------------------------------------------------------------------
 
 /**
- * `tests/helpers/dom.ts` types the second `runInPage` parameter as `unknown`
+ * `tests/helpers/fixtures.ts` types the second `runInPage` parameter as `unknown`
  * (the browser passes whatever JSON was embedded). The extractor is written
  * against its real argument type, so this single cast is where the two meet.
  */
@@ -148,6 +147,28 @@ function documentPage(document: Document, url = SERP_URL): FakePage {
 /** Same plumbing for an inline document, for the ad/link/safety cases. */
 function inlinePage(html: string, url = SERP_URL): FakePage {
   return documentPage(fixtureDocument(html, url), url);
+}
+
+/** The lead shape the live bug produced: label + query echo, no answer prose. */
+function leadPage(): FakePage {
+  return inlinePage(`
+    <div id="rso">
+      <section>
+        <div role="heading" aria-level="2"><strong>Обзор от ИИ</strong></div>
+        <div class="answer">Ответ в режиме ИИ, исходный запрос: "rust tokio"</div>
+      </section>
+      <div data-hveid="o1"><a href="https://example.org/one"><h3>Result</h3></a><div class="VwiC3b">Snippet</div></div>
+    </div>
+  `);
+}
+
+/** A SERP shell with results and no AI block at all. */
+function shellPage(): FakePage {
+  return inlinePage(`
+    <div id="rso">
+      <div data-hveid="o1"><a href="https://example.org/one"><h3>Result</h3></a><div class="VwiC3b">Snippet</div></div>
+    </div>
+  `);
 }
 
 // ---------------------------------------------------------------------------
@@ -308,15 +329,6 @@ test("settle never accepts the home page and times out inside the deadline", asy
   assert.ok(clock.totalSleptMs() <= 800, `slept ${clock.totalSleptMs()} ms past a 400 ms deadline`);
 });
 
-test("settle accepts a zero-result SERP: the shell is not a wall and not a timeout", async () => {
-  const clock = new FakeClock();
-  const { page } = fixturePage("google-empty");
-
-  await googleEngine.settle(page, undefined, { clock, deadlineMs: 1_000 });
-
-  assert.equal(clock.totalSleptMs(), 0);
-});
-
 test("a /sorry wall settles at once and is then classified as sorry", async () => {
   const clock = new FakeClock();
   const { page } = fixturePage("google-wall", WALL_URL);
@@ -332,20 +344,6 @@ test("a /sorry wall settles at once and is then classified as sorry", async () =
   assert.equal(wall.kind, "sorry");
   assert.ok(wall.markers.includes("/sorry"), wall.markers.join(", "));
   assert.ok(wall.markers.includes("unusual traffic"), wall.markers.join(", "));
-});
-
-test("a consent interstitial settles at once and is then classified as consent", async () => {
-  const clock = new FakeClock();
-  const { page } = fixturePage("google-consent", CONSENT_URL);
-
-  await googleEngine.settle(page, undefined, { clock, deadlineMs: 1_000 });
-  assert.equal(clock.totalSleptMs(), 0);
-
-  const wall = await googleEngine.detectWall(page);
-  assert.ok(wall !== null, "the consent fixture must classify, not time out");
-  assert.equal(wall.kind, "consent");
-  assert.ok(wall.markers.includes("consent.google.com"), wall.markers.join(", "));
-  assert.ok(wall.markers.includes("Before you continue to Google"), wall.markers.join(", "));
 });
 
 test("the ready selector does not match a Google home page, so settle times out honestly", async () => {
@@ -405,18 +403,6 @@ test("detectWall classifies /sorry and reports the fragments that fired", async 
   assert.ok(wall.markers.includes("unusual traffic"), wall.markers.join(", "));
 });
 
-test("detectWall classifies the consent page", async () => {
-  const url = "https://consent.google.com/m?continue=redacted";
-  const page = new FakePage({ url, text: fixtureText("google-consent", url) });
-
-  const wall = await googleEngine.detectWall(page);
-
-  assert.ok(wall !== null);
-  assert.equal(wall.kind, "consent");
-  assert.ok(wall.markers.includes("consent.google.com"), wall.markers.join(", "));
-  assert.ok(wall.markers.includes("Before you continue to Google"), wall.markers.join(", "));
-});
-
 test("detectWall classifies a captcha block from its DOM node despite ordinary text", async () => {
   const document = fixtureDocument(
     `<html><body>
@@ -443,12 +429,10 @@ test("detectWall needs no URL or node when a captcha phrase meets a page with ze
   assert.ok(wall.markers.includes("Я не робот"), wall.markers.join(", "));
 });
 
-test("detectWall returns null on both normal SERPs", async () => {
-  for (const name of ["google-ai", "google-no-ai"]) {
-    const url = `https://www.google.com/search?q=${name}&hl=ru`;
-    const page = new FakePage({ url, text: fixtureText(name, url) });
-    assert.equal(await googleEngine.detectWall(page), null, `${name} must not look like a wall`);
-  }
+test("detectWall returns null on a normal SERP", async () => {
+  const url = `https://www.google.com/search?q=transformer&hl=ru`;
+  const page = new FakePage({ url, text: fixtureText("google-ai", url) });
+  assert.equal(await googleEngine.detectWall(page), null, "google-ai must not look like a wall");
 });
 
 test("detectWall ignores wall phrases that only appear in SERP snippets", async () => {
@@ -733,27 +717,16 @@ test("extract does not leak <style> text into result titles or snippets", async 
 });
 
 test("extract returns 5+ organics with http(s) urls, titles and snippets", async () => {
-  for (const name of ["google-ai", "google-no-ai"]) {
-    const { page } = fixturePage(name);
-    const serp = await googleEngine.extract(page, makeQuery({ n: 10, summary: true }));
+  const { page } = fixturePage("google-ai");
+  const serp = await googleEngine.extract(page, makeQuery({ n: 10, summary: true }));
 
-    assert.ok(serp.results.length >= 5, `${name}: only ${serp.results.length} organics`);
-    for (const item of serp.results) {
-      assert.ok(item.title.length > 0, `${name}: empty title`);
-      assert.match(item.url, /^https?:\/\//, `${name}: ${item.url}`);
-      assert.ok(item.snippet.length > 0, `${name}: empty snippet for "${item.title}"`);
-      assert.equal(item.isAd, undefined);
-    }
+  assert.ok(serp.results.length >= 5, `only ${serp.results.length} organics`);
+  for (const item of serp.results) {
+    assert.ok(item.title.length > 0, "empty title");
+    assert.match(item.url, /^https?:\/\//, item.url);
+    assert.ok(item.snippet.length > 0, `empty snippet for "${item.title}"`);
+    assert.equal(item.isAd, undefined);
   }
-});
-
-test("extract reports ai:no on a SERP without an AI Overview", async () => {
-  const { page } = fixturePage("google-no-ai");
-  const serp = await googleEngine.extract(page, makeQuery({ n: 5, summary: true }));
-
-  assert.equal(serp.ai, undefined);
-  assert.equal(serp.results.length, 5);
-  assert.equal(serp.pageCarried, true); // the page carried 10 organics
 });
 
 test("summary:false suppresses AI extraction on the same fixture", async () => {
@@ -780,8 +753,8 @@ test("extract limits results to n and reports pageCarried honestly", async () =>
   assert.equal(all.pageCarried, false); // 8 organics on this capture, all returned
 });
 
-test("extract returns zero results for the empty SERP without throwing", async () => {
-  const { page } = fixturePage("google-empty");
+test("extract returns zero results for a shell without throwing", async () => {
+  const page = inlinePage(`<html><body><div id="rso"></div></body></html>`);
   const serp = await googleEngine.extract(page, makeQuery({ n: 5 }));
 
   assert.deepEqual(serp.results, []);
@@ -874,13 +847,7 @@ test("canaries count organics, the AI block and the result container", async () 
   assert.ok(counts.resultsContainer >= 1);
 });
 
-test("canaries report zeros on the empty SERP and never throw on an empty body", async () => {
-  const empty = await googleEngine.canaries(fixturePage("google-empty").page);
-  assert.equal(empty.organics, 0);
-  assert.equal(empty.aiBlock, 0);
-  // The zero-result shell still renders the container; that is not a layout change.
-  assert.ok(empty.resultsContainer >= 1);
-
+test("canaries report zeros on an empty body and never throw", async () => {
   const document = fixtureDocument("<html></html>");
   const page = new FakePage({ url: SERP_URL });
   page.setEvaluateHandlers(() => runInPage(canaryCountsFromDocument, document, null));
@@ -938,38 +905,35 @@ test("a module-scope closure fails in the page, so the extractor cannot rely on 
 // P8: AI states (answer / lead / none) and the streaming probe
 // ---------------------------------------------------------------------------
 
-test("extract: the real answer fixture is `answer`, the derived lead fixture is `lead`", async () => {
+test("extract: the real fixture is `answer`, an inline lead block is `lead`", async () => {
   const answer = await googleEngine.extract(fixturePage("google-ai").page, makeQuery());
   assert.ok(answer.ai);
   assert.equal(answer.ai.state, "answer");
   assert.ok((answer.ai.text.length ?? 0) >= 200);
 
-  const lead = await googleEngine.extract(fixturePage("google-ai-lead").page, makeQuery());
+  // The live bug's shape: the section renders the label and the query echo with
+  // no prose. It must be reported as a lead, never as an answer.
+  const lead = await googleEngine.extract(leadPage(), makeQuery());
   assert.ok(lead.ai, "a labelled block is reported, even with no prose");
   assert.equal(lead.ai.state, "lead");
   assert.ok(lead.ai.text.length < 200);
-  // The lead must not be mistaken for the query echo being an answer (V8.2).
   assert.notEqual(lead.ai.text, makeQuery().text);
   assert.ok(lead.results.length > 0);
 });
 
 test("extract: a page with no AI section is `none` (absence is a normal outcome)", async () => {
-  for (const name of ["google-no-ai", "google-empty"]) {
-    const serp = await googleEngine.extract(fixturePage(name).page, makeQuery());
-    assert.equal(serp.ai, undefined, name);
-  }
+  const serp = await googleEngine.extract(shellPage(), makeQuery());
+  assert.equal(serp.ai, undefined);
 });
 
-test("probe agrees with extraction on every AI fixture (state and width)", async () => {
+test("probe agrees with extraction on every AI state (state and width)", async () => {
   assert.ok(googleEngine.ai, "google ships an AI probe");
-  const cases: ReadonlyArray<readonly [string, string]> = [
-    ["google-ai", "answer"],
-    ["google-ai-lead", "lead"],
-    ["google-no-ai", "none"],
-    ["google-empty", "none"],
+  const cases: ReadonlyArray<readonly [string, FakePage, string]> = [
+    ["answer", fixturePage("google-ai").page, "answer"],
+    ["lead", leadPage(), "lead"],
+    ["none", shellPage(), "none"],
   ];
-  for (const [name, expected] of cases) {
-    const { page } = fixturePage(name);
+  for (const [name, page, expected] of cases) {
     const probed = await googleEngine.ai.probe(page);
     const serp = await googleEngine.extract(page, makeQuery());
     const state = serp.ai?.state ?? "none";

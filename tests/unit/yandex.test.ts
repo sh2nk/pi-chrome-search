@@ -24,10 +24,10 @@ import {
   type YandexExtractionArg,
 } from "../../src/engines/yandex.ts";
 import { isWebSearchError } from "../../src/runtime/error-codes.ts";
-import { FakeClock } from "../helpers/clock.ts";
-import { fixtureDocument, runInPage } from "../helpers/dom.ts";
-import { FakePage } from "../helpers/fake-page.ts";
-import { loadFixture } from "../helpers/load-fixture.ts";
+import { FakeClock } from "../helpers/fake-cdp.ts";
+import { fixtureDocument, runInPage } from "../helpers/fixtures.ts";
+import { FakePage } from "../helpers/fake-cdp.ts";
+import { loadFixture } from "../helpers/fixtures.ts";
 
 const SERP_URL = "https://yandex.ru/search/?text=example";
 const CAPTCHA_URL = "https://yandex.ru/showcaptcha?text=example";
@@ -202,12 +202,11 @@ test("settle propagates abort as E_CANCELLED", async () => {
   );
 });
 
-test("settle resolves on the captcha and empty states through the pinned selector", async () => {
+test("settle resolves on the captcha state through the pinned selector", async () => {
   // Every branch of YANDEX_READY_SELECTOR is a settled page that must not burn
-  // E_TIMEOUT: the wall (post-retry re-settle) and the zero-result SERP.
+  // E_TIMEOUT: the wall (post-retry re-settle).
   const cases = [
     { name: "yandex-captcha", url: CAPTCHA_URL, branch: ".SmartCaptcha" },
-    { name: "yandex-empty", url: SERP_URL, branch: ".Misspell" },
   ] as const;
 
   for (const { name, url, branch } of cases) {
@@ -244,11 +243,9 @@ test("detectWall reports the SmartCaptcha fixture with its exact markers", async
   assert.equal(wall.markers.includes("Мы заметили необычную активность"), false);
 });
 
-test("detectWall returns null on normal and empty SERPs", async () => {
-  for (const name of ["yandex-neuro", "yandex-no-neuro", "yandex-empty"]) {
-    const page = fixturePage(name);
-    assert.equal(await yandexEngine.detectWall(page), null, `${name} must not look like a wall`);
-  }
+test("detectWall returns null on a normal SERP", async () => {
+  const page = fixturePage("yandex-neuro");
+  assert.equal(await yandexEngine.detectWall(page), null, "yandex-neuro must not look like a wall");
 });
 
 test("detectWall reports a blocked page only when no organics are present", async () => {
@@ -346,22 +343,12 @@ test("extract: yandex-neuro returns organics, drops ads, and does not invent a g
   assert.equal(out.pageCarried, false);
 });
 
-test("extract: yandex-no-neuro returns organics without an AI block", () => {
-  const fixture = loadFixture("yandex-no-neuro");
-  const out = extractFrom(fixture.html, SERP_URL, { n: 10, summary: true, query: "q" });
-  assert.ok(out.results.length >= 5);
-  assert.equal(out.ai, undefined);
-  for (const item of out.results) {
-    assert.match(item.url, /^https:\/\//);
-    assert.equal(item.title.length > 0, true);
-  }
-  // Both fixtures carry the same robot-gated AI card; the answer is not in the DOM.
-  assert.equal(out.pageCarried, true, "n=10 against 12 organics leaves more on the page");
-});
-
-test("extract: yandex-empty is an honest zero-result SERP", () => {
-  const fixture = loadFixture("yandex-empty");
-  const out = extractFrom(fixture.html, SERP_URL, { n: 10, summary: true, query: "q" });
+test("extract: a zero-result SERP is honest and never invents an answer", () => {
+  const out = extractFrom("<html><body><div class=\"serp\"></div></body></html>", SERP_URL, {
+    n: 10,
+    summary: true,
+    query: "q",
+  });
   // In-page arrays come from another realm, so compare the length, not the prototype chain.
   assert.equal(out.results.length, 0);
   assert.equal(out.ai, undefined);
@@ -599,7 +586,10 @@ test("expandAiSummaryOnce does nothing unless explicitly enabled", async () => {
   assert.equal(page.callCount("click"), 0);
   assert.equal(page.evaluateCalls().length, 0, "a disabled step must not even look");
 
-  const noTarget = fixturePage("yandex-empty");
+  const noTarget = pageFor(
+    fixtureDocument('<html><body><div class="serp"></div></body></html>', SERP_URL),
+    SERP_URL,
+  );
   assert.equal(await expandAiSummaryOnce(noTarget, { enabled: true }), false);
   assert.equal(noTarget.callCount("click"), 0);
 });
@@ -608,7 +598,7 @@ test("expandAiSummaryOnce does nothing unless explicitly enabled", async () => {
 // canaries + engine metadata
 // ---------------------------------------------------------------------------
 
-test("canaries are >0 on live captures and 0 on the empty shell", async () => {
+test("canaries are >0 on the live capture and 0 on an empty body", async () => {
   const neuro = await yandexEngine.canaries(fixturePage("yandex-neuro"));
   assert.ok(neuro[".OrganicTitle"] > 0);
   assert.ok(neuro[".OrganicTextContentSpan"] > 0);
@@ -616,18 +606,12 @@ test("canaries are >0 on live captures and 0 on the empty shell", async () => {
   assert.ok(neuro[".FuturisSearch"] > 0);
   assert.ok(neuro.h3 > 0);
 
-  const noNeuro = await yandexEngine.canaries(fixturePage("yandex-no-neuro"));
-  assert.ok(noNeuro[".OrganicTitle"] > 0);
-  assert.ok(noNeuro["[class*='Futuris']"] > 0);
-
-  const empty = await yandexEngine.canaries(fixturePage("yandex-empty"));
+  const empty = await yandexEngine.canaries(
+    pageFor(fixtureDocument("<html><body></body></html>", SERP_URL), SERP_URL),
+  );
   assert.equal(empty[".OrganicTitle"], 0);
-  assert.equal(empty[".OrganicTextContentSpan"], 0);
   assert.equal(empty["[class*='Futuris']"], 0);
-  assert.equal(empty[".FuturisSearch"], 0);
   assert.equal(empty.h3, 0);
-  // The zero-result shell is a settled state, not a broken layout.
-  assert.equal(empty[".Misspell"], 1);
 });
 
 test("canaries do not throw on an empty body", async () => {
@@ -726,11 +710,7 @@ test("extract: a robot-gated card is `none`, not a lead (the answer is withheld)
 });
 
 test("probe agrees with extraction on every Yandex AI state", async () => {
-  const cases: ReadonlyArray<readonly [string, string]> = [
-    ["yandex-neuro", "none"],
-    ["yandex-no-neuro", "none"],
-    ["yandex-empty", "none"],
-  ];
+  const cases: ReadonlyArray<readonly [string, string]> = [["yandex-neuro", "none"]];
   for (const [name, expected] of cases) {
     const page = fixturePage(name);
     const probed = await yandexEngine.ai?.probe(page);

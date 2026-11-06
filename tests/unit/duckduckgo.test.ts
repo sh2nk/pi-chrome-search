@@ -28,10 +28,10 @@ import {
 } from "../../src/engines/duckduckgo.ts";
 import type { Query } from "../../src/engines/types.ts";
 import { isWebSearchError } from "../../src/runtime/error-codes.ts";
-import { FakeClock } from "../helpers/clock.ts";
-import { fixtureDocument, runInPage } from "../helpers/dom.ts";
-import { FakePage, type EvaluateHandler } from "../helpers/fake-page.ts";
-import { loadFixture } from "../helpers/load-fixture.ts";
+import { FakeClock } from "../helpers/fake-cdp.ts";
+import { fixtureDocument, runInPage } from "../helpers/fixtures.ts";
+import { FakePage, type EvaluateHandler } from "../helpers/fake-cdp.ts";
+import { loadFixture } from "../helpers/fixtures.ts";
 
 const SERP_URL = "https://duckduckgo.com/?q=example&kl=ru-ru";
 const LIVE_FIXTURES = ["ddg-assist", "ddg-no-assist"] as const;
@@ -329,8 +329,8 @@ test("settle recognises the anomaly URL and the weak traffic marker too", async 
 // detectWall
 // ---------------------------------------------------------------------------
 
-test("detectWall returns null on every normal fixture (including the empty one)", async () => {
-  for (const name of [...LIVE_FIXTURES, "ddg-empty"] as const) {
+test("detectWall returns null on every normal fixture", async () => {
+  for (const name of LIVE_FIXTURES) {
     const { page } = pageForFixture(name);
     assert.equal(await duckduckgoEngine.detectWall(page), null, `${name} must not be a wall`);
   }
@@ -494,8 +494,8 @@ test("extract skips every supported result-badge label and keeps unrelated badge
   assert.deepEqual(Array.from(serp.results, (result) => result.title), ["Organic kept"]);
 });
 
-test("extract on the empty fixture returns zero results without crashing", () => {
-  const doc = fixtureDocumentFor("ddg-empty");
+test("extract on an empty document returns zero results without crashing", () => {
+  const doc = fixtureDocument("<html><body><p>DuckDuckGo</p></body></html>", SERP_URL);
   const serp = extract(doc, { n: 10, summary: true, query: "example" });
 
   assert.equal(serp.results.length, 0);
@@ -637,7 +637,7 @@ test("canaries count result/snippet/article/assist selectors on live fixtures", 
 });
 
 test("canaries are all zero on the empty fixture and on an empty body (no throw)", async () => {
-  for (const doc of [fixtureDocumentFor("ddg-empty"), fixtureDocument("<html><body></body></html>")]) {
+  for (const doc of [fixtureDocument("<html><body></body></html>")]) {
     const page = new FakePage({ url: SERP_URL, text: "", evaluate: countEvaluator(doc) });
     const counts = await duckduckgoEngine.canaries(page);
     for (const key of CANARY_KEYS) assert.equal(counts[key], 0, key);
@@ -705,18 +705,20 @@ function enginePageFrom(doc: Document): FakePage {
 
 test("probe agrees with extraction on answer, lead and none", async () => {
   assert.ok(duckduckgoEngine.ai, "duckduckgo ships an AI probe");
-  const cases: ReadonlyArray<readonly [string, string]> = [
-    ["ddg-assist", "answer"],
-    ["ddg-no-assist", "answer"],
-    ["ddg-assist-lead", "lead"],
-    ["ddg-no-assist-missing", "none"],
+  const cases: ReadonlyArray<readonly [string, string, Document]> = [
+    ["ddg-assist", "answer", fixtureDocumentFor("ddg-assist")],
+    ["ddg-no-assist", "answer", fixtureDocumentFor("ddg-no-assist")],
+    [
+      "lead",
+      "lead",
+      fixtureDocument(
+        '<html><body><div data-testid="duckassist-answer-content"><span>Search Assist</span></div></body></html>',
+        SERP_URL,
+      ),
+    ],
+    ["none", "none", fixtureDocument("<html><body></body></html>", SERP_URL)],
   ];
-  for (const [name, expected] of cases) {
-    // `ddg-no-assist-missing` is not a fixture: it is the empty fixture below.
-    const doc =
-      name === "ddg-no-assist-missing"
-        ? fixtureDocumentFor("ddg-empty")
-        : fixtureDocumentFor(name);
+  for (const [name, expected, doc] of cases) {
     const page = enginePageFrom(doc);
     const probed = await duckduckgoEngine.ai.probe(page);
     const serp = await duckduckgoEngine.extract(page, query({ n: 5, summary: true }));
@@ -727,9 +729,14 @@ test("probe agrees with extraction on answer, lead and none", async () => {
   }
 });
 
-test("probe on the derived lead fixture reports a lead with zero answer chars", async () => {
+test("probe on a toggle-only assist block reports a lead with zero answer chars", async () => {
   assert.ok(duckduckgoEngine.ai);
-  const page = enginePageFrom(fixtureDocumentFor("ddg-assist-lead"));
+  const page = enginePageFrom(
+    fixtureDocument(
+      '<html><body><div data-testid="duckassist-answer-content"><span>Search Assist</span></div></body></html>',
+      SERP_URL,
+    ),
+  );
   const probed = await duckduckgoEngine.ai.probe(page);
   assert.deepEqual(probed, { state: "lead", chars: 0 });
 });

@@ -1,36 +1,46 @@
+/**
+ * CDP discovery and the per-slot read lock.
+ *
+ * Discovery is the only way in: env URL → env ports → `DevToolsActivePort` in
+ * the profile dirs → configured port scan, loopback only. The lock is what keeps
+ * two concurrent reads off one tab.
+ */
+
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { type DevToolsActivePortEndpoint, type DevToolsActivePortResult, type DiscoverOptions, type FetchJson, type ReadTextFile, discoverEndpoint, parseDevToolsActivePort } from "../../src/cdp/discovery.ts";
+import { createKeyedLock, pageLockFor, readSlotKeys } from "../../src/cdp/page-lock.ts";
+import { type ErrorCode, WebSearchError, isWebSearchError } from "../../src/runtime/error-codes.ts";
 
-import {
-  discoverEndpoint,
-  parseDevToolsActivePort,
-  type DevToolsActivePortEndpoint,
-  type DevToolsActivePortResult,
-  type DiscoverOptions,
-  type FetchJson,
-  type ReadTextFile,
-} from "../../src/cdp/discovery.ts";
-import {
-  WebSearchError,
-  isWebSearchError,
-  type ErrorCode,
-} from "../../src/runtime/error-codes.ts";
-
-const FIXTURES = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "fixtures",
-  "devtools-active-port",
-);
-
+// ---------------------------------------------------------------------------
+// from tests/unit/discovery.test.ts
+// ---------------------------------------------------------------------------
+{
 const VALID_PATH = "/devtools/browser/5f0c9a52-1d3e-4b7a-9c6e-0a1b2c3d4e5f";
 const VALID_WS = `ws://127.0.0.1:9222${VALID_PATH}`;
 
+/**
+ * Sanitized shapes of `DevToolsActivePort`, inlined: one file per Chrome quirk
+ * (CRLF, blank lines, a missing/invalid path, a NUL byte). No fixture directory,
+ * so the file shape stays next to the assertions that read it.
+ */
+const PORT_FILES: Readonly<Record<string, string>> = {
+  "valid.txt": `9222\n${VALID_PATH}\n`,
+  "valid-crlf.txt": `9222\r\n/devtools/browser/8a7b6c5d-4e3f-2a1b-0c9d-8e7f6a5b4c3d\r\n`,
+  "blank-lines.txt": `\n9223\n\n/devtools/browser/8a7b6c5d-4e3f-2a1b-0c9d-8e7f6a5b4c3d\n\n`,
+  "path-without-slash.txt": `9224\ndevtools/browser/5f0c9a52-1d3e-4b7a-9c6e-0a1b2c3d4e5f\n`,
+  "non-numeric-port.txt": `not-a-port\n${VALID_PATH}\n`,
+  "out-of-range-port.txt": `70000\n${VALID_PATH}\n`,
+  "missing-path.txt": `9222\n`,
+  "invalid-path.txt": `9225\n/devtools/browser/has space\n`,
+  "control-char-path.txt": `9222\n${VALID_PATH}\0tail\n`,
+};
+
 function fixture(name: string): string {
-  return readFileSync(join(FIXTURES, name), "utf8");
+  const value = PORT_FILES[name];
+  assert.ok(value !== undefined, `unknown DevToolsActivePort fixture: ${name}`);
+  return value;
 }
 
 function versionPayload(wsUrl: string): unknown {
@@ -679,3 +689,144 @@ test("a DevToolsActivePort file with env {} wins with zero HTTP probes", async (
   assert.equal(calls.length, 0, "the file is authoritative: no HTTP is allowed");
   assert.deepEqual(opened, [join(dir, "DevToolsActivePort")]);
 });
+}
+
+// ---------------------------------------------------------------------------
+// from tests/unit/page_lock.test.ts
+// ---------------------------------------------------------------------------
+{
+/**
+ * P9-A: the keyed FIFO page lock.
+ *
+ * The lock is the only thing standing between two concurrent `web_read` calls
+ * and one shared tab, so the tests are about *timing*: strict FIFO order, no
+ * overlap inside a key, full parallelism across keys, and no leaked waiter when
+ * a task throws or a caller is aborted.
+ */
+
+
+
+/** Resolve on the next macrotask, so `Promise.all` really interleaves. */
+function tick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+test("same key runs one task at a time, in arrival order", async () => {
+  const lock = createKeyedLock();
+  const events: string[] = [];
+
+  const make = (id: string) => async (): Promise<void> => {
+    events.push(`start ${id}`);
+    await tick();
+    events.push(`end ${id}`);
+  };
+
+  await Promise.all([
+    lock.run("read", make("a")),
+    lock.run("read", make("b")),
+    lock.run("read", make("c")),
+  ]);
+
+  assert.deepEqual(events, [
+    "start a",
+    "end a",
+    "start b",
+    "end b",
+    "start c",
+    "end c",
+  ]);
+});
+
+test("different keys run in parallel", async () => {
+  const lock = createKeyedLock();
+  const events: string[] = [];
+
+  await Promise.all([
+    lock.run("read", async () => {
+      events.push("a start");
+      await tick();
+      events.push("a end");
+    }),
+    lock.run("read#2", async () => {
+      events.push("b start");
+      await tick();
+      events.push("b end");
+    }),
+  ]);
+
+  assert.deepEqual(events.slice(0, 2), ["a start", "b start"], "slots must not serialise each other");
+});
+
+test("a throwing task releases the queue and rejects only its own caller", async () => {
+  const lock = createKeyedLock();
+  const order: string[] = [];
+
+  const failing = lock.run("read", async () => {
+    order.push("fail");
+    throw new Error("boom");
+  });
+  const after = lock.run("read", async () => {
+    order.push("after");
+    return "ok";
+  });
+
+  await assert.rejects(failing, /boom/);
+  assert.equal(await after, "ok");
+  assert.deepEqual(order, ["fail", "after"]);
+  assert.equal(lock.pending(), 0);
+});
+
+test("pending() counts queued and running tasks, then returns to zero", async () => {
+  const lock = createKeyedLock();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  const first = lock.run("read", async () => {
+    await gate;
+  });
+  const second = lock.run("read", async () => {});
+
+  assert.equal(lock.pending("read"), 2);
+  assert.equal(lock.pending(), 2);
+
+  release();
+  await Promise.all([first, second]);
+  assert.equal(lock.pending("read"), 0);
+  assert.equal(lock.pending(), 0, "a released lock must not leak into the next session");
+});
+
+test("pick() returns the least-loaded key and keeps caller order on ties", () => {
+  const lock = createKeyedLock();
+  const keys = ["read", "read#2", "read#3"];
+
+  assert.equal(lock.pick(keys), "read");
+  assert.equal(lock.pick(["read#2", "read#3"]), "read#2");
+
+  // A queued task makes its key less attractive; this is what keeps two
+  // simultaneous readers on different slots instead of behind one tab.
+  void lock.run("read", async () => {
+    await tick();
+  });
+  assert.equal(lock.pick(keys), "read#2");
+});
+
+test("pageLockFor() is per connector and stable across calls", () => {
+  const one = {};
+  const two = {};
+  assert.equal(pageLockFor(one), pageLockFor(one));
+  assert.notEqual(pageLockFor(one), pageLockFor(two));
+});
+
+test("readSlotKeys() maps the pool size onto slot ids", () => {
+  assert.deepEqual(readSlotKeys(1), ["read"]);
+  assert.deepEqual(readSlotKeys(2), ["read", "read#2"]);
+  assert.deepEqual(readSlotKeys(3), ["read", "read#2", "read#3"]);
+  // Defensive: config validation already forbids these, but a pooled caller
+  // must never ask the browser for a 99th read tab.
+  assert.deepEqual(readSlotKeys(99), ["read", "read#2", "read#3"]);
+  assert.deepEqual(readSlotKeys(0), ["read"]);
+  assert.deepEqual(readSlotKeys(Number.NaN), ["read"]);
+});
+}

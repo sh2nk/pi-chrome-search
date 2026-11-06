@@ -1,4 +1,271 @@
 /**
+ * The fake CDP doubles used by the offline suite: a virtual clock, cookie-domain
+ * matching and an in-memory `CdpPage`.
+ *
+ * Nothing here touches a socket. `FakePage.navigate()` changes a string,
+ * `innerText()` returns configured text, `evaluate()` runs a handler map, and
+ * every call is recorded so a test can assert navigation counts, keystroke
+ * delays, scroll distances and focus calls. `FakeClock` removes wall-clock
+ * waits from pacing/abort tests.
+ *
+ * `cookiesFor(urls)` filters by cookie domain, because a fake that returned the
+ * whole jar would let a wrong-host cookie bug pass: real Chrome never sends a
+ * `.google.com` session cookie to a yandex tab.
+ */
+
+import type {
+  CdpPage,
+  CookieInfo,
+  EvaluateOptions,
+  NavigateOptions,
+  TypeOptions,
+} from "../../src/cdp/types.ts";
+import type { Clock } from "../../src/runtime/types.ts";
+
+/**
+ * Deterministic `Clock` for cache/TTL/pacing tests (P2-B) and abort paths (P2-C).
+ *
+ * Two modes:
+ *  - `autoAdvance: true` (default) — `sleep(ms)` resolves in a microtask and moves
+ *    virtual time forward by `ms`. No wall-clock wait, so limiter tests can simply
+ *    `await limiter.acquire(...)`.
+ *  - `autoAdvance: false` — sleeps stay pending until `advance()`/`advanceTo()`.
+ *    This is the mode to use when asserting abort behaviour: an auto-advancing
+ *    sleep has no observable pending window.
+ *
+ * Abort choice: reject with `signal.reason` when set, otherwise with a DOMException
+ * named `AbortError` (the same shape `node:timers/promises` produces). The tool
+ * layer maps that to `E_CANCELLED`; tests that need the exact taxonomy can pass
+ * `new WebSearchError({ code: "E_CANCELLED", ... })` as the abort reason.
+ */
+
+
+/** Default virtual epoch: 2026-01-01T00:00:00Z. Deterministic across timezones for date math. */
+export const DEFAULT_FAKE_NOW = Date.UTC(2026, 0, 1);
+
+export interface FakeClockOptions {
+  /** Initial virtual epoch milliseconds. */
+  now?: number;
+  /** Resolve sleeps immediately and move time forward. Default `true`. */
+  autoAdvance?: boolean;
+}
+
+export interface SleepRecord {
+  /** Requested duration. */
+  ms: number;
+  /** Virtual time when `sleep` was called. */
+  at: number;
+  /** Virtual time when the sleep was due. */
+  due: number;
+  /** Virtual time when it settled, or `null` while pending / rejected. */
+  resolvedAt: number | null;
+}
+
+interface Waiter {
+  record: SleepRecord;
+  resolve: () => void;
+  reject: (reason: unknown) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+export function abortReason(signal?: AbortSignal): unknown {
+  if (signal !== undefined && signal.reason !== undefined) return signal.reason;
+  return new DOMException("The operation was aborted.", "AbortError");
+}
+
+export function isAbortError(value: unknown): boolean {
+  if (value instanceof DOMException) return value.name === "AbortError";
+  return value instanceof Error && value.name === "AbortError";
+}
+
+export class FakeClock implements Clock {
+  #now: number;
+  #autoAdvance: boolean;
+  #log: SleepRecord[] = [];
+  #waiters = new Set<Waiter>();
+
+  constructor(options: FakeClockOptions = {}) {
+    this.#now = options.now ?? DEFAULT_FAKE_NOW;
+    this.#autoAdvance = options.autoAdvance ?? true;
+  }
+
+  now(): number {
+    return this.#now;
+  }
+
+  sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!Number.isFinite(ms) || ms < 0) {
+      throw new RangeError(`FakeClock.sleep: expected a finite non-negative duration, got ${String(ms)}`);
+    }
+    if (signal?.aborted) return Promise.reject(abortReason(signal));
+
+    const record: SleepRecord = { ms, at: this.#now, due: this.#now + ms, resolvedAt: null };
+    this.#log.push(record);
+
+    if (this.#autoAdvance) {
+      this.#now = record.due;
+      record.resolvedAt = record.due;
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const waiter: Waiter = {
+        record,
+        resolve: () => {
+          record.resolvedAt = this.#now;
+          this.#detach(waiter);
+          this.#waiters.delete(waiter);
+          resolve();
+        },
+        reject: (reason: unknown) => {
+          this.#detach(waiter);
+          this.#waiters.delete(waiter);
+          reject(reason);
+        },
+      };
+      if (signal !== undefined) {
+        waiter.signal = signal;
+        waiter.onAbort = () => waiter.reject(abortReason(signal));
+        signal.addEventListener("abort", waiter.onAbort, { once: true });
+      }
+      this.#waiters.add(waiter);
+    });
+  }
+
+  /** Move virtual time forward and resolve every sleep whose due time was reached. */
+  advance(ms: number): number {
+    if (!Number.isFinite(ms) || ms < 0) {
+      throw new RangeError(`FakeClock.advance: expected a finite non-negative duration, got ${String(ms)}`);
+    }
+    this.#now += ms;
+    this.#wake();
+    return this.#now;
+  }
+
+  /** Jump to an absolute epoch. Refuses to move backwards (use `setNow` for that). */
+  advanceTo(epochMs: number): number {
+    if (!Number.isFinite(epochMs)) throw new RangeError("FakeClock.advanceTo: expected a finite epoch");
+    if (epochMs > this.#now) {
+      this.#now = epochMs;
+      this.#wake();
+    }
+    return this.#now;
+  }
+
+  /** Test escape hatch for date-boundary scenarios (e.g. daily caps). */
+  setNow(epochMs: number): void {
+    if (!Number.isFinite(epochMs)) throw new RangeError("FakeClock.setNow: expected a finite epoch");
+    this.#now = epochMs;
+  }
+
+  /** Only affects future sleeps; already-pending waiters keep waiting for `advance`. */
+  setAutoAdvance(enabled: boolean): void {
+    this.#autoAdvance = enabled;
+  }
+
+  pendingCount(): number {
+    return this.#waiters.size;
+  }
+
+  /** Every recorded sleep, in call order. Durations are what tests usually assert. */
+  sleepLog(): ReadonlyArray<SleepRecord> {
+    return this.#log.map((record) => ({ ...record }));
+  }
+
+  durations(): number[] {
+    return this.#log.map((record) => record.ms);
+  }
+
+  totalSleptMs(): number {
+    return this.#log.reduce((sum, record) => sum + record.ms, 0);
+  }
+
+  #wake(): void {
+    const due = [...this.#waiters].filter((waiter) => waiter.record.due <= this.#now);
+    due.sort((a, b) => a.record.due - b.record.due);
+    for (const waiter of due) waiter.resolve();
+  }
+
+  #detach(waiter: Waiter): void {
+    if (waiter.signal !== undefined && waiter.onAbort !== undefined) {
+      waiter.signal.removeEventListener("abort", waiter.onAbort);
+    }
+    if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+  }
+}
+
+/**
+ * Cookie↔URL matching shared by `FakePage.cookiesFor()` and the fake CDP
+ * server's `Network.getCookies`.
+ *
+ * Real Chrome returns only the cookies whose domain applies to one of the
+ * requested URLs. A fake that always returned every cookie would hide exactly
+ * the bugs P1-B/P3 need to catch: sending a `.google.com` session cookie to a
+ * yandex tab, or dropping the `.yandex.ru` cookies a `/goto` resolve needs.
+ *
+ * Rules (RFC 6265 §5.1.3, simplified):
+ *  - `Domain=.example.com` matches `example.com` and every subdomain;
+ *  - `Domain=example.com` (host-only in a capture) matches the host itself and,
+ *    because CDP does not expose `hostOnly` in `CookieInfo`, its subdomains too;
+ *  - a plain suffix must not match a different registrable name
+ *    (`example.com` vs `notexample.com`), so the dot boundary is required;
+ *  - an unparsable URL contributes no host; `about:blank` has no host at all.
+ *
+ * Path and `Secure` scoping are intentionally ignored: the harness models the
+ * domain filter that callers depend on, not the whole cookie store.
+ */
+
+export interface DomainScopedCookie {
+  domain: string;
+}
+
+/** Lowercases and strips the `Domain=` leading dot and a trailing root dot. */
+export function normalizeCookieDomain(domain: string): string {
+  return domain.trim().toLowerCase().replace(/^\./, "").replace(/\.$/, "");
+}
+
+/** Hostname of `url`, or `undefined` for a relative/unparsable/opaque URL. */
+export function hostFromUrl(url: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (parsed.hostname.length === 0) return undefined;
+  return parsed.hostname.toLowerCase().replace(/\.$/, "");
+}
+
+export function cookieMatchesHost(domain: string, host: string): boolean {
+  const cookieDomain = normalizeCookieDomain(domain);
+  const urlHost = host.trim().toLowerCase().replace(/\.$/, "");
+  if (cookieDomain.length === 0 || urlHost.length === 0) return false;
+  if (urlHost === cookieDomain) return true;
+  return urlHost.endsWith(`.${cookieDomain}`);
+}
+
+/**
+ * Domain filter used by `cookiesFor()`/`Network.getCookies`: an empty or
+ * omitted `urls` list means "the whole jar", matching CDP's `getAllCookies`.
+ * When URLs are given but none parse, nothing matches — never everything.
+ */
+export function filterCookiesForUrls<T extends DomainScopedCookie>(
+  cookies: readonly T[],
+  urls?: readonly string[],
+): T[] {
+  if (urls === undefined || urls.length === 0) return [...cookies];
+  const hosts = new Set<string>();
+  for (const url of urls) {
+    const host = hostFromUrl(url);
+    if (host !== undefined) hosts.add(host);
+  }
+  if (hosts.size === 0) return [];
+  return cookies.filter((cookie) => [...hosts].some((host) => cookieMatchesHost(cookie.domain, host)));
+}
+
+/**
  * In-memory `CdpPage` (src/cdp/types.ts) for P1-D/P1-E, P2-C and every adapter
  * test in P3/P4.
  *
@@ -18,16 +285,6 @@
  * whole jar would let a wrong-host cookie bug pass P1/P3 tests.
  */
 
-import type {
-  CdpPage,
-  CookieInfo,
-  EvaluateOptions,
-  NavigateOptions,
-  TypeOptions,
-} from "../../src/cdp/types.ts";
-import type { Clock } from "../../src/runtime/types.ts";
-import { abortReason } from "./clock.ts";
-import { filterCookiesForUrls } from "./cookie-match.ts";
 
 export type FakePageCallKind =
   | "navigate"

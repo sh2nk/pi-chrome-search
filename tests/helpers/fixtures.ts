@@ -1,4 +1,30 @@
 /**
+ * Fixture loader + sanitizer + DOM harness.
+ *
+ * A fixture is a sanitized, gzipped capture of the page *after* settle:
+ * `tests/fixtures/<name>.html.gz`. `loadFixture()` decompresses it and refuses
+ * to return dirty HTML — the same rules that sanitize a capture are re-run at
+ * load time, so a fixture that slipped through review fails loudly instead of
+ * leaking an account email, a session token or the personal query.
+ *
+ * `fixtureDocument()`/`runInPage()` run the shipped extractors exactly the way
+ * the browser does: the adapter function is stringified into a `node:vm`
+ * context with the fixture document, so a selector or a free variable that
+ * would fail in Chrome fails here too. `linkedom` is a devDependency for tests
+ * only; `innerText` is not implemented there, which is why extractors use
+ * `textContent` plus explicit whitespace normalisation.
+ */
+
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
+import { gunzipSync } from "node:zlib";
+
+import { parseHTML } from "linkedom";
+
+/**
  * Fixture sanitizer (SPEC §7.1 / PLAN P3 fixture rule).
  *
  * Fixtures are captured from a real, logged-in browser. Before a single byte is
@@ -13,8 +39,6 @@
  * script). Never put that list in a committed file.
  */
 
-import assert from "node:assert/strict";
-import { gzipSync, gunzipSync } from "node:zlib";
 
 export const REDACTED_SECRET = "[redacted]";
 export const REDACTED_EMAIL = "[redacted-email]";
@@ -407,11 +431,154 @@ export function assertFixtureClean(text: string, options: SanitizeOptions = {}):
   assert.fail(`fixture is not sanitized: ${findings.length} finding(s) [${summary}]`);
 }
 
-/** Deterministic gzip for checked-in fixtures (`.html.gz`). */
-export function gzip(data: string | Uint8Array): Buffer {
-  return gzipSync(typeof data === "string" ? Buffer.from(data, "utf8") : data);
-}
-
 export function gunzip(data: Uint8Array): string {
   return gunzipSync(data).toString("utf8");
+}
+
+// ---------------------------------------------------------------------------
+// Loader
+// ---------------------------------------------------------------------------
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+export const FIXTURES_DIR = join(HERE, "..", "fixtures");
+const NAME_SHAPE = /^[a-z0-9][a-z0-9-]*$/;
+
+export interface LoadFixtureOptions {
+  /** Override the fixture root (tests build fixtures in a temp dir). */
+  dir?: string;
+  /** Literal personal queries used for the capture; checked in the HTML. */
+  personalQueries?: readonly string[];
+}
+
+export interface LoadedFixture {
+  name: string;
+  html: string;
+  compressedBytes: number;
+  htmlBytes: number;
+  chars: number;
+  path: string;
+}
+
+export class FixtureError extends Error {
+  readonly fixtureName: string;
+
+  constructor(fixtureName: string, message: string, options?: { cause?: unknown }) {
+    super(`fixture "${fixtureName}": ${message}`, options);
+    this.name = "FixtureError";
+    this.fixtureName = fixtureName;
+  }
+}
+
+export function loadFixture(name: string, options: LoadFixtureOptions = {}): LoadedFixture {
+  if (!NAME_SHAPE.test(name)) {
+    throw new FixtureError(name, "fixture name must match ^[a-z0-9][a-z0-9-]*$");
+  }
+  const dir = options.dir ?? FIXTURES_DIR;
+  const path = join(dir, `${name}.html.gz`);
+  let compressed: Buffer;
+  try {
+    compressed = readFileSync(path);
+  } catch (cause) {
+    throw new FixtureError(name, `cannot read ${path}`, { cause });
+  }
+  let html: string;
+  try {
+    html = gunzipSync(compressed).toString("utf8");
+  } catch (cause) {
+    throw new FixtureError(name, `${path} is not valid gzip`, { cause });
+  }
+  const findings = findUnsafe(html, { personalQueries: options.personalQueries ?? [] });
+  if (findings.length > 0) {
+    const summary = findings.slice(0, 5).map((f) => `${f.rule}@${f.index}`).join(", ");
+    throw new FixtureError(name, `html is not sanitized: ${summary}`);
+  }
+  return {
+    name,
+    html,
+    compressedBytes: compressed.byteLength,
+    htmlBytes: Buffer.byteLength(html, "utf8"),
+    chars: html.length,
+    path,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// DOM harness
+// ---------------------------------------------------------------------------
+
+/**
+ * Fixture DOM harness for engine adapter tests (P3).
+ *
+ * Adapters extract from the *live* DOM, so they must run the same code in the
+ * browser and in a test. The convention this harness enforces:
+ *
+ *   - an adapter exposes `extractFromDocument(doc, query)` as a self-contained
+ *     function (no imports, no closures) returning plain JSON;
+ *   - live code sends it with `page.evaluate(\`(${extractFromDocument})(document, …)\`)`,
+ *     which only works because the function serialises with `toString()`;
+ *   - tests here parse a captured fixture with linkedom and call the *same*
+ *     source through `runInPage`, which stringifies it inside a `node:vm`
+ *     context — so a fixture test fails when a selector or a free variable is
+ *     wrong, exactly like the browser would.
+ *
+ * `linkedom` is a devDependency for tests only; nothing in `src/` imports it.
+ * `innerText` is not implemented there, which is why extractors use
+ * `textContent` plus explicit whitespace normalisation.
+ */
+
+
+
+/**
+ * Parse sanitized fixture HTML into a document the extractors can query.
+ * `window` is provided for extractors that read `location` or `document`.
+ */
+export function fixtureDocument(html: string, url = "https://example.test/search"): Document {
+  const { document, window } = parseHTML(html);
+  // Keep the document addressable the way a live page is: extractors may need
+  // `baseURI`/`location` to resolve relative links.
+  Object.defineProperty(document, "baseURI", { value: url, configurable: true });
+  Object.defineProperty(document, "URL", { value: url, configurable: true });
+  if (window !== undefined && window !== null) {
+    Object.defineProperty(window, "location", {
+      value: new URL(url),
+      configurable: true,
+    });
+  }
+  return document as unknown as Document;
+}
+
+/**
+ * Run an extractor the way the browser does: `fn` is stringified, so it may not
+ * capture anything from its module. Throws if the function is not serialisable
+ * (arrow functions with comments are fine; closures fail at call time).
+ */
+export function runInPage<T>(fn: (doc: Document, arg: unknown) => T, document: Document, arg: unknown): T {
+  const source = `(${fn.toString()})`;
+  const context = vm.createContext({
+    document,
+    window: (document as unknown as { defaultView?: unknown }).defaultView,
+    location: (document as unknown as { location?: unknown }).location,
+    Node: (document.defaultView as unknown as { Node?: unknown } | null)?.Node,
+    Element: (document.defaultView as unknown as { Element?: unknown } | null)?.Element,
+    HTMLElement: (document.defaultView as unknown as { HTMLElement?: unknown } | null)?.HTMLElement,
+    URL,
+    JSON,
+    Math,
+    Number,
+    String,
+    Boolean,
+    Array,
+    Object,
+    RegExp,
+    Map,
+    Set,
+    decodeURIComponent,
+    encodeURIComponent,
+  });
+  const script = new vm.Script(
+    `(${source})`,
+    { filename: "extract-in-page.js" },
+  );
+  const callable = script.runInContext(context) as (doc: Document, value: unknown) => T;
+  return callable(document, arg);
 }

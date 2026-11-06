@@ -1,3 +1,9 @@
+/**
+ * Config parsing (strict keys, env overrides, cross-field rules) and the error
+ * taxonomy's invariants: every code has a hint, a retryable flag and a unique
+ * entry, and a `WebSearchError` always carries structured details.
+ */
+
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
