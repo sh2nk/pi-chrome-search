@@ -52,7 +52,7 @@ import type { ErrorCode, FailureDetails, Stage } from "../runtime/error-codes.ts
 import { isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, renderToolFailure, toFailure } from "../runtime/errors.ts";
 import type { FailureFallback, FailureJson, ToolTextBlock } from "../runtime/errors.ts";
-import type { ArtifactInput } from "../runtime/types.ts";
+import { saveFailureArtifact } from "../runtime/artifacts.ts";
 import type { ToolDeps } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -111,6 +111,13 @@ export interface WebSearchDetails {
   pageIgnored?: boolean;
   /** Set only by the keyless HTTP fallback (SPEC §6.5); never by a real SERP. */
   degraded?: boolean;
+  /**
+   * Per-engine output counts for a merged multi-engine search (P9-D). Failed
+   * engines appear as `0` and their code in `failedEngines`, so "n=3 across two
+   * engines" cannot silently mean "yandex never ran".
+   */
+  perEngine?: Record<string, number>;
+  failedEngines?: Partial<Record<EngineId, string>>;
 }
 
 export interface WebSearchSuccess {
@@ -196,6 +203,10 @@ interface NormalizedInput {
 }
 
 type Validation = { ok: true; value: NormalizedInput } | { ok: false; message: string };
+
+function isPerEngineCounts(value: unknown): value is Record<string, number> {
+  return isRecord(value) && Object.values(value).every((count) => typeof count === "number");
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -404,20 +415,6 @@ function wallFailure(engine: EngineId, wall: Wall, artifact: string | undefined)
 // Side-effect helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Artifacts are evidence, never a new failure: a read-only agent dir must not
- * turn a parse error into an artifact error. The original failure is rethrown
- * with the path only when a directory was actually written.
- */
-async function saveArtifact(deps: ToolDeps, input: ArtifactInput): Promise<string | undefined> {
-  if (!deps.config.artifacts.enabled) return undefined;
-  try {
-    return await deps.artifacts.save(input);
-  } catch {
-    return undefined;
-  }
-}
-
 /** Surfacing the user's window is best-effort; the E_WALL hint still explains the fix. */
 async function surface(page: CdpPage): Promise<void> {
   try {
@@ -441,6 +438,8 @@ interface JsonRender {
   ai: boolean;
   /** Characters of the AI prose that survived the JSON fit (honest, not pre-fit). */
   aiChars: number;
+  /** P9-D: per-engine counts of the results that survived the fit, when requested. */
+  perEngine?: Record<string, number>;
 }
 
 /**
@@ -591,6 +590,23 @@ function serializeJsonWithin(data: Record<string, unknown>, maxChars: number): J
     break;
   }
 
+  // P9-D: the per-engine accounting must describe the emitted JSON, not the
+  // pre-fit plan (the fitter may have dropped results from the tail).
+  const perEngineCounts: Record<string, number> | undefined = isRecord(copy.perEngine)
+    ? (() => {
+        const counts: Record<string, number> = {};
+        for (const item of items) {
+          const engine = item.engine;
+          if (typeof engine === "string") counts[engine] = (counts[engine] ?? 0) + 1;
+        }
+        for (const key of Object.keys(copy.perEngine as Record<string, unknown>)) {
+          if (counts[key] === undefined) counts[key] = 0;
+        }
+        copy.perEngine = counts;
+        return counts;
+      })()
+    : undefined;
+
   let text = settleChars(copy);
   let truncated = copy.truncated === true;
   let results = items.length;
@@ -607,7 +623,14 @@ function serializeJsonWithin(data: Record<string, unknown>, maxChars: number): J
     aiChars = 0;
   }
 
-  return { text, results, truncated, ai, aiChars };
+  return {
+    text,
+    results,
+    truncated,
+    ai,
+    aiChars,
+    ...(perEngineCounts === undefined ? {} : { perEngine: perEngineCounts }),
+  };
 }
 
 async function navigateAndSettle(
@@ -988,7 +1011,7 @@ async function runEngine(
 
   /** One artifact for the wall the caller actually sees, then surface and fail. */
   const reportWall = async (wall: Wall, retried: boolean): Promise<never> => {
-    const artifact = await saveArtifact(deps, {
+    const artifact = await saveFailureArtifact(deps, {
       code: "E_WALL",
       stage: "navigate",
       engine: engine.id,
@@ -1122,7 +1145,7 @@ async function runEngine(
       // V8.5: a wait that ended without an answer leaves proof behind — the page
       // exactly as the extractor is about to see it — for a lead and for a page
       // with no AI block alike.
-      await saveArtifact(deps, {
+      await saveFailureArtifact(deps, {
         code: "AI_TIMEOUT",
         stage: "extract",
         engine: engine.id,
@@ -1150,7 +1173,7 @@ async function runEngine(
     // Only a page-state failure is worth a snapshot; an abort, a timeout or a
     // transport drop is not a property of the document and would add noise.
     if (failure.details.code !== "E_PARSE" && failure.details.code !== "E_WALL") throw failure;
-    const artifact = await saveArtifact(deps, {
+    const artifact = await saveFailureArtifact(deps, {
       code: failure.details.code,
       stage: failure.details.stage,
       engine: engine.id,
@@ -1285,6 +1308,11 @@ export function createWebSearchTool(
     const serps: RawSerp[] = [];
     let cachedAny = false;
     let firstFailure: ReturnType<typeof fail> | undefined;
+    /** P9-D: failures inside a merged route are reported, not silently swallowed. */
+    const failed: Partial<Record<EngineId, string>> = {};
+    // A coverage set splits `n` across its engines instead of asking every
+    // engine for `n` and letting the first one fill every slot.
+    const perEngineN = merge && order.length > 1 ? Math.ceil(input.n / order.length) : input.n;
 
     for (const id of order) {
       let engine: Engine;
@@ -1294,10 +1322,11 @@ export function createWebSearchTool(
         const failure = asFailure(error, "resolve", id, signal);
         firstFailure ??= failure;
         if (!FALLBACK_CODES.has(failure.details.code)) return failureResult(failure);
+        if (merge) failed[id] = failure.details.code;
         continue;
       }
 
-      const query = buildQuery(id, input, deps.config);
+      const query = buildQuery(id, perEngineN === input.n ? input : { ...input, n: perEngineN }, deps.config);
       const key = serpKey({
         engine: id,
         text: query.text,
@@ -1329,6 +1358,7 @@ export function createWebSearchTool(
         const failure = asFailure(error, "extract", id, signal);
         firstFailure ??= failure;
         if (!FALLBACK_CODES.has(failure.details.code)) return failureResult(failure);
+        if (merge) failed[id] = failure.details.code;
       }
     }
 
@@ -1348,6 +1378,7 @@ export function createWebSearchTool(
         : serps;
 
     const elapsedMs = deps.clock.now() - startedAt;
+    const multiEngineSearch = merge && order.length > 1;
     const compact = compactSerps(refined, {
       n: input.n,
       summaryMaxChars: deps.config.search.summaryMaxChars,
@@ -1356,6 +1387,8 @@ export function createWebSearchTool(
       format: input.format,
       cached: cachedAny,
       elapsedMs,
+      perEngine: multiEngineSearch,
+      failedEngines: failed,
     });
 
     // The JSON view needs its own cap: `compact.ts` caps Markdown, while JSON
@@ -1383,6 +1416,8 @@ export function createWebSearchTool(
           : "none";
     const aiChars = json === null ? compact.aiChars : json.aiChars;
     const aiWaitMs = refined.reduce((sum, serp) => sum + (serp.timings.aiWaitMs ?? 0), 0);
+    const accounting =
+      json === null ? compact.data.perEngine : json.perEngine;
     const details: WebSearchDetails = {
       engines: contributed,
       results: rendered,
@@ -1397,6 +1432,8 @@ export function createWebSearchTool(
       // DuckDuckGo has no pagination yet (M2): `page` is requested but not honoured.
       ...(input.page > 1 && contributed.includes("duckduckgo") ? { pageIgnored: true } : {}),
       ...(compact.degraded ? { degraded: true } : {}),
+      ...(isPerEngineCounts(accounting) ? { perEngine: accounting } : {}),
+      ...(Object.keys(failed).length === 0 ? {} : { failedEngines: { ...failed } }),
     };
 
     // One row per search (SPEC §9.3 observability): the AI verdict and the wait

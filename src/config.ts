@@ -80,6 +80,12 @@ export interface SearchConfig {
 export interface ReadConfig {
   defaultMaxChars: number;
   maxCharsCeiling: number;
+  /**
+   * How many read tabs may exist (P9-A). `1` serializes every read on one tab;
+   * `2..3` gives each slot its own tab AND its own exclusive lock, so parallel
+   * reads cannot navigate each other's page. Never more than 3 (profile safety).
+   */
+  pool: number;
 }
 
 export interface CacheConfig {
@@ -163,7 +169,7 @@ export const DEFAULT_CONFIG: Config = {
     aiWaitMs: 6000,
     aiExpand: false,
   },
-  read: { defaultMaxChars: 6000, maxCharsCeiling: 20000 },
+  read: { defaultMaxChars: 6000, maxCharsCeiling: 20000, pool: 1 },
   cache: { serpTtlMs: 600000, gotoTtlMs: 86400000, maxEntries: 200 },
   captcha: { waitMs: 0, retryYandexOnce: true },
   artifacts: { enabled: true, keep: 30, maxBytes: 52428800 },
@@ -274,7 +280,7 @@ const CONFIG_SPEC: Spec = {
     },
     read: {
       kind: "object",
-      fields: { defaultMaxChars: NUM(1), maxCharsCeiling: NUM(1) },
+      fields: { defaultMaxChars: NUM(1), maxCharsCeiling: NUM(1), pool: NUM(1, true, 3) },
     },
     cache: {
       kind: "object",

@@ -690,3 +690,28 @@ export function createArtifacts(options: ArtifactsOptions): Artifacts {
     root: () => rootDir,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Shared failure snapshot (P9-C)
+// ---------------------------------------------------------------------------
+
+/**
+ * Persist a failure snapshot without ever turning it into the reported failure.
+ *
+ * Every tool called this inline (and `web_read` did not call it at all): a
+ * read-only agent dir or a closed tab must not replace `E_PARSE` with an
+ * artifact error, and the caller only needs the directory when one was written.
+ * `""`/`undefined` mean "no artifact" — callers must not render it.
+ */
+export async function saveFailureArtifact(
+  deps: { config: Config; artifacts: Artifacts },
+  input: ArtifactInput,
+): Promise<string | undefined> {
+  if (!deps.config.artifacts.enabled) return undefined;
+  try {
+    const dir = await deps.artifacts.save(input);
+    return dir === "" ? undefined : dir;
+  } catch {
+    return undefined;
+  }
+}

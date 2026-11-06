@@ -809,7 +809,9 @@ test("a blocked CDP skips every probe and says why", async () => {
   assert.equal(probe.calls.length, 0, "no probe may run without a live CDP session");
   assert.equal(connector.acquireCalls.length, 0);
   for (const engine of report.engines) {
-    assert.equal(engine.verdict, "unavailable");
+    // Skipped is the honest label: the probe never ran, nothing was learned
+    // about the engine (P9-D).
+    assert.equal(engine.verdict, "skipped");
     assert.equal(engine.note, "probe skipped: CDP is unavailable");
   }
 });
@@ -1174,10 +1176,77 @@ test("web_doctor probe:false skips probes; fix:true reports the safe actions", a
     undefined,
   )) as WebDoctorSuccess;
   assert.equal(probe.calls.length, 0);
-  assert.match(noProbe.content[0]?.text ?? "", /--no-probe/);
+  assert.match(noProbe.content[0]?.text ?? "", /probe:false/);
+
+  // P9-D: a fix re-probes even when the caller asked for probe:false, because
+  // the report must describe the repaired session, not the pre-fix one.
+  assert.equal(probe.calls.length, 0);
 
   const fixed = await tool.execute("call-5", { probe: false, fix: true }, undefined, undefined);
   const fixedSuccess = fixed as WebDoctorSuccess;
   assert.match(fixedSuccess.content[0]?.text ?? "", /fix: closed 1 owned tab\(s\)/);
   assert.ok(connector.releaseCalls >= 1);
+  assert.equal(probe.calls.length, ALL_ENGINES.length, "a fix must re-probe every enabled engine");
+});
+
+// ---------------------------------------------------------------------------
+// P9-D — the fix log may not claim a reconnect that did not happen
+// ---------------------------------------------------------------------------
+
+test("--fix does not claim a reconnect when the session survived the release", async () => {
+  const connector = new FakeConnector();
+  // A release that closes the owned tabs but leaves the socket open is exactly
+  // the field case: the log said "reconnect failed: E_CDP_UNAVAILABLE" while the
+  // session was demonstrably alive.
+  connector.releaseAll = async (): Promise<void> => {
+    connector.releaseCalls += 1;
+  };
+
+  const actions = await applyDoctorFix(depsFor({ connector, registry: fakeRegistry(["google"]) }));
+
+  assert.ok(actions.includes("session still open; reconnect not required"), actions.join("; "));
+  assert.deepEqual(
+    actions.filter((action) => action.includes("reconnect failed") || action.includes("reconnected")),
+    [],
+    "no reconnect was attempted, so no reconnect line may be printed",
+  );
+  assert.equal(connector.connectCalls, 1, "only the initial connect ran");
+});
+
+test("--fix reports a failed reconnect only after the session actually went away", async () => {
+  const connector = new FakeConnector();
+  const originalRelease = connector.releaseAll.bind(connector);
+  connector.releaseAll = async (): Promise<void> => {
+    await originalRelease();
+    // The lock is gone and so is the socket: every later connect must fail.
+    connector.connectFailures = 99;
+  };
+
+  const actions = await applyDoctorFix(depsFor({ connector, registry: fakeRegistry(["google"]) }));
+  assert.ok(actions.includes("reconnect failed: E_CDP_UNAVAILABLE"), actions.join("; "));
+});
+
+test("--fix reports a slow connect as late, never as a failed reconnect", async () => {
+  const connector = new FakeConnector();
+  const originalConnect = connector.connect.bind(connector);
+  // The cold-window case observed live: connect settles after the doctor's
+  // budget but well before the browser is actually unavailable.
+  connector.connect = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    return await originalConnect();
+  };
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.cdp.connectTimeoutMs = 1;
+
+  const actions = await applyDoctorFix(
+    depsFor({ connector, registry: fakeRegistry(["google"]), config }),
+    { connectGraceMs: 1, lateConnectGraceMs: 500 },
+  );
+
+  assert.ok(actions.includes("connected to CDP (after the deadline)"), actions.join("; "));
+  assert.deepEqual(
+    actions.filter((action) => action.includes("failed") || action.includes("reconnected to CDP once")),
+    [],
+    "a late success is a success, not a failed reconnect",
+  );
 });

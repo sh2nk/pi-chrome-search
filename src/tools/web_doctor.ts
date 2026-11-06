@@ -192,7 +192,11 @@ export function createWebDoctorTool(getDeps: WebDoctorDepsGetter): WebDoctorTool
     }
 
     const actions = validation.value.fix ? await applyDoctorFix(deps) : [];
-    const report = await buildDoctorReport(deps, { probe: validation.value.probe });
+    // P9-D: after a fix the report must describe the repaired session, so a fix
+    // re-probes even when the caller passed probe:false. Reporting the state
+    // from before the fix (or "skipped") would hide whether the repair worked.
+    const probe = validation.value.fix ? true : validation.value.probe;
+    const report = await buildDoctorReport(deps, { probe });
 
     return {
       content: [{ type: "text", text: renderWebDoctorText(report, actions) }],

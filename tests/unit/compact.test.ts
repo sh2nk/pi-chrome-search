@@ -872,3 +872,50 @@ test("an answer dropped for space leaves no `ai:yes` header behind", () => {
   assert.equal(headerOf(out.text).includes("ai:yes"), false);
   assert.equal(out.text.length <= 260, true);
 });
+
+// ---------------------------------------------------------------------------
+// P9-D — per-engine accounting for a merged search
+// ---------------------------------------------------------------------------
+
+test("per-engine accounting prints contributions and failed engines", () => {
+  const input = [
+    serp("google", [result(1), result(2)]),
+    serp("duckduckgo", [result(3)]),
+  ];
+  const out = compactSerps(input, {
+    ...OPTS,
+    n: 5,
+    perEngine: true,
+    failedEngines: { yandex: "E_WALL" },
+  });
+
+  assert.equal(headerOf(out.text), "google+duckduckgo · 3 results · ai:no · google:2 duckduckgo:1 yandex:0(E_WALL)");
+  assert.deepEqual(out.data.perEngine, { google: 2, duckduckgo: 1, yandex: 0 });
+  assert.deepEqual(out.data.failedEngines, { yandex: "E_WALL" });
+  // Item-level engine tags are needed to attribute the counts.
+  assert.ok(out.items.every((item) => item.engine !== undefined));
+});
+
+test("per-engine accounting follows the rendered items, not the input", () => {
+  const input = [
+    serp("google", [result(1), result(2), result(3)]),
+    serp("duckduckgo", [result(4), result(5)]),
+  ];
+  const out = compactSerps(input, { ...OPTS, n: 2, perEngine: true });
+  const counts = Object.values(out.data.perEngine as Record<string, number>);
+  assert.equal(counts.reduce((sum, count) => sum + count, 0), 2, "counts must describe what was printed");
+  // An engine that contributed nothing and did not fail is simply absent: the
+  // header reports evidence, not a roll call.
+  assert.match(headerOf(out.text), /google:2/);
+});
+
+test("a single-engine search stays byte-identical without the per-engine flag", () => {
+  const input = [serp("google", [result(1), result(2)])];
+  const plain = compactSerps(input, OPTS);
+  const flagged = compactSerps(input, { ...OPTS, perEngine: true });
+
+  assert.equal(headerOf(plain.text), "google · 2 results · ai:no");
+  assert.match(headerOf(flagged.text), /google · 2 results · ai:no · google:2/);
+  assert.equal(plain.data.perEngine, undefined);
+  assert.equal(plain.items[0]?.engine, undefined);
+});

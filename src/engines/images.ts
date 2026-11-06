@@ -66,6 +66,12 @@ export interface ImagesQuery {
 export interface ImageItem {
   alt: string;
   pageUrl: string;
+  /**
+   * What `pageUrl` actually points at. Google tiles disclose the containing
+   * page; Yandex 2026 tiles disclose only the source *image* file, and calling
+   * that a page would be a small lie (P9-E).
+   */
+  pageUrlKind: "page" | "image";
   thumbUrl: string;
   domain: string;
 }
@@ -396,7 +402,8 @@ export function extractImagesFromDocument(doc: Document, arg: ImagesExtractionAr
     if (seen[key] === true) continue;
     seen[key] = true;
     usable += 1;
-    if (items.length < limit) items.push({ alt, pageUrl, thumbUrl, domain });
+    const pageUrlKind = arg.engine === "yandex" ? "image" : "page";
+    if (items.length < limit) items.push({ alt, pageUrl, pageUrlKind, thumbUrl, domain });
   }
 
   return { items, pageCarried: usable > items.length };
@@ -664,7 +671,21 @@ function asImageItem(value: unknown): ImageItem | null {
   if (alt === "" || !isHttpUrl(pageUrl) || !isHttpUrl(thumbUrl)) return null;
   const domain = domainOf(pageUrl);
   if (domain === "") return null;
-  return { alt, pageUrl, thumbUrl, domain };
+  // The payload crosses the browser boundary: trust the declared kind only when
+  // it is one of the two words, and never invent "page" from a bare image URL.
+  const declared = value.pageUrlKind;
+  const pageUrlKind: ImageItem["pageUrlKind"] =
+    declared === "image" || declared === "page" ? declared : imageUrlLooksLikeFile(pageUrl) ? "image" : "page";
+  return { alt, pageUrl, pageUrlKind, thumbUrl, domain };
+}
+
+/** Fallback inference for a payload without `pageUrlKind` (older capture tests). */
+function imageUrlLooksLikeFile(url: string): boolean {
+  try {
+    return /\.(?:jpe?g|png|gif|webp|avif|bmp|svg)$/i.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
 }
 
 function asImagesExtraction(value: unknown): ImagesExtraction | null {

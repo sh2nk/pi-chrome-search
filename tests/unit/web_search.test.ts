@@ -1530,3 +1530,47 @@ test("aiExpand is opt-in: the expand hook runs only when configured", async () =
   expectSuccess(await run(on, { q: "x", engines: "google" }));
   assert.equal(expanded, 1);
 });
+
+// ---------------------------------------------------------------------------
+// P9-D — a merged search splits n and reports every engine
+// ---------------------------------------------------------------------------
+
+test("a merged search splits n across its engines instead of letting one fill every slot", async () => {
+  const google = new StubEngine({
+    id: "google",
+    results: [
+      { title: "G1", url: "https://g.example.test/1", snippet: "" },
+      { title: "G2", url: "https://g.example.test/2", snippet: "" },
+      { title: "G3", url: "https://g.example.test/3", snippet: "" },
+    ],
+  });
+  const ddg = new StubEngine({
+    id: "duckduckgo",
+    results: [
+      { title: "D1", url: "https://d.example.test/1", snippet: "" },
+      { title: "D2", url: "https://d.example.test/2", snippet: "" },
+      { title: "D3", url: "https://d.example.test/3", snippet: "" },
+    ],
+  });
+  const harness = makeHarness({ engines: [google, ddg] });
+
+  const result = expectSuccess(await run(harness, { q: "split", n: 3, engines: ["google", "duckduckgo"] }));
+  assert.equal(google.queries[0]?.n, 2, "ceil(3 / 2) per engine");
+  assert.equal(ddg.queries[0]?.n, 2);
+  assert.match(textOf(result), /google:\d+ duckduckgo:\d+/, "the header accounts for both engines");
+  assert.deepEqual(Object.keys(result.details.perEngine ?? {}).sort(), ["duckduckgo", "google"]);
+});
+
+test("a merged search names the engine that failed and the code it failed with", async () => {
+  const google = new StubEngine({
+    id: "google",
+    results: [{ title: "G1", url: "https://g.example.test/1", snippet: "" }],
+  });
+  const yandex = new StubEngine({ id: "yandex", extractError: fail("E_WALL", "navigate") });
+  const harness = makeHarness({ engines: [google, yandex] });
+
+  const result = expectSuccess(await run(harness, { q: "wall", n: 2, engines: ["google", "yandex"] }));
+  assert.equal(result.details.failedEngines?.yandex, "E_WALL");
+  assert.equal(result.details.perEngine?.yandex, 0);
+  assert.match(textOf(result), /yandex:0\(E_WALL\)/);
+});

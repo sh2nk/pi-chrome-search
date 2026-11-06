@@ -24,6 +24,9 @@ class FakePage implements CdpPage {
   url(): string {
     return this.#url;
   }
+  async currentUrl(): Promise<string> {
+    return this.#url;
+  }
   async title(): Promise<string> {
     return "fake";
   }

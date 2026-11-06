@@ -28,12 +28,27 @@ export interface CookieInfo {
 /**
  * Work-tab key. Search tabs are keyed by engine; a read gets its own tab so a
  * long article never navigates the SERP tab out from under a cached result.
+ *
+ * `read#<n>` is a pool slot (P9-A, `config.read.pool`): the tool takes an
+ * exclusive lock per key, so two reads on different slots never share a tab.
+ * Slot ids only exist for reads; an engine keeps its single tab.
  */
-export type PageKey = EngineId | "read";
+export type PageKey = EngineId | "read" | `read#${number}`;
 
 export interface CdpPage {
-  /** Current URL, synchronously, as last known to the target. */
+  /**
+   * Current URL as last known to the target (synchronously). This is a cache,
+   * not a fact: a navigation the extension did not drive (a typed search, a
+   * JS redirect) can leave it stale. `currentUrl()` is the authoritative read.
+   */
   url(): string;
+  /**
+   * Ask the document for `location.href` and refresh the cached `url()`.
+   * Used as the post-navigate proof (P9-B): a read compares this value before
+   * and after extraction instead of trusting a target-event cache. Falls back
+   * to the cached value when the document cannot be asked.
+   */
+  currentUrl(): Promise<string>;
   title(): Promise<string>;
   navigate(url: string, o?: NavigateOptions): Promise<void>;
   evaluate<T>(expression: string, o?: EvaluateOptions): Promise<T>;

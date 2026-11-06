@@ -954,6 +954,25 @@ export function createCdpPage(
   const page: CdpPageHandle = {
     url: () => lastUrl,
 
+    /**
+     * Post-navigate proof (P9-B): `url()` is a cache fed by commit events, which
+     * a typed search (press Enter inside the page) never produces. Asking the
+     * document is the only way to know where the tab really is.
+     */
+    async currentUrl(): Promise<string> {
+      try {
+        const href = await evaluateRaw<unknown>("location.href");
+        if (typeof href === "string" && href.trim() !== "") {
+          lastUrl = href;
+          return href;
+        }
+      } catch {
+        // A detached or navigated-away document has no answer; the last known
+        // target URL is still the honest best guess for the caller's proof.
+      }
+      return lastUrl;
+    },
+
     async title(): Promise<string> {
       const value = await evaluateRaw<unknown>("document.title");
       return typeof value === "string" ? value : "";

@@ -22,7 +22,9 @@ export type ErrorCode =
   | "E_BUSY"
   | "E_BLOCKED_URL"
   | "E_UNSUPPORTED"
-  | "E_CANCELLED";
+  | "E_CANCELLED"
+  | "E_NAVIGATION_MISMATCH"
+  | "E_OFFSET_RANGE";
 
 export const ERROR_CODES = [
   "E_CONFIG",
@@ -38,6 +40,8 @@ export const ERROR_CODES = [
   "E_BLOCKED_URL",
   "E_UNSUPPORTED",
   "E_CANCELLED",
+  "E_NAVIGATION_MISMATCH",
+  "E_OFFSET_RANGE",
 ] as const satisfies readonly ErrorCode[];
 
 export type Stage =
@@ -100,6 +104,12 @@ export const ERROR_HINTS: Record<ErrorCode, string> = {
   E_BLOCKED_URL: "use a public http(s) URL; localhost, private ranges, file: and data: are blocked",
   E_UNSUPPORTED: "this engine or vertical is not implemented yet; check /web-doctor for per-engine status",
   E_CANCELLED: "the call was aborted; retry if it was not intentional",
+  E_NAVIGATION_MISMATCH:
+    "the tab changed document between navigation and extraction; retry once — reads are serialized, " +
+    "so a repeat means the page navigated itself",
+  E_OFFSET_RANGE:
+    "offset is past the end of the rendered document; pass an offset below the reported totalChars " +
+    "(or 0 to start over)",
 };
 
 export const RETRYABLE: Record<ErrorCode, boolean> = {
@@ -116,6 +126,8 @@ export const RETRYABLE: Record<ErrorCode, boolean> = {
   E_BLOCKED_URL: false,
   E_UNSUPPORTED: false,
   E_CANCELLED: true,
+  E_NAVIGATION_MISMATCH: true,
+  E_OFFSET_RANGE: false,
 };
 
 export class WebSearchError extends Error {

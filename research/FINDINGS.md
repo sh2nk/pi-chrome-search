@@ -305,3 +305,42 @@ Findings:
    the navigate-commit tracking in `cdp/session.ts` only runs during `page.navigate()`, so an artifact saved
    after a typed search records the *home* URL while `page.txt`/`page.html` are the SERP. `detectWall`'s URL
    evidence has the same blind spot. Recorded here for P9-B (post-navigate proof), not fixed in P8.
+
+## 13. P9 measurements — read integrity, the small lies, and the attach budget (2026-11-06)
+
+1. **Parallel reads really do share one tab.** `acquirePage("read")` is idempotent by design, so four
+   concurrent `web_read` calls navigated the same tab and every extraction saw the last body. Fixed by an
+   exclusive FIFO lock per slot (`cdp/page-lock.ts`, `config.read.pool` 1..3). Live: two concurrent reads
+   (example.com + iana.org) returned `Example Domain` (923 chars) and `Example Domains` (854 chars) in
+   2.37 s total, and the lock reported `pending() === 0` afterwards.
+2. **`page.url()` is a cache, not a fact.** After a typed search (or a JS redirect) the target-event cache
+   still holds the previous document's URL. `CdpPage.currentUrl()` asks the document for `location.href`
+   and refreshes the cache; `web_read` compares it before and after extraction and raises
+   `E_NAVIGATION_MISMATCH` instead of extracting a stranger's page. Comparing it to the *requested* URL
+   would reject every legitimate redirect, so the proof is "the document did not move during the read".
+3. **A failed `E_PARSE`/`E_TIMEOUT`/redirect left no artifact.** `web_read` never called
+   `artifacts.save()`. Now `E_PARSE`, `E_TIMEOUT`, `E_BLOCKED_URL` (after a redirect) and
+   `E_NAVIGATION_MISMATCH` snapshot `page.html`/`page.txt`/`meta.json` through one shared
+   `saveFailureArtifact()` call site (also used by `web_search`/`image_search`).
+4. **The doctor's connect budget was shorter than Chrome's Allow prompt.** Observed on the installed
+   Chrome (157): the first attach after the last owned window was closed — and any attach that has to wait
+   for the user to click Allow in `chrome://inspect` — can outlive the doctor's 7 s connect budget
+   (`connectTimeoutMs` 5 s + 2 s discovery). The fix then logged
+   `connect failed: E_CDP_UNAVAILABLE` + `reconnect failed: E_CDP_UNAVAILABLE` while the very next report
+   (same process) connected and printed `cdp: ok`. Two changes: a timed-out connect is now given a late
+   grace on the *same* promise and reported as `connected to CDP (after the deadline)`; and a post-release
+   reconnect is attempted only when the session is actually gone (`session still open; reconnect not
+   required` otherwise). Measured after the fix: `--fix --no-probe` finished in 3.0 s with
+   `connected to CDP` / `closed 1 owned tab(s)` / `reconnected after release`, exit 0.
+   **The real fix for the missed prompt is P11** (blocking wait + desktop notification + best-effort
+   raise); P9 only removes the false claim.
+5. **`probe:false` is not `unavailable`.** A skipped probe means "not exercised"; the doctor now says
+   `skipped` and keeps the report `degraded`, so "no evidence" is never mistaken for "engine works" or
+   "engine tried and failed". A `fix` re-probes even when the caller passed `probe:false`.
+6. **A merged search split nothing.** `n=3` across two engines asked each engine for 3 and the first
+   engine filled every slot; a failed second engine was invisible. Now each engine gets `ceil(n/k)` and the
+   header carries `google:2 yandex:0(E_WALL)` (also in `details.perEngine`/`details.failedEngines` and the
+   JSON view, recomputed after the JSON fit).
+7. **Yandex `pageUrl` is an image file.** The 2026 tile markup discloses only `img_url` (the source image),
+   not its host page. `ImageItem.pageUrlKind` is `"page"` for Google and `"image"` for Yandex; the tool
+   description says so, and the payload validator infers the kind from the URL when a payload omits it.

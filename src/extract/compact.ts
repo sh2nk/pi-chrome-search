@@ -72,6 +72,14 @@ export interface CompactOptions {
   format?: "md" | "json";
   cached?: boolean;
   elapsedMs?: number;
+  /**
+   * P9-D: a merged multi-engine search reports what each engine actually
+   * contributed (`google:3 yandex:0(E_WALL)`), so "n=3, two engines" can no
+   * longer hide an engine that silently took every slot (or failed quietly).
+   */
+  perEngine?: boolean;
+  /** Codes of engines that failed inside a merged search; rendered as `id:0(CODE)`. */
+  failedEngines?: Partial<Record<EngineId, string>>;
 }
 
 export interface CompactItem {
@@ -126,6 +134,8 @@ interface Opts {
   outputMaxChars: number;
   cached: boolean;
   elapsedMs: number | undefined;
+  perEngine: boolean;
+  failedEngines: Partial<Record<EngineId, string>> | undefined;
 }
 
 const DEFAULT_N = 5;
@@ -176,6 +186,8 @@ function resolveOpts(opts: CompactOptions): Opts {
     outputMaxChars: clampInt(opts.outputMaxChars, DEFAULT_OUTPUT_MAX_CHARS, 1, 1_000_000),
     cached: opts.cached === true,
     elapsedMs: typeof opts.elapsedMs === "number" && Number.isFinite(opts.elapsedMs) ? opts.elapsedMs : undefined,
+    perEngine: opts.perEngine === true,
+    failedEngines: opts.failedEngines,
   };
 }
 
@@ -454,8 +466,25 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
   /** `ai:yes` is reserved for an answer; a lead says exactly that. */
   const aiLabel = (state: AiState): string => (state === "answer" ? "yes" : state === "lead" ? "lead" : "no");
 
-  const headerFor = (count: number, state: AiState): string => {
-    const parts = [engineLabel, `${count} results`, `ai:${aiLabel(state)}`];
+  const perEngine = opts.perEngine === true;
+
+  /** Contribution counts in canonical engine order; failed engines report `0(CODE)`. */
+  const accountingFor = (items: readonly CompactItem[]): string => {
+    if (!perEngine) return "";
+    const parts: string[] = [];
+    for (const id of ENGINE_IDS) {
+      const count = items.filter((item) => item.engine === id).length;
+      const code = opts.failedEngines?.[id];
+      if (count > 0) parts.push(`${id}:${count}`);
+      else if (code !== undefined) parts.push(`${id}:0(${code})`);
+    }
+    return parts.join(" ");
+  };
+
+  const headerFor = (items: readonly CompactItem[], state: AiState): string => {
+    const parts = [engineLabel, `${items.length} results`, `ai:${aiLabel(state)}`];
+    const accounting = accountingFor(items);
+    if (accounting !== "") parts.push(accounting);
     const elapsed = formatElapsed(opts.elapsedMs);
     if (elapsed) parts.push(elapsed);
     if (opts.cached) parts.push("cached");
@@ -464,7 +493,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
   };
 
   const render = (items: CompactItem[], summary: CompactAi | undefined, state: AiState): string => {
-    const head = [headerFor(items.length, state)];
+    const head = [headerFor(items, state)];
     if (summary) head.push(aiLine(summary));
     let text = head.join("\n");
     if (items.length > 0) text += `\n\n${items.map(renderItem).join("\n")}`;
@@ -479,7 +508,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
       domain: item.domain,
       snippet: truncate(item.snippet, snippetCap),
     };
-    if (mixed) out.engine = item.engine;
+    if (mixed || perEngine) out.engine = item.engine;
     return out;
   };
 
@@ -496,7 +525,8 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
 
   // `headerFor(selected.length, …)` is the widest header still possible: dropping
   // tail items only shortens the count, and `ai:lead` (7) is the widest AI label.
-  const headerReserve = headerFor(selected.length, "lead").length + pageSuffixLen;
+  const headerReserve =
+    headerFor(selected.map((item) => toItem(item, fallbackCap)), "lead").length + pageSuffixLen;
   const aiBudget = Math.max(
     0,
     Math.min(opts.summaryMaxChars, outputMaxChars - headerReserve - resultsFloor),
@@ -534,7 +564,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
   if (text.length > outputMaxChars) {
     aiOut = undefined;
     aiState = "none";
-    text = truncate(headerFor(0, "none"), outputMaxChars);
+    text = truncate(headerFor([], "none"), outputMaxChars);
     truncated = true;
   }
 
@@ -549,6 +579,16 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
     chars: text.length,
     truncated,
   };
+  if (perEngine) {
+    const counts: Record<string, number> = {};
+    for (const id of ENGINE_IDS) {
+      const count = items.filter((item) => item.engine === id).length;
+      if (count > 0 || opts.failedEngines?.[id] !== undefined) counts[id] = count;
+    }
+    data.perEngine = counts;
+    const failed = opts.failedEngines;
+    if (failed !== undefined && Object.keys(failed).length > 0) data.failedEngines = { ...failed };
+  }
   if (aiOut) data.ai = { text: aiOut.text, sources: [...aiOut.sources], state: "answer" };
   if (aiState === "lead") data.aiState = "lead";
   if (degraded) data.degraded = true;

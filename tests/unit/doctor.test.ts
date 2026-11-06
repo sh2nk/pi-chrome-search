@@ -766,8 +766,9 @@ test("CLI --no-probe makes zero probe calls", async () => {
   assertSchemaValid(report);
   assert.equal(probe.calls.length, 0);
   for (const engine of report.engines) {
-    assert.equal(engine.verdict, "unavailable");
-    assert.match(engine.note ?? "", /--no-probe/);
+    // P9-D: not probed is `skipped`, not `unavailable` (which means "tried and failed").
+    assert.equal(engine.verdict, "skipped");
+    assert.match(engine.note ?? "", /probe:false/);
   }
 });
 

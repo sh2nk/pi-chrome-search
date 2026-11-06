@@ -353,7 +353,9 @@ test("enabled + auto applies the routed order, locale, n and summary", async () 
   assert.equal(routed.lang, "ru");
   assert.equal(routed.region, "de");
   assert.equal(routed.freshness, "w");
-  assert.equal(routed.n, 3, "route.n is applied only because the caller did not pass n");
+  // P9-D: `route.n = 3` is split across the two routed engines (ceil(3/2) = 2),
+  // so the paired engines cannot fill every slot from one route member.
+  assert.equal(routed.n, 2, "route.n is applied only because the caller did not pass n, then split");
   assert.equal(routed.summary, false);
 });
 

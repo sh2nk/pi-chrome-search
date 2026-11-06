@@ -103,7 +103,7 @@ descriptions together stay under 900 characters (enforced by `tests/unit/tool_bu
 |---|---|---|
 | `web_search` | direct | `q`; `n` 1–10 (default 5); `engines` `auto` \| id \| list; `summary` (default true); `freshness` `d\|w\|m\|y`; `page` ≥1; `format` `md\|json` |
 | `web_read` | deferred | `url` (http/https only); `offset`; `maxChars` (default 6000, ceiling 20000); `format` `md\|text` |
-| `image_search` | deferred | `q`; `n` ≤12 (default 4); `engine` `google\|yandex`; `attach` (≤4 thumbnail URLs, off by default) |
+| `image_search` | deferred | `q`; `n` ≤12 (default 4); `engine` `google\|yandex`; `attach` (≤4 thumbnail URLs, off by default); `pageUrl` is the host page on Google and the source image on Yandex |
 | `web_research` | deferred | `q`; `budget` `quick` (1 search + 2 reads) \| `normal` (2+4) \| `deep` (4+8) |
 | `web_doctor` | deferred | `probe` (default true), `fix` (default false: reconnect, close owned tabs, prune artifacts) |
 
@@ -148,6 +148,7 @@ a partial file is deep-merged over the defaults.
 | `search.summaryMaxChars`, `search.snippetMaxChars`, `search.outputMaxChars` | `1200`, `140`, `2500` | AI, snippet and total output budgets (results floor reserved first) |
 | `search.aiWaitMs`, `search.aiExpand` | `6000`, `false` | Bounded wait for a streaming native AI summary (0 disables; a page with no AI block stops after ≤1.5 s); allow one visible expand click inside the AI block (`false`: never click) |
 | `read.defaultMaxChars`, `read.maxCharsCeiling` | `6000`, `20000` | Default `web_read` window and hard ceiling |
+| `read.pool` | `1` | How many read tabs/locks exist (1..3); 1 serializes every read on one tab |
 | `cache.serpTtlMs`, `cache.gotoTtlMs`, `cache.maxEntries` | `600000`, `86400000`, `200` | SERP TTL (10 min), `/goto` TTL (24 h), LRU size |
 | `captcha.waitMs`, `captcha.retryYandexOnce` | `0`, `true` | Extra grace after the one Yandex retry for you to solve a wall (0 = no extra wait); the retry waits ~3 s |
 | `artifacts.enabled`, `artifacts.keep`, `artifacts.maxBytes` | `true`, `30`, `52428800` | Save failure artifacts; retention in dirs / bytes (50 MB) |
@@ -241,7 +242,7 @@ stop and ask — not retry.
 
 `/web-doctor` (or `node src/cli/doctor.ts --json`) reports the CDP endpoint, browser version, profile,
 `navigator.webdriver`, lock state, owned window, artifact/cache size, per-engine verdicts
-(`ok`/`wall`/`layout_changed`/`blocked`/`unavailable`) and classifier availability. `--fix` may reconnect,
+(`ok`/`wall`/`layout_changed`/`blocked`/`unavailable`/`skipped`) and classifier availability. `--fix` may reconnect,
 close only the tabs this connector owns, prune artifacts and reclaim a dead lock; it never restarts Chrome,
 never touches a captcha and never edits the profile. Exit code 0 means ok/degraded, 2 means blocked.
 

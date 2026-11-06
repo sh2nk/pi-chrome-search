@@ -719,3 +719,29 @@ test("settle uses a selector-only gate and times out honestly under a fake clock
     },
   );
 });
+
+// ---------------------------------------------------------------------------
+// P9-E — pageUrl semantics (what the URL actually is)
+// ---------------------------------------------------------------------------
+
+test("P9-E: Google pageUrl is the host page, Yandex pageUrl is the source image", () => {
+  const google = extractFrom(fixturePage("images-google", "google", GOOGLE_URL).doc, { engine: "google", n: 4 });
+  assert.ok(google.items.length > 0);
+  for (const item of google.items) assert.equal(item.pageUrlKind, "page");
+
+  const yandex = extractFrom(fixturePage("images-yandex", "yandex", YANDEX_URL).doc, { engine: "yandex", n: 4 });
+  assert.ok(yandex.items.length > 0);
+  for (const item of yandex.items) assert.equal(item.pageUrlKind, "image");
+});
+
+test("P9-E: the tool reports pageUrlKind and the description names the Yandex caveat", async () => {
+  const yandex = makeHarness({ page: fixturePage("images-yandex", "yandex", YANDEX_URL).page });
+  const success = expectSuccess(await run(yandex, { q: "red panda", engine: "yandex" }));
+  assert.equal(success.details.pageUrlKind, "image");
+
+  const google = makeHarness({ page: fixturePage("images-google", "google", GOOGLE_URL).page });
+  const googleSuccess = expectSuccess(await run(google, { q: "red panda" }));
+  assert.equal(googleSuccess.details.pageUrlKind, "page");
+
+  assert.match(IMAGE_SEARCH_DESCRIPTION, /Yandex gives the image file, not a page/);
+});

@@ -331,7 +331,14 @@ web_read({ url: string, offset?: number, maxChars?: number, format?: "md" | "tex
 - Navigate in the owned tab, wait for DOM, run an in-page readability pass (article/main scoring,
   strip nav/footer/aside/cookie banners), return Markdown.
 - Defaults: `maxChars=6000`, ceiling `20000`; `offset` for continuation; response states `truncated`,
-  `nextOffset`, `title`, `byline?`, `publishedAt?`.
+  `nextOffset`, `title`, `byline?`, `publishedAt?`, `maxChars`, `clamped`, `totalChars`.
+- `maxChars` above the ceiling is clamped and reported (`clamped: true`), never silently ignored. An
+  `offset` at or past `totalChars` is `E_OFFSET_RANGE` naming the length, never an empty success.
+- Reads are serialized per tab: an exclusive FIFO lock per `read` slot, `config.read.pool` 1..3 slots
+  (default 1). A tab that changes document between navigation and extraction is `E_NAVIGATION_MISMATCH`
+  (post-navigate proof), not a stranger's page.
+- `E_PARSE`, `E_TIMEOUT`, `E_BLOCKED_URL` (after a redirect) and `E_NAVIGATION_MISMATCH` leave an
+  artifact (`page.html`, `page.txt`, `meta.json`).
 - Allow only `http(s)`. Block `localhost`, `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`, `::1`,
   `file:`, `data:`, and non-public DNS resolutions (SSRF guard). Re-check on redirects.
 - Uses the user's session (that's the point), so it can read authenticated pages. Log the domain read.
@@ -340,7 +347,9 @@ web_read({ url: string, offset?: number, maxChars?: number, format?: "md" | "tex
 ```ts
 image_search({ q: string, n?: number /*≤12, default 4*/, engine?: "google" | "yandex", attach?: boolean })
 ```
-Returns compact lines: `alt — pageUrl (thumbUrl)`. `attach` returns up to 4 thumbnails as image blocks
+Returns compact lines: `alt — pageUrl (thumbUrl)`. `details.pageUrlKind` states what the URL is:
+Google tiles disclose the host page (`"page"`); Yandex 2026 tiles disclose the source *image file*
+(`"image"`), and the description says so. `attach` returns up to 4 thumbnails as image blocks
 (off by default: images are expensive).
 
 ### 7.4 `web_research` (deferred, M6, optional)
@@ -529,6 +538,8 @@ Ship a reflex only if it keeps recall within 2 points and cuts returned tokens �
 | `E_BLOCKED_URL` | SSRF/private/file URL | use a public http(s) URL |
 | `E_UNSUPPORTED` | Engine/vertical not implemented | see doctor |
 | `E_CANCELLED` | Aborted | — |
+| `E_NAVIGATION_MISMATCH` | Tab changed document between navigate and extract | retry once; a repeat means the page navigated itself |
+| `E_OFFSET_RANGE` | `web_read` offset ≥ `totalChars` | pass a lower offset (the message carries the length) |
 
 Every tool failure returns:
 ```
@@ -556,7 +567,8 @@ Report (text + `--json`):
 4. per-engine probe (one cheap query, `n=1`, summary off; skippable with `--no-probe`):
    wall? results count? AI block present? latency? canary counts?
 5. classifier availability (if reflex enabled): provider/id found, last verdict latency
-6. actionable verdict per engine: `ok` / `wall` / `layout_changed` / `blocked` / `unavailable`
+6. actionable verdict per engine: `ok` / `wall` / `layout_changed` / `blocked` / `unavailable` /
+   `skipped` (not exercised: `probe:false` or CDP down; keeps the report `degraded`)
 
 `--fix` may: reconnect CDP, close orphan owned tabs, prune artifacts, clear a stale lock.
 It may **not**: restart Chrome, solve captchas, change the profile, install anything.
@@ -593,7 +605,7 @@ Strict JSON; unknown keys are an error (`E_CONFIG`). Env overrides in brackets.
     "summaryMaxChars": 1200, "snippetMaxChars": 140, "outputMaxChars": 2500,
     "aiWaitMs": 6000, "aiExpand": false
   },
-  "read":   { "defaultMaxChars": 6000, "maxCharsCeiling": 20000 },
+  "read":   { "defaultMaxChars": 6000, "maxCharsCeiling": 20000, "pool": 1 },
   "cache":  { "serpTtlMs": 600000, "gotoTtlMs": 86400000, "maxEntries": 200 },
   "captcha": { "waitMs": 0, "retryYandexOnce": true },
   "artifacts": { "enabled": true, "keep": 30, "maxBytes": 52428800 },

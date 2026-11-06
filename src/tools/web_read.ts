@@ -21,7 +21,8 @@
 
 import { Type, type Static } from "typebox";
 
-import type { CdpPage } from "../cdp/types.ts";
+import { pageLockFor, readSlotKeys } from "../cdp/page-lock.ts";
+import type { CdpPage, PageKey } from "../cdp/types.ts";
 import type { Config } from "../config.ts";
 import type { EngineId } from "../engines/types.ts";
 import {
@@ -33,7 +34,8 @@ import {
   type ReadableDocument,
 } from "../extract/read.ts";
 import type { Reflex } from "../reflex/types.ts";
-import type { Stage } from "../runtime/error-codes.ts";
+import { saveFailureArtifact } from "../runtime/artifacts.ts";
+import type { FailureDetails, Stage, WebSearchError } from "../runtime/error-codes.ts";
 import { isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, renderToolFailure, toFailure } from "../runtime/errors.ts";
 import type { FailureFallback, FailureJson, ToolTextBlock } from "../runtime/errors.ts";
@@ -71,6 +73,12 @@ export interface WebReadDetails {
   truncated: boolean;
   /** Pass back as `offset` to continue. */
   nextOffset?: number;
+  /** Effective window width after the ceiling clamp. */
+  maxChars: number;
+  /** True when the caller asked for more than the ceiling and was clamped. */
+  clamped: boolean;
+  /** Length of the whole rendered document; the valid `offset` range is `0..totalChars-1`. */
+  totalChars: number;
   format: "md" | "text";
 }
 
@@ -137,11 +145,12 @@ const READ_GATE_HINT =
   "read another URL or set reflex.enabled=false to turn the gate off";
 
 /**
- * Reads get their own work tab (`PageKey` in `src/cdp/types.ts`): a long article
+ * Reads get their own work tabs (`PageKey` in `src/cdp/types.ts`): a long article
  * must never navigate the google SERP tab out from under a result the tool just
  * cached, and a read must not inherit the engine's humanize/focus state.
+ * `config.read.pool` (default 1) decides how many slots exist; each slot has its
+ * own exclusive lock, so two reads on the same slot can never interleave.
  */
-const READ_PAGE_KEY = "read" as const;
 
 const BLOCK_KINDS: ReadonlySet<string> = new Set([
   "heading",
@@ -160,6 +169,7 @@ interface NormalizedInput {
   url: string;
   offset: number;
   maxChars: number;
+  clamped: boolean;
   format: "md" | "text";
 }
 
@@ -201,13 +211,16 @@ function normalizeInput(raw: unknown, config: Config): Validation {
   // The ceiling is a clamp, never an error: a caller asking for 999999 gets the
   // largest window the SPEC allows instead of a wasted E_CONFIG round trip.
   const maxChars = Math.min(ceiling, Math.max(1, Math.floor(requested)));
+  // P9-D: the clamp is reported, not hidden. A caller who asked for 99999 must
+  // be able to tell a short page from a window that was silently narrowed.
+  const clamped = typeof raw.maxChars === "number" && Math.floor(raw.maxChars) > maxChars;
 
   if (raw.format !== undefined && raw.format !== "md" && raw.format !== "text") {
     return { ok: false, message: `format: expected "md" or "text", got ${JSON.stringify(raw.format)}` };
   }
   const format = raw.format === "text" ? "text" : "md";
 
-  return { ok: true, value: { url, offset, maxChars, format } };
+  return { ok: true, value: { url, offset, maxChars, clamped, format } };
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +364,85 @@ async function readGateAllows(reflex: Reflex, url: string): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
+// Failure snapshots + the post-navigate proof
+// ---------------------------------------------------------------------------
+
+/**
+ * Codes whose failure is a property of the *page* (or of the tab's integrity),
+ * not of the transport: those leave an artifact. An abort or a dropped socket
+ * has nothing to inspect, and a snapshot would only add noise.
+ */
+const ARTIFACT_CODES: ReadonlySet<string> = new Set([
+  "E_PARSE",
+  "E_TIMEOUT",
+  "E_BLOCKED_URL",
+  "E_NAVIGATION_MISMATCH",
+]);
+
+/**
+ * `currentUrl()` can legitimately fail on a detached tab (the target is gone);
+ * the cached URL is then the best evidence the artifact writer can get.
+ */
+async function safeCurrentUrl(page: CdpPage): Promise<string> {
+  try {
+    const value = await page.currentUrl();
+    if (typeof value === "string" && value.trim() !== "") return value;
+  } catch {
+    // Fall through to the cached value.
+  }
+  try {
+    return page.url();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Write the failure snapshot when the code warrants one. `query` is empty on
+ * purpose: a read has no query, and the URL already carries the subject.
+ */
+async function snapshotFailure(
+  deps: ToolDeps,
+  page: CdpPage,
+  failure: FailureDetails,
+): Promise<string | undefined> {
+  if (!ARTIFACT_CODES.has(failure.code)) return undefined;
+  return await saveFailureArtifact(deps, {
+    code: failure.code,
+    stage: failure.stage,
+    url: await safeCurrentUrl(page),
+    query: "",
+    page,
+  });
+}
+
+/** Re-throw a failure with the artifact directory attached (P9-C). */
+async function failWithArtifact(
+  deps: ToolDeps,
+  page: CdpPage,
+  failure: WebSearchError,
+): Promise<never> {
+  const artifact = await snapshotFailure(deps, page, failure.details);
+  throw fail(failure.details.code, failure.details.stage, {
+    ...(failure.details.engine === undefined ? {} : { engine: failure.details.engine }),
+    hint: failure.details.hint,
+    ...(failure.details.wall === undefined ? {} : { wall: failure.details.wall }),
+    ...(artifact === undefined ? {} : { artifact }),
+    ...(failure.details.message === undefined ? {} : { message: failure.details.message }),
+  });
+}
+
+/**
+ * Same-document check for the post-navigate proof. A fragment or a trailing
+ * slash is not a different page; a host, path or query change is.
+ */
+function sameDocument(left: string, right: string): boolean {
+  const strip = (value: string): string => value.replace(/#.*$/s, "").replace(/\/+$/, "");
+  if (left === right) return true;
+  return strip(left) === strip(right);
+}
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
@@ -381,6 +473,11 @@ export function createWebReadTool(
     }
   }
 
+  /**
+   * P9-A: one exclusive lock per read slot. `pick` is synchronous and runs
+   * immediately before `run` registers the task, so two callers in the same
+   * tick choose different slots instead of queueing behind each other.
+   */
   async function read(
     deps: ToolDeps,
     params: WebReadInput,
@@ -414,9 +511,23 @@ export function createWebReadTool(
       }
     }
 
+    const lock = pageLockFor(deps.cdp);
+    const slots = readSlotKeys(deps.config.read.pool);
+    const slot = lock.pick(slots);
+
+    return await lock.run(slot, () => readSlot(deps, input, requested, slot, signal));
+  }
+
+  async function readSlot(
+    deps: ToolDeps,
+    input: NormalizedInput,
+    requested: URL,
+    slot: string,
+    signal: AbortSignal | undefined,
+  ): Promise<WebReadResult> {
     let page: CdpPage;
     try {
-      page = await deps.cdp.acquirePage(READ_PAGE_KEY);
+      page = await deps.cdp.acquirePage(slot as PageKey);
     } catch (error) {
       throw asFailure(error, "connect", "E_CDP_DISCONNECTED", signal);
     }
@@ -424,34 +535,74 @@ export function createWebReadTool(
     try {
       await page.navigate(requested.href, signal === undefined ? {} : { signal });
     } catch (error) {
-      throw asFailure(error, "navigate", "E_CDP_DISCONNECTED", signal);
+      throw await failWithArtifact(deps, page, asFailure(error, "navigate", "E_CDP_DISCONNECTED", signal));
     }
 
-    const landed = page.url();
+    // P9-B: `page.url()` is a target-event cache; a redirect or the typed path
+    // can leave it stale. Ask the document, then prove it did not move again
+    // after the extractor ran (a second writer would be a stranger's page).
+    const landed = await safeCurrentUrl(page);
     if (typeof landed !== "string" || landed.trim() === "") {
-      throw fail("E_BLOCKED_URL", "read", {
-        hint: "the tab did not report a URL; retry or use a public site",
-        message: "navigation landed without a URL",
-      });
+      throw await failWithArtifact(
+        deps,
+        page,
+        fail("E_BLOCKED_URL", "read", {
+          hint: "the tab did not report a URL; retry or use a public site",
+          message: "navigation landed without a URL",
+        }),
+      );
     }
-    const final = await recheckLanding(landed, options);
+    let final: URL;
+    try {
+      final = await recheckLanding(landed, options);
+    } catch (error) {
+      throw await failWithArtifact(
+        deps,
+        page,
+        isWebSearchError(error)
+          ? error
+          : fail("E_BLOCKED_URL", "read", { message: "the landing URL failed the SSRF guard" }),
+      );
+    }
 
     let raw: unknown;
     try {
       raw = await page.evaluate<unknown>(`(${extractReadableDocument.toString()})(document)`);
     } catch (error) {
-      throw asFailure(error, "extract", "E_PARSE", signal);
+      throw await failWithArtifact(deps, page, asFailure(error, "extract", "E_PARSE", signal));
+    }
+
+    const after = await safeCurrentUrl(page);
+    if (!sameDocument(landed, after)) {
+      throw await failWithArtifact(
+        deps,
+        page,
+        fail("E_NAVIGATION_MISMATCH", "read", {
+          message: "the tab changed document between navigation and extraction; retry the read",
+        }),
+      );
     }
 
     const data = toReadableDocument(raw);
     if (data === null) {
-      throw fail("E_PARSE", "extract", {
-        hint: "the readability pass returned an unusable payload; retry or open the page manually",
-        message: "page extraction did not return a readable document",
-      });
+      throw await failWithArtifact(
+        deps,
+        page,
+        fail("E_PARSE", "extract", {
+          hint: "the readability pass returned an unusable payload; retry or open the page manually",
+          message: "page extraction did not return a readable document",
+        }),
+      );
     }
     if (data.blocks.length === 0) {
-      throw fail("E_PARSE", "extract", { hint: UNSUPPORTED_HINT, message: "the readability pass found no text blocks" });
+      throw await failWithArtifact(
+        deps,
+        page,
+        fail("E_PARSE", "extract", {
+          hint: UNSUPPORTED_HINT,
+          message: "the readability pass found no text blocks",
+        }),
+      );
     }
 
     const rendered = renderReadableDocument(data, {
@@ -459,6 +610,20 @@ export function createWebReadTool(
       offset: input.offset,
       maxChars: input.maxChars,
     });
+
+    // P9-D: an offset past the end used to return "" with no explanation. The
+    // caller needs the length to compute the next call, not a silent empty page.
+    if (input.offset > 0 && input.offset >= rendered.totalChars) {
+      throw await failWithArtifact(
+        deps,
+        page,
+        fail("E_OFFSET_RANGE", "render", {
+          message:
+            `offset ${input.offset} is past the end: the rendered document is ${rendered.totalChars} chars ` +
+            `(valid range 0..${Math.max(0, rendered.totalChars - 1)})`,
+        }),
+      );
+    }
 
     const details: WebReadDetails = {
       url: requested.href,
@@ -469,6 +634,9 @@ export function createWebReadTool(
       chars: rendered.chars,
       truncated: rendered.truncated,
       ...(rendered.nextOffset === undefined ? {} : { nextOffset: rendered.nextOffset }),
+      maxChars: input.maxChars,
+      clamped: input.clamped,
+      totalChars: rendered.totalChars,
       format: input.format,
     };
 

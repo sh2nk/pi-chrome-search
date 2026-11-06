@@ -21,7 +21,7 @@ import {
 } from "../../src/extract/read.ts";
 import { createCache } from "../../src/runtime/cache.ts";
 import type { ResolveHost } from "../../src/runtime/ssrf.ts";
-import type { Artifacts, Cache, Limiter, LimiterStats, Logger } from "../../src/runtime/types.ts";
+import type { ArtifactInput, Artifacts, Cache, Limiter, LimiterStats, Logger } from "../../src/runtime/types.ts";
 import type { ToolDeps } from "../../src/tools/types.ts";
 import {
   WEB_READ_DESCRIPTION,
@@ -32,6 +32,8 @@ import {
   type WebReadResult,
   type WebReadSuccess,
 } from "../../src/tools/web_read.ts";
+import { pageLockFor } from "../../src/cdp/page-lock.ts";
+import { fail } from "../../src/runtime/errors.ts";
 import { FakeClock } from "../helpers/clock.ts";
 import { FakePage } from "../helpers/fake-page.ts";
 
@@ -69,6 +71,10 @@ interface HarnessOptions {
   item?: ReadableDocument;
   config?: (config: Config) => void;
   acquireError?: unknown;
+  /** Replace the default artifact stub (which deliberately throws on save). */
+  artifacts?: Artifacts;
+  /** Pooled harness: a distinct page per `PageKey` (a real browser has one tab per slot). */
+  pagesByKey?: Record<string, FakePage>;
 }
 
 interface Harness {
@@ -78,6 +84,7 @@ interface Harness {
   rows: Record<string, unknown>[];
   pagesRequested: number;
   pageKeys: string[];
+  artifactInputs: ArtifactInput[];
 }
 
 function makeHarness(options: HarnessOptions = {}): Harness {
@@ -103,18 +110,22 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     },
   };
 
-  const artifacts: Artifacts = {
-    async save(): Promise<string> {
-      throw new Error("web_read must not write artifacts in this lane");
-    },
-    async prune() {
-      return { removed: 0, kept: 0, bytes: 0 };
-    },
-    async size() {
-      return 0;
-    },
-    root: () => "/tmp/opencode/pi-chrome-search/artifacts",
-  };
+  const artifactInputs: ArtifactInput[] = [];
+  const artifacts: Artifacts =
+    options.artifacts ??
+    ({
+      async save(input: ArtifactInput): Promise<string> {
+        artifactInputs.push(input);
+        throw new Error("web_read must not write artifacts in this lane");
+      },
+      async prune() {
+        return { removed: 0, kept: 0, bytes: 0 };
+      },
+      async size() {
+        return 0;
+      },
+      root: () => "/tmp/opencode/pi-chrome-search/artifacts",
+    } satisfies Artifacts);
 
   const cache: Cache = createCache({ maxEntries: 10, clock });
   let pagesRequested = 0;
@@ -127,7 +138,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
       pagesRequested += 1;
       pageKeys.push(key);
       if (options.acquireError !== undefined) throw options.acquireError;
-      return page;
+      return options.pagesByKey?.[key] ?? page;
     },
     async releaseAll() {},
     isConnected: () => true,
@@ -161,6 +172,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
       return pagesRequested;
     },
     pageKeys,
+    artifactInputs,
   };
 }
 
@@ -574,4 +586,239 @@ test("a logger failure never turns a successful read into an error", async () =>
   };
   const result = await run(harness, { url: "https://example.test/page" });
   assert.equal(isFailure(result), false);
+});
+
+// ---------------------------------------------------------------------------
+// P9-A — serialization (V9.1/V9.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * One page whose body follows the URL, plus a deliberate async gap in the
+ * extractor. Without the per-slot lock both calls navigate before either
+ * extracts, so both return the *last* body — the exact field regression.
+ */
+function racingPage(docs: Record<string, ReadableDocument>): {
+  page: FakePage;
+  extractionUrl: () => string;
+} {
+  let current = DEFAULT_DOC;
+  let currentUrl = "about:blank";
+  const page = new FakePage({ url: "about:blank" });
+  page.setNavigateHandler((url) => {
+    currentUrl = url;
+    current = docs[url] ?? DEFAULT_DOC;
+  });
+  page.setEvaluateHandlers(async () => {
+    // Yield twice: a parallel caller gets a window to navigate this same tab.
+    await Promise.resolve();
+    await Promise.resolve();
+    return current;
+  });
+  return { page, extractionUrl: () => currentUrl };
+}
+
+function docFor(host: string): ReadableDocument {
+  return {
+    title: `Page ${host}`,
+    blocks: [{ kind: "paragraph", inlines: [{ kind: "text", text: `body of ${host}` }] }],
+  };
+}
+
+test("V9.1: two concurrent reads of different domains return their own bodies", async () => {
+  const urls = ["https://alpha.test/page", "https://beta.test/page"];
+  const { page } = racingPage({ [urls[0]!]: docFor("alpha.test"), [urls[1]!]: docFor("beta.test") });
+  const harness = makeHarness({ page });
+
+  const [first, second] = await Promise.all([
+    run(harness, { url: urls[0] }),
+    run(harness, { url: urls[1] }),
+  ]);
+
+  const firstText = textOf(first);
+  const secondText = textOf(second);
+  assert.match(firstText, /body of alpha\.test/);
+  assert.match(secondText, /body of beta\.test/);
+  assert.ok(!firstText.includes("beta.test"), "a read must never inherit the other caller's body");
+  assert.ok(!secondText.includes("alpha.test"));
+  assert.equal(harness.pageKeys[0], "read", "pool=1 keeps the historical single key");
+});
+
+test("V9.2: twelve concurrent reads complete without cross-contamination or a leaked lock", async () => {
+  const urls = Array.from({ length: 12 }, (_, index) => `https://site${index}.test/page`);
+  const docs: Record<string, ReadableDocument> = {};
+  for (const url of urls) docs[url] = docFor(new URL(url).host);
+
+  const { page } = racingPage(docs);
+  const harness = makeHarness({ page });
+
+  const results = await Promise.all(urls.map((url) => run(harness, { url })));
+  for (const [index, result] of results.entries()) {
+    const text = textOf(result);
+    assert.match(text, new RegExp(`body of site${index}\\.test`));
+    for (let other = 0; other < urls.length; other += 1) {
+      if (other === index) continue;
+      assert.ok(!text.includes(`body of site${other}.test`), `read ${index} leaked ${other}`);
+    }
+  }
+  assert.equal(pageLockFor(harness.deps.cdp).pending(), 0, "no lock may survive the batch");
+});
+
+test("read.pool > 1 uses distinct slots and still serializes each slot", async () => {
+  const urls = ["https://one.test/a", "https://two.test/b"];
+  const first = racingPage({ [urls[0]!]: docFor("one.test") });
+  const second = racingPage({ [urls[1]!]: docFor("two.test") });
+  const harness = makeHarness({
+    page: first.page,
+    pagesByKey: { read: first.page, "read#2": second.page },
+    config: (config) => (config.read.pool = 2),
+  });
+
+  const [one, two] = await Promise.all([
+    run(harness, { url: urls[0] }),
+    run(harness, { url: urls[1] }),
+  ]);
+
+  assert.deepEqual([...harness.pageKeys].sort(), ["read", "read#2"]);
+  assert.match(textOf(one), /body of one\.test/);
+  assert.match(textOf(two), /body of two\.test/);
+  assert.equal(pageLockFor(harness.deps.cdp).pending(), 0);
+});
+
+test("a throwing read releases the next waiter (no poisoned queue)", async () => {
+  const { page } = racingPage({ "https://ok.test/p": docFor("ok.test") });
+  const harness = makeHarness({ page });
+  const broken = await run(harness, { url: "https://internal.example.test/p" });
+  assert.equal(failure(broken).details.code, "E_BLOCKED_URL");
+  const ok = await run(harness, { url: "https://ok.test/p" });
+  assert.match(textOf(ok), /body of ok\.test/);
+  assert.equal(pageLockFor(harness.deps.cdp).pending(), 0);
+});
+
+// ---------------------------------------------------------------------------
+// P9-B — post-navigate proof (E_NAVIGATION_MISMATCH)
+// ---------------------------------------------------------------------------
+
+test("a tab that changes document after navigation is a mismatch, not a stranger's page", async () => {
+  const page = new FakePage({ url: "about:blank", evaluate: () => DEFAULT_DOC });
+  let calls = 0;
+  page.currentUrl = async (): Promise<string> => {
+    calls += 1;
+    return calls === 1 ? "https://example.test/page" : "https://other.test/page";
+  };
+  const harness = makeHarness({ page });
+
+  const result = failure(await run(harness, { url: "https://example.test/page" }));
+  assert.equal(result.details.code, "E_NAVIGATION_MISMATCH");
+  assert.equal(result.details.stage, "read");
+  assert.equal(result.details.retryable, true);
+  assert.ok(!textOf(result).includes("Hello read world"));
+});
+
+test("a fragment-only change is the same document (no false mismatch)", async () => {
+  const page = new FakePage({ url: "about:blank", evaluate: () => DEFAULT_DOC });
+  let calls = 0;
+  page.currentUrl = async (): Promise<string> => {
+    calls += 1;
+    return calls === 1 ? "https://example.test/page" : "https://example.test/page#section";
+  };
+  const harness = makeHarness({ page });
+  const result = success(await run(harness, { url: "https://example.test/page" }));
+  assert.match(textOf(result), /Hello read world/);
+});
+
+// ---------------------------------------------------------------------------
+// P9-C — an artifact on every page-state failure (V9.3/V9.4)
+// ---------------------------------------------------------------------------
+
+function capturingArtifacts(root = "/tmp/opencode/p9-artifacts"): {
+  artifacts: Artifacts;
+  inputs: ArtifactInput[];
+} {
+  const inputs: ArtifactInput[] = [];
+  return {
+    inputs,
+    artifacts: {
+      async save(input: ArtifactInput): Promise<string> {
+        inputs.push(input);
+        return `${root}/artifact`;
+      },
+      async prune() {
+        return { removed: 0, kept: 0, bytes: 0 };
+      },
+      async size() {
+        return 0;
+      },
+      root: () => root,
+    },
+  };
+}
+
+test("V9.3: an induced E_PARSE leaves page.html/page.txt/meta.json writable", async () => {
+  const page = new FakePage({ url: "about:blank", evaluate: () => ({ title: "broken", blocks: "nope" }) });
+  const captured = capturingArtifacts();
+  const harness = makeHarness({ page, artifacts: captured.artifacts });
+
+  const result = failure(await run(harness, { url: "https://example.test/broken" }));
+  assert.equal(result.details.code, "E_PARSE");
+  assert.equal(result.details.artifact, "/tmp/opencode/p9-artifacts/artifact");
+  const input = captured.inputs[0];
+  assert.ok(input !== undefined, "the failure must be snapshotted");
+  assert.equal(input.code, "E_PARSE");
+  assert.equal(input.stage, "extract");
+  assert.equal(input.page, page, "the writer needs the live page for html/txt/jpeg");
+  assert.equal(input.url, "https://example.test/broken");
+});
+
+test("V9.4: a redirect to a blocked address produces an artifact and E_BLOCKED_URL", async () => {
+  const page = new FakePage({ url: "about:blank", evaluate: () => DEFAULT_DOC });
+  page.setNavigateHandler((_url, p) => {
+    p.setUrl("http://192.168.1.10/private");
+  });
+  const captured = capturingArtifacts();
+  const harness = makeHarness({ page, artifacts: captured.artifacts });
+
+  const result = failure(await run(harness, { url: "https://example.test/start" }));
+  assert.equal(result.details.code, "E_BLOCKED_URL");
+  assert.equal(result.details.artifact, "/tmp/opencode/p9-artifacts/artifact");
+  assert.equal(captured.inputs[0]?.code, "E_BLOCKED_URL");
+  assert.equal(harness.page.callCount("evaluate"), 0, "the guard rejected the landing page before extraction");
+});
+
+test("a transport failure (no page state) does not invent an artifact", async () => {
+  const captured = capturingArtifacts();
+  const harness = makeHarness({
+    artifacts: captured.artifacts,
+    acquireError: fail("E_CDP_DISCONNECTED", "connect"),
+  });
+  const result = failure(await run(harness, { url: "https://example.test/page" }));
+  assert.equal(result.details.code, "E_CDP_DISCONNECTED");
+  assert.equal(result.details.artifact, undefined);
+  assert.equal(captured.inputs.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// P9-D — offset/maxChars truth (V9.5)
+// ---------------------------------------------------------------------------
+
+test("V9.5: an offset past the end is an explicit E_OFFSET_RANGE with the length", async () => {
+  const harness = makeHarness({ item: longDoc() });
+  const result = failure(await run(harness, { url: "https://example.test/long", offset: 10_000_000 }));
+  assert.equal(result.details.code, "E_OFFSET_RANGE");
+  assert.equal(result.details.stage, "render");
+  assert.equal(result.details.retryable, false);
+  assert.match(textOf(result), /offset is past the end/i);
+  assert.match(result.details.message ?? "", /offset \d+ is past the end/i);
+  assert.match(result.details.message ?? "", /\d+ chars/);
+});
+
+test("V9.5: maxChars over the ceiling is clamped and reported, never silent", async () => {
+  const harness = makeHarness({ item: longDoc() });
+  const result = success(await run(harness, { url: "https://example.test/long", maxChars: 99_999 }));
+  assert.equal(result.details.maxChars, READ_MAX_CHARS_CEILING);
+  assert.equal(result.details.clamped, true);
+  assert.ok(result.details.totalChars > READ_MAX_CHARS_CEILING);
+
+  const normal = success(await run(harness, { url: "https://example.test/long", maxChars: 500 }));
+  assert.equal(normal.details.maxChars, 500);
+  assert.equal(normal.details.clamped, false);
 });

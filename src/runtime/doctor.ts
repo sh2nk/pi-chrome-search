@@ -51,10 +51,25 @@ import { EXTENSION_NAME, EXTENSION_VERSION } from "../version.ts";
  */
 const CONNECT_GRACE_MS = 2_000;
 
+/**
+ * A connect that ran out of time is not yet a failed connect: on this host the
+ * first attach after the last Chrome window was closed needs a fresh window,
+ * which can outlive the doctor's budget by several seconds (observed ~10 s on
+ * Wayland). The fix waits this long for the *same* in-flight promise before it
+ * calls the outcome a failure, so the action log cannot claim
+ * `reconnect failed` for a browser that is demonstrably attaching (P9-D).
+ */
+const LATE_CONNECT_GRACE_MS = 6_000;
+
 /** The wall vocabulary is frozen in `engines/types.ts`; probe data arrives as `unknown`. */
 const WALL_KINDS = ["captcha", "consent", "sorry", "blocked"] as const;
 
-export type EngineVerdict = "ok" | "wall" | "layout_changed" | "blocked" | "unavailable";
+/**
+ * `skipped` means "not exercised" (caller asked for no probe, or CDP was down),
+ * which is different from `unavailable` ("tried and could not"). It still keeps
+ * the overall verdict at `degraded`: a doctor with no evidence is not healthy.
+ */
+export type EngineVerdict = "ok" | "wall" | "layout_changed" | "blocked" | "unavailable" | "skipped";
 export type CdpStatus = "ok" | "unavailable" | "busy" | "error";
 export type DoctorVerdict = "ok" | "degraded" | "blocked";
 
@@ -403,6 +418,10 @@ export interface DoctorFixOptions {
   alive?: (pid: number) => boolean;
   /** Test seam; defaults to `fs.unlink`. */
   remove?: (path: string) => Promise<void>;
+  /** Test seam; how long a timed-out connect may still settle successfully. */
+  lateConnectGraceMs?: number;
+  /** Test seam; how long discovery is allowed to take on top of the connect timeout. */
+  connectGraceMs?: number;
 }
 
 function isConnected(connector: Connector | undefined): boolean {
@@ -414,9 +433,38 @@ function isConnected(connector: Connector | undefined): boolean {
   }
 }
 
-/** Connect once with the same deadline the report uses, so `--fix` cannot hang either. */
-async function boundedConnect(connector: Connector, config: Config): Promise<void> {
-  await withDeadline(connector.connect(), config.cdp.connectTimeoutMs + CONNECT_GRACE_MS);
+type ConnectOutcome = { ok: true; late: boolean } | { ok: false; code: string };
+
+/**
+ * Connect once with a bounded budget, but never abandon a still-running attempt
+ * silently: after a timeout the same promise gets a late grace, so the caller
+ * reports what actually happened. A rejection after the grace is a failure with
+ * the original code.
+ */
+async function boundedConnect(
+  connector: Connector,
+  config: Config,
+  options: DoctorFixOptions = {},
+): Promise<ConnectOutcome> {
+  const task = connector.connect();
+  const budgetMs =
+    config.cdp.connectTimeoutMs + (options.connectGraceMs ?? CONNECT_GRACE_MS);
+  const lateGraceMs = options.lateConnectGraceMs ?? LATE_CONNECT_GRACE_MS;
+  try {
+    await withDeadline(task, budgetMs);
+    return { ok: true, late: false };
+  } catch (error) {
+    const details = toFailure(error, { code: "E_CDP_UNAVAILABLE", stage: "connect" });
+    try {
+      await withDeadline(task, lateGraceMs);
+      return { ok: true, late: true };
+    } catch {
+      // The socket may have come up between the two checks (a late success
+      // that raced the grace): the connector is the authority, not the timer.
+      if (connector.isConnected()) return { ok: true, late: true };
+      return { ok: false, code: details.code };
+    }
+  }
 }
 
 /**
@@ -442,19 +490,17 @@ export async function applyDoctorFix(
 
   if (connector !== undefined) {
     if (!isConnected(connector)) {
-      try {
-        await boundedConnect(connector, deps.config);
-        actions.push("connected to CDP");
-      } catch (error) {
-        const details = toFailure(error, { code: "E_CDP_UNAVAILABLE", stage: "connect" });
-        if (details.code === "E_BUSY") busy = true;
-        actions.push(`connect failed: ${details.code}`);
+      const first = await boundedConnect(connector, deps.config, options);
+      if (first.ok) {
+        actions.push(first.late ? "connected to CDP (after the deadline)" : "connected to CDP");
+      } else {
+        if (first.code === "E_BUSY") busy = true;
+        actions.push(`connect failed: ${first.code}`);
         // Exactly one retry (SPEC §10.3: reconnect), never a loop.
-        try {
-          await boundedConnect(connector, deps.config);
-          actions.push("reconnected to CDP once");
-        } catch (retryError) {
-          const retry = toFailure(retryError, { code: "E_CDP_UNAVAILABLE", stage: "connect" });
+        const retry = await boundedConnect(connector, deps.config, options);
+        if (retry.ok) {
+          actions.push(retry.late ? "reconnected to CDP once (after the deadline)" : "reconnected to CDP once");
+        } else {
           if (retry.code === "E_BUSY") busy = true;
           actions.push(`reconnect failed: ${retry.code}`);
         }
@@ -478,16 +524,25 @@ export async function applyDoctorFix(
         actions.push(`release failed: ${details.code}`);
       }
 
-      try {
-        await boundedConnect(connector, deps.config);
+      // P9-D: a reconnect is only a reconnect when the session is actually gone.
+      // The old code always connected and always printed a line, so a session
+      // that survived (or a release that failed) could be reported as a failed
+      // reconnect for a browser that was demonstrably alive.
+      if (!isConnected(connector)) {
+        const reconnected = await boundedConnect(connector, deps.config, options);
         // Distinct from the retry above: a first-attempt failure already logged
         // "reconnected to CDP once", and printing that twice makes the action
         // log lie about how many times the doctor actually reconnected.
-        actions.push("reconnected after release");
-      } catch (error) {
-        const details = toFailure(error, { code: "E_CDP_UNAVAILABLE", stage: "connect" });
-        if (details.code === "E_BUSY") busy = true;
-        actions.push(`reconnect failed: ${details.code}`);
+        if (reconnected.ok) {
+          actions.push(
+            reconnected.late ? "reconnected after release (after the deadline)" : "reconnected after release",
+          );
+        } else {
+          if (reconnected.code === "E_BUSY") busy = true;
+          actions.push(`reconnect failed: ${reconnected.code}`);
+        }
+      } else {
+        actions.push("session still open; reconnect not required");
       }
     }
   }
@@ -773,7 +828,7 @@ async function engineEntry(
     };
   }
   if (!probeEnabled) {
-    return { id, enabled: true, verdict: "unavailable", note: "probe skipped (--no-probe)" };
+    return { id, enabled: true, verdict: "skipped", note: "probe not requested (probe:false)" };
   }
   // Without a live CDP session every probe would just repeat the same failed
   // connect (three times, each up to connectTimeoutMs). Report the truthful
@@ -782,7 +837,7 @@ async function engineEntry(
     return {
       id,
       enabled: true,
-      verdict: "unavailable",
+      verdict: "skipped",
       note: `probe skipped: CDP is ${cdpStatus}`,
     };
   }

@@ -169,6 +169,15 @@ export class FakePage implements CdpPage {
     return this.#url;
   }
 
+  /**
+   * The authoritative URL. Offline tests exercise the post-navigate proof with
+   * the same value as `url()`; a test that wants a racing document overrides
+   * this method or swaps the URL from an evaluate handler.
+   */
+  async currentUrl(): Promise<string> {
+    return this.#url;
+  }
+
   async title(): Promise<string> {
     this.#record({ kind: "title" });
     return this.#title;

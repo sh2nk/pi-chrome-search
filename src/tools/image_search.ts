@@ -41,7 +41,7 @@ import type { ErrorCode, FailureDetails, Stage } from "../runtime/error-codes.ts
 import { isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, renderToolFailure, toFailure } from "../runtime/errors.ts";
 import type { FailureJson, ToolTextBlock } from "../runtime/errors.ts";
-import type { ArtifactInput } from "../runtime/types.ts";
+import { saveFailureArtifact } from "../runtime/artifacts.ts";
 import type { ToolDeps } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -68,6 +68,12 @@ export interface ImageSearchDetails {
   /** True when items were dropped, by `n` on the page or by the output budget. */
   pageCarried: boolean;
   attach: boolean;
+  /**
+   * What `pageUrl` in each line points at (P9-E). Google tiles give the host
+   * page; Yandex 2026 tiles disclose only the source image file — calling it a
+   * page would be the kind of small lie this phase removes.
+   */
+  pageUrlKind: "page" | "image";
 }
 
 export interface ImageSearchSuccess {
@@ -105,7 +111,7 @@ export interface ImageSearchTool {
  * about the two engines, the line shape and the expensive `attach` flag.
  */
 export const IMAGE_SEARCH_DESCRIPTION =
-  "Search images in the user's visible Chrome (Google or Yandex). Compact lines: alt — pageUrl (thumbUrl). n<=12, default 4; attach:true adds up to 4 thumbnail URLs (no image bytes).";
+  "Search images in your visible Chrome (Google, Yandex). Line: alt — pageUrl (thumbUrl); Yandex gives the image file, not a page. n<=12, default 4; attach adds ≤4 thumbnail URLs (no bytes).";
 
 const DEFAULT_N = 4;
 const MAX_N = 12;
@@ -274,15 +280,6 @@ function wallFailure(
 // Side-effect helpers (artifacts/surfacing are best-effort, never new failures)
 // ---------------------------------------------------------------------------
 
-async function saveArtifact(deps: ToolDeps, input: ArtifactInput): Promise<string | undefined> {
-  if (!deps.config.artifacts.enabled) return undefined;
-  try {
-    return await deps.artifacts.save(input);
-  } catch {
-    return undefined;
-  }
-}
-
 async function surface(page: CdpPage): Promise<void> {
   try {
     await page.bringToFront();
@@ -435,7 +432,7 @@ async function search(
   }
 
   if (wall !== null) {
-    const artifact = await saveArtifact(deps, {
+    const artifact = await saveFailureArtifact(deps, {
       code: "E_WALL",
       stage: "navigate",
       engine,
@@ -458,7 +455,7 @@ async function search(
     if (failure.details.code !== "E_PARSE" && failure.details.code !== "E_WALL") {
       return failureResult(failure);
     }
-    const artifact = await saveArtifact(deps, {
+    const artifact = await saveFailureArtifact(deps, {
       code: failure.details.code,
       stage: failure.details.stage,
       engine,
@@ -491,12 +488,15 @@ async function search(
   // and this renderer (whole lines dropped by the output budget). Reporting
   // only the page half would say `false` while the result visibly stops early.
   const pageCarried = extraction.pageCarried || extraction.items.length > rendered.items;
+  const first = extraction.items[0];
+  const pageUrlKind = first?.pageUrlKind ?? (engine === "yandex" ? "image" : "page");
   const details: ImageSearchDetails = {
     engine,
     items: rendered.items,
     chars: rendered.text.length,
     pageCarried,
     attach: input.attach,
+    pageUrlKind,
   };
   return { content: [{ type: "text", text: rendered.text }], details };
 }
