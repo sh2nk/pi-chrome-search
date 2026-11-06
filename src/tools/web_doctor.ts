@@ -17,6 +17,12 @@
  * reconnect once, close only this connector's owned tabs, prune artifacts and
  * clear a lock whose owner is dead. It never signals a process and never closes
  * a foreign tab.
+ *
+ * `readOnlyHint` is **false**, deliberately: with `fix: true` the tool closes
+ * owned tabs and prunes artifact files, which mutates the browser and the disk.
+ * Claiming read-only would let a caller batch it with genuinely inert tools.
+ * It is still `openWorldHint` (it talks to the live browser) and
+ * `idempotentHint` (a repeat call converges on the same state).
  */
 
 import { Type, type Static } from "typebox";
@@ -69,7 +75,7 @@ export interface WebDoctorTool {
   description: string;
   parameters: typeof webDoctorSchema;
   exposure: "deferred";
-  annotations: { readOnlyHint: true; openWorldHint: true; idempotentHint: true };
+  annotations: { readOnlyHint: false; openWorldHint: true; idempotentHint: true };
   execute(
     toolCallId: string,
     params: WebDoctorInput,
@@ -200,7 +206,7 @@ export function createWebDoctorTool(getDeps: WebDoctorDepsGetter): WebDoctorTool
     description: WEB_DOCTOR_DESCRIPTION,
     parameters: webDoctorSchema,
     exposure: "deferred",
-    annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+    annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: true },
     execute,
   };
 }

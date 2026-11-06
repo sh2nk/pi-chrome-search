@@ -51,8 +51,9 @@ import type { DoctorDeps, DoctorReport, EngineProbe } from "../runtime/doctor.ts
 import { isWebSearchError } from "../runtime/error-codes.ts";
 import type { FailureDetails } from "../runtime/error-codes.ts";
 import { fail, renderFailureText, toFailure } from "../runtime/errors.ts";
+import { createLimiter } from "../runtime/limiter.ts";
 import { createLogger } from "../runtime/log.ts";
-import type { Artifacts, Cache, Clock, Logger } from "../runtime/types.ts";
+import type { Artifacts, Cache, Clock, Limiter, Logger } from "../runtime/types.ts";
 import { STATE_DIR_NAME } from "../version.ts";
 
 /** Same shape as `resolveConfigPath`; kept local so the CLI owns no config logic. */
@@ -93,6 +94,12 @@ export interface DoctorCliDeps {
   cache?: Cache;
   artifacts?: Artifacts;
   probe?: EngineProbe;
+  /**
+   * Pacing for the live probe. Production leaves it unset and gets the real
+   * limiter over `~/.pi/agent/web-search/state.json`, so `--fix`/`--json` never
+   * fire three unthrottled searches (AGENTS §2 rule 7); tests inject a fake.
+   */
+  limiter?: Limiter;
   /**
    * Test seams for the safe `--fix` stale-lock reclaim. Production leaves both
    * unset and gets `/proc` liveness plus `fs.unlink`; no code here ever signals
@@ -252,9 +259,13 @@ export async function runDoctorCli(
   const registry = deps.registry ?? createDefaultRegistry(config);
 
   // The same runtime objects the extension uses: the probe acquires an owned
-  // work tab through this connector and extracts with the real adapters. The
-  // factory itself is lazy, so `--no-probe` never touches the browser.
-  const probe: EngineProbe = deps.probe ?? createEngineProbe({ config, connector, registry, clock });
+  // work tab through this connector, extracts with the real adapters and paces
+  // through the same limiter as `web_search`. The factory itself is lazy, so
+  // `--no-probe` never touches the browser; the limiter only reads its state.
+  const limiter =
+    deps.limiter ?? createLimiter({ config, clock, statePath: join(stateDir(env), "state.json") });
+  const probe: EngineProbe =
+    deps.probe ?? createEngineProbe({ config, connector, registry, clock, limiter });
 
   // Artifacts are reported and pruned through the same root the tools use. An
   // injected instance (tests) always wins; nothing is created on disk until a
@@ -270,6 +281,7 @@ export async function runDoctorCli(
     ...(deps.cache === undefined ? {} : { cache: deps.cache }),
     artifacts,
     probe,
+    limiter,
     env,
   };
 

@@ -45,6 +45,10 @@ function hasFlag(args: string, flag: string): boolean {
  * command never releases it: the probe only acquires the existing owned work
  * tab, and the session shutdown path closes it.
  *
+ * Pacing is passed through when the caller supplies a limiter: `/web-doctor`
+ * must not fire three unthrottled probes on the user's profile. A caller with
+ * no limiter gets an unpaced probe rather than a fabricated one.
+ *
  * Artifacts get the same treatment: the extension runtime may not pass them
  * (the command surface predates the artifact lane), but `/web-doctor --fix`
  * must prune to retention. `createArtifacts` is stateless and touches the disk
@@ -59,6 +63,7 @@ function withDefaults(deps: DoctorDeps): DoctorDeps {
           connector: deps.connector,
           registry: deps.registry,
           clock: deps.clock,
+          ...(deps.limiter === undefined ? {} : { limiter: deps.limiter }),
         });
   return {
     ...deps,

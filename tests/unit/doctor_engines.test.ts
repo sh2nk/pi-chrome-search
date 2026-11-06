@@ -21,6 +21,7 @@ import { runDoctorCli } from "../../src/cli/doctor.ts";
 import { handleDoctorCommand } from "../../src/commands/doctor.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
 import type { Config } from "../../src/config.ts";
+import { toDoctorDeps } from "../../src/index.ts";
 import { createEngineRegistry } from "../../src/engines/index.ts";
 import type {
   Engine,
@@ -40,7 +41,7 @@ import {
 import type { DoctorDeps, EngineProbe, EngineProbeResult } from "../../src/runtime/doctor.ts";
 import { fail } from "../../src/runtime/errors.ts";
 import type { WebSearchError } from "../../src/runtime/error-codes.ts";
-import type { Artifacts } from "../../src/runtime/types.ts";
+import type { Artifacts, Limiter } from "../../src/runtime/types.ts";
 import { createWebDoctorTool, WEB_DOCTOR_DESCRIPTION } from "../../src/tools/web_doctor.ts";
 import type { WebDoctorFailure, WebDoctorInput, WebDoctorSuccess } from "../../src/tools/web_doctor.ts";
 import { FakeClock } from "../helpers/clock.ts";
@@ -368,6 +369,33 @@ function depsFor(overrides: Partial<DoctorDeps> = {}): DoctorDeps {
   };
 }
 
+interface LimiterSpy {
+  acquires: EngineId[];
+  /** `connector.acquireCalls.length` observed at each acquire: must still be the pre-page count. */
+  pagesAtAcquire: number[];
+  limiter: Limiter;
+}
+
+/** Records pacing without sleeping; `reject` simulates the daily cap / an abort. */
+function limiterSpy(connector: FakeConnector, reject?: () => unknown): LimiterSpy {
+  const acquires: EngineId[] = [];
+  const pagesAtAcquire: number[] = [];
+  return {
+    acquires,
+    pagesAtAcquire,
+    limiter: {
+      async acquire(engine: EngineId): Promise<void> {
+        acquires.push(engine);
+        pagesAtAcquire.push(connector.acquireCalls.length);
+        if (reject !== undefined) throw reject();
+      },
+      stats(engine: EngineId) {
+        return { engine, lastAt: null, today: 0, dailyCap: 0 };
+      },
+    },
+  };
+}
+
 interface ProbeSpy {
   calls: EngineId[];
   fn: EngineProbe;
@@ -391,6 +419,7 @@ interface CliOptions {
   registry?: EngineRegistry;
   probe?: EngineProbe;
   artifacts?: Artifacts;
+  limiter?: Limiter;
   alive?: (pid: number) => boolean;
 }
 
@@ -410,6 +439,7 @@ async function runCli(
     ...(options.registry === undefined ? {} : { registry: options.registry }),
     ...(options.probe === undefined ? {} : { probe: options.probe }),
     ...(options.artifacts === undefined ? {} : { artifacts: options.artifacts }),
+    ...(options.limiter === undefined ? {} : { limiter: options.limiter }),
     ...(options.alive === undefined ? {} : { alive: options.alive }),
     // A real factory must never be reached when a connector is injected.
     createConnector: (_options: ConnectorOptions): Connector => {
@@ -526,6 +556,140 @@ test("a transport/extract failure becomes a structured probe error, never a thro
   assert.ok((parse.error?.hint.length ?? 0) > 0);
 });
 
+test("the probe paces once per engine, before it acquires a page", async () => {
+  const pages = {
+    google: new FakePage(),
+    duckduckgo: new FakePage(),
+    yandex: new FakePage(),
+  };
+  const connector = new FakeConnector({ pages });
+  const engines = {
+    google: stubEngine("google", { results: 3, canaries: { organic: 3 } }),
+    duckduckgo: stubEngine("duckduckgo", { results: 2, canaries: { organic: 2 } }),
+    yandex: stubEngine("yandex", { results: 1, canaries: { organic: 1 } }),
+  };
+  const registry = createEngineRegistry(
+    {
+      google: engines.google.engine,
+      duckduckgo: engines.duckduckgo.engine,
+      yandex: engines.yandex.engine,
+    },
+    DEFAULT_CONFIG,
+  );
+  const limiter = limiterSpy(connector);
+  const probe = createEngineProbe({
+    config: DEFAULT_CONFIG,
+    connector,
+    registry,
+    clock: new FakeClock(),
+    limiter: limiter.limiter,
+  });
+
+  for (const id of ALL_ENGINES) assert.equal((await probe(id)).error, undefined);
+
+  assert.deepEqual(limiter.acquires, [...ALL_ENGINES], "exactly one acquire per engine, in order");
+  assert.deepEqual(
+    limiter.pagesAtAcquire,
+    [0, 1, 2],
+    "pacing must happen before the page is acquired, not after",
+  );
+  assert.deepEqual(connector.acquireCalls, [...ALL_ENGINES]);
+});
+
+test("a limiter rejection is a blocked probe with its code and no navigation", async () => {
+  const google = stubEngine("google", { results: 3 });
+  const page = new FakePage();
+  const connector = new FakeConnector({ pages: { google: page } });
+  const registry = createEngineRegistry({ google: google.engine }, DEFAULT_CONFIG);
+  const capped = limiterSpy(connector, () =>
+    fail("E_RATE_LIMITED", "navigate", { message: "daily cap 0 for google reached" }),
+  );
+  const probe = createEngineProbe({
+    config: DEFAULT_CONFIG,
+    connector,
+    registry,
+    clock: new FakeClock(),
+    limiter: capped.limiter,
+  });
+
+  const blocked = await probe("google");
+  assert.equal(blocked.error?.code, "E_RATE_LIMITED");
+  assert.equal(blocked.results, 0);
+  assert.equal(blocked.ai, false);
+  assert.ok((blocked.error?.hint.length ?? 0) > 0);
+  assert.deepEqual(capped.acquires, ["google"]);
+  assert.deepEqual(connector.acquireCalls, [], "a paced-out probe must not touch the browser");
+  assert.deepEqual(page.navigations(), [], "a paced-out probe must not navigate");
+  assert.equal(google.queries.length, 0, "a paced-out probe must not even build a URL");
+
+  // The report owns the interpretation: a limiter error is a blocked engine.
+  const report = await buildDoctorReport(
+    depsFor({ connector, registry, probe }),
+  );
+  assertSchemaValid(report);
+  const entry = report.engines.find((engine) => engine.id === "google");
+  assert.equal(entry?.verdict, "blocked");
+  assert.match(entry?.note ?? "", /E_RATE_LIMITED during navigate/);
+});
+
+test("a non-WebSearchError limiter failure still reports E_RATE_LIMITED", async () => {
+  const google = stubEngine("google");
+  const connector = new FakeConnector({ pages: { google: new FakePage() } });
+  const registry = createEngineRegistry({ google: google.engine }, DEFAULT_CONFIG);
+  const limiter = limiterSpy(connector, () => new Error("state file is broken"));
+
+  const result = await createEngineProbe({
+    config: DEFAULT_CONFIG,
+    connector,
+    registry,
+    clock: new FakeClock(),
+    limiter: limiter.limiter,
+  })("google");
+
+  assert.equal(result.error?.code, "E_RATE_LIMITED");
+  assert.deepEqual(connector.acquireCalls, []);
+});
+
+test("the extension wires a real probe + the runtime limiter into the doctor deps", async () => {
+  // The HIGH-severity regression this guards: `getDoctorDeps` shipping no probe
+  // made every engine "unavailable" in the real extension, and a probe built
+  // without the limiter fired three unthrottled searches on the user's profile.
+  const google = stubEngine("google", { results: 2, canaries: { organic: 2 } });
+  const connector = new FakeConnector({ pages: { google: new FakePage() } });
+  const registry = createEngineRegistry({ google: google.engine }, DEFAULT_CONFIG);
+  const limiter = limiterSpy(connector);
+
+  const deps = toDoctorDeps({
+    config: DEFAULT_CONFIG,
+    configPath: "/home/tester/.pi/agent/web-search.json",
+    clock: new FakeClock(),
+    cache: {
+      get: () => undefined,
+      set: () => undefined,
+      size: () => 0,
+      clear: () => undefined,
+    },
+    log: { write: async () => undefined, path: () => join(TEMP_ROOT, "decisions.jsonl") },
+    limiter: limiter.limiter,
+    artifacts: {
+      save: async () => "",
+      prune: async () => ({ removed: 0, kept: 0, bytes: 0 }),
+      size: async () => 0,
+      root: () => join(TEMP_ROOT, "artifacts"),
+    },
+    connector,
+    registry,
+  });
+
+  assert.equal(typeof deps.probe, "function", "the shipped doctor must receive a probe");
+  assert.equal(deps.limiter, limiter.limiter);
+
+  const result = await deps.probe?.("google");
+  assert.equal(result?.error, undefined);
+  assert.deepEqual(limiter.acquires, ["google"], "the shipped probe must be paced");
+  assert.deepEqual(connector.acquireCalls, ["google"]);
+});
+
 // ---------------------------------------------------------------------------
 // Verdict mapping + canary aggregation
 // ---------------------------------------------------------------------------
@@ -629,6 +793,27 @@ test("probes run once per engine, serialized, in canonical order", async () => {
   );
 });
 
+test("a blocked CDP skips every probe and says why", async () => {
+  const connector = new FakeConnector({
+    connectFailures: 99,
+    connectError: fail("E_CDP_UNAVAILABLE", "discover", { message: "no endpoint" }),
+  });
+  const probe = probeSpy();
+
+  const report = await buildDoctorReport(
+    depsFor({ connector, registry: fakeRegistry(ALL_ENGINES), probe: probe.fn }),
+  );
+
+  assertSchemaValid(report);
+  assert.equal(report.cdp.status, "unavailable");
+  assert.equal(probe.calls.length, 0, "no probe may run without a live CDP session");
+  assert.equal(connector.acquireCalls.length, 0);
+  for (const engine of report.engines) {
+    assert.equal(engine.verdict, "unavailable");
+    assert.equal(engine.note, "probe skipped: CDP is unavailable");
+  }
+});
+
 test("a report built from the real probe factory is schema-valid", async () => {
   const engines = {
     google: stubEngine("google", { results: 5, ai: "overview", canaries: { organic: 5 } }),
@@ -688,10 +873,11 @@ test("CLI wires the default probe from the injected connector + registry", async
   const google = stubEngine("google", { results: 3, canaries: { organic: 3 } });
   const connector = new FakeConnector({ pages: { google: new FakePage() } });
   const registry = createEngineRegistry({ google: google.engine }, DEFAULT_CONFIG);
+  const limiter = limiterSpy(connector);
 
   // No `probe` in the CLI deps: production wiring must build it from the same
-  // connector/registry the tools use.
-  const run = await runCli(["--json"], { connector, registry });
+  // connector/registry the tools use, and pace it through the injected limiter.
+  const run = await runCli(["--json"], { connector, registry, limiter: limiter.limiter });
 
   assert.equal(run.code, 0);
   const report = JSON.parse(run.stdout) as {
@@ -701,12 +887,14 @@ test("CLI wires the default probe from the injected connector + registry", async
   assert.equal(report.engines.find((engine) => engine.id === "google")?.verdict, "ok");
   assert.equal(google.queries.length, 1);
   assert.deepEqual(connector.acquireCalls, ["google"]);
+  assert.deepEqual(limiter.acquires, ["google"], "the CLI probe must be paced, not unthrottled");
 });
 
 test("/web-doctor wires the default probe when the deps factory omits one", async () => {
   const google = stubEngine("google", { results: 2, canaries: { organic: 2 } });
   const connector = new FakeConnector({ pages: { google: new FakePage() } });
   const registry = createEngineRegistry({ google: google.engine }, DEFAULT_CONFIG);
+  const limiter = limiterSpy(connector);
   const notes: Array<{ message: string; type?: "info" | "warning" | "error" }> = [];
   const ctx = {
     ui: {
@@ -716,9 +904,10 @@ test("/web-doctor wires the default probe when the deps factory omits one", asyn
     },
   };
 
-  await handleDoctorCommand("", ctx, () => depsFor({ connector, registry }));
+  await handleDoctorCommand("", ctx, () => depsFor({ connector, registry, limiter: limiter.limiter }));
 
   assert.equal(google.queries.length, 1, "the command must use the real probe factory");
+  assert.deepEqual(limiter.acquires, ["google"], "the command probe must be paced too");
   assert.match(notes[0]?.message ?? "", /google=ok/);
 });
 
@@ -763,7 +952,11 @@ test("--fix reconnects, closes only owned tabs, prunes artifacts and clears a de
     assert.match(run.stderr, /fix: closed 1 owned tab\(s\)/);
     assert.match(run.stderr, /fix: pruned artifacts: 2 removed, 3 kept/);
     assert.match(run.stderr, /fix: cleared stale lock \(pid 2000001 is not running\)/);
-    assert.match(run.stderr, /reconnected to CDP once/);
+    assert.match(
+      run.stderr,
+      /reconnected after release/,
+      "the post-release reconnect is labelled distinctly from the retry",
+    );
   } finally {
     process.kill = realKill;
   }
@@ -777,6 +970,23 @@ test("--fix reconnects, closes only owned tabs, prunes artifacts and clears a de
   }
   assert.equal(pruneCalls.length, 1);
   assert.equal(existsSync(lockPath), false, "a lock whose pid is provably dead is reclaimed");
+});
+
+test("--fix labels the post-release reconnect once, distinctly from the retry", async () => {
+  // First connect fails, the retry succeeds, then release + reconnect: the two
+  // reconnects must not both claim "once".
+  const connector = new FakeConnector({ connectFailures: 1 });
+  const run = await runCli(["--fix", "--json", "--no-probe"], {
+    connector,
+    registry: fakeRegistry(ALL_ENGINES),
+    alive: () => true,
+  });
+
+  assert.equal(run.code, 0);
+  assertSchemaValid(JSON.parse(run.stdout) as unknown);
+  assert.match(run.stderr, /fix: connect failed: E_CDP_UNAVAILABLE/);
+  assert.equal((run.stderr.match(/reconnected to CDP once/g) ?? []).length, 1);
+  assert.equal((run.stderr.match(/reconnected after release/g) ?? []).length, 1);
 });
 
 test("applyDoctorFix leaves a live foreign lock alone even when its pid is unprovable", async () => {
@@ -808,6 +1018,70 @@ test("applyDoctorFix leaves a live foreign lock alone even when its pid is unpro
   assert.match(readFileSync(lockPath, "utf8"), /foreign/);
 });
 
+test("applyDoctorFix never reclaims a lock whose foreign owner is alive", async () => {
+  // The E_BUSY test above reaches the `busy` short-circuit, not the liveness
+  // predicate. Here the connector fails for an unrelated reason, so `!alive()`
+  // is the only thing standing between a live session and a deleted lock file.
+  const lockPath = join(TEMP_ROOT, "fix-live.lock");
+  const bytes = `${JSON.stringify({
+    version: 1,
+    pid: 4242,
+    sessionId: "live-foreign",
+    startedAt: 1,
+    heartbeatAt: 2,
+  })}\n`;
+  writeFileSync(lockPath, bytes, "utf8");
+  const connector = new FakeConnector({
+    lockPath,
+    connectFailures: 99,
+    connectError: fail("E_CDP_UNAVAILABLE", "connect", { message: "socket closed" }),
+  });
+
+  const asked: number[] = [];
+  const actions = await applyDoctorFix(depsFor({ connector, registry: fakeRegistry(ALL_ENGINES) }), {
+    alive: (pid: number) => {
+      asked.push(pid);
+      return true;
+    },
+  });
+
+  assert.ok(actions.some((action) => action.startsWith("connect failed: E_CDP_UNAVAILABLE")));
+  assert.deepEqual(asked, [4242], "the liveness predicate must be consulted for a foreign pid");
+  assert.deepEqual(
+    actions.filter((action) => action.includes("stale lock")),
+    [],
+    "a provably live foreign lock is never reclaimed",
+  );
+  assert.equal(readFileSync(lockPath, "utf8"), bytes, "the lock file must be byte-identical");
+});
+
+test("applyDoctorFix leaves a lock whose pid the default liveness check reports live", async () => {
+  // pid 1 exists in every /proc namespace, so the real `pidAlive` path is
+  // exercised without signalling anything (and without child_process).
+  const lockPath = join(TEMP_ROOT, "fix-pid1.lock");
+  const bytes = `${JSON.stringify({
+    version: 1,
+    pid: 1,
+    sessionId: "init",
+    startedAt: 1,
+    heartbeatAt: 2,
+  })}\n`;
+  writeFileSync(lockPath, bytes, "utf8");
+  const connector = new FakeConnector({
+    lockPath,
+    connectFailures: 99,
+    connectError: fail("E_CDP_DISCONNECTED", "connect", { message: "socket closed" }),
+  });
+
+  const actions = await applyDoctorFix(depsFor({ connector, registry: fakeRegistry(ALL_ENGINES) }));
+
+  assert.deepEqual(
+    actions.filter((action) => action.includes("stale lock")),
+    [],
+  );
+  assert.equal(readFileSync(lockPath, "utf8"), bytes);
+});
+
 // ---------------------------------------------------------------------------
 // Deferred web_doctor tool
 // ---------------------------------------------------------------------------
@@ -820,13 +1094,15 @@ function okDeps(): DoctorDeps {
   });
 }
 
-test("web_doctor is a deferred tool with all-true annotations and a short description", async () => {
+test("web_doctor is a deferred tool, open-world, not read-only, with a short description", async () => {
   const tool = createWebDoctorTool(async () => okDeps());
 
   assert.equal(tool.name, "web_doctor");
   assert.equal(tool.exposure, "deferred");
+  // `fix: true` closes owned tabs and prunes artifacts: claiming read-only would
+  // let a caller batch a mutating tool with inert ones.
   assert.deepEqual(tool.annotations, {
-    readOnlyHint: true,
+    readOnlyHint: false,
     openWorldHint: true,
     idempotentHint: true,
   });

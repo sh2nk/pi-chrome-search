@@ -12,13 +12,16 @@
  *  - **One probe per enabled, registered engine, sequentially.** Probing is a
  *    live browser action (SPEC §5.5): parallel probes would hammer the profile,
  *    and a probe for an engine without an adapter can only invent data. The
- *    probe itself is injected (`createEngineProbe` is the production factory);
- *    the report stays offline-testable because no probe means no browser.
+ *    probe itself is built by `createEngineProbe` (the production factory) and
+ *    injected; the report stays offline-testable because no probe means no
+ *    browser.
  *
- *  - **Probe absence is not health.** A registered adapter with no injected
- *    probe (or `--no-probe`, or an unreachable CDP) is `unavailable`, never
- *    `ok`: the report must not claim an engine works when nothing was
- *    exercised. P4-C injects the real probe; P5 extends `reflex` the same way.
+ *  - **Probe absence is not health.** A registered adapter with no probe wired
+ *    by the caller (or `--no-probe`, or an unreachable CDP) is `unavailable`,
+ *    never `ok`: the report must not claim an engine works when nothing was
+ *    exercised. The extension, the CLI and `/web-doctor` wire
+ *    `createEngineProbe`; a caller that does not is told "no probe configured",
+ *    not that the engine is fine. P5 extends `reflex` the same way.
  *
  * The report is plain JSON with a fixed key order (no Maps, no class instances)
  * so `--json` output is diffable and the schema test can validate it. It never
@@ -36,7 +39,7 @@ import type { EngineId, EngineRegistry, Query, WallKind } from "../engines/types
 import { ENGINE_IDS } from "../engines/types.ts";
 import { ERROR_HINTS, type FailureDetails } from "./error-codes.ts";
 import { fail, toFailure } from "./errors.ts";
-import type { Artifacts, Cache, Clock } from "./types.ts";
+import type { Artifacts, Cache, Clock, Limiter } from "./types.ts";
 import { EXTENSION_NAME, EXTENSION_VERSION } from "../version.ts";
 
 /**
@@ -71,7 +74,7 @@ export interface EngineProbeResult {
   error?: ProbeError;
 }
 
-/** Injected by P4-C; absent means probes are unavailable, not that engines are fine. */
+/** Built by {@link createEngineProbe}; absent means the caller wired no probe, not that engines are fine. */
 export type EngineProbe = (id: EngineId) => Promise<EngineProbeResult>;
 
 /** Stable, non-personal query: the probe is a smoke test, not a user search. */
@@ -82,6 +85,13 @@ export interface EngineProbeOptions {
   connector: Connector;
   registry: EngineRegistry;
   clock: Clock;
+  /**
+   * Pacing for the probe (SPEC §5.5). A diagnostic that fires three searches
+   * back-to-back is a captcha vector (AGENTS §2 rule 7), so the probe paces
+   * exactly like `web_search`. Optional only because a unit test may not care
+   * about the limiter; every production surface passes the runtime one.
+   */
+  limiter?: Limiter;
   /** Test seam; production keeps {@link DOCTOR_PROBE_QUERY}. */
   query?: string;
 }
@@ -116,13 +126,15 @@ function probeLocale(engine: EngineId, config: Config): Pick<Query, "lang" | "re
 
 /**
  * The production probe: one `n=1`, summary-off search per engine through the
- * same connector + registry the tools use.
+ * same connector + registry the tools use, paced by the same limiter.
  *
  * The probe never throws a browser failure at the doctor: it returns
  * `error: { code, stage, hint }` so the report keeps the latency and the verdict
  * mapper owns the interpretation. A wall detected after a settle timeout is
  * promoted to `wall` — a captcha page usually fails the adapter's readiness
- * marker before `detectWall()` is ever reached.
+ * marker before `detectWall()` is ever reached. A limiter rejection (daily cap,
+ * abort) is reported the same way and never navigates: a paced-out probe must
+ * not burn an unthrottled search on the user's profile.
  */
 export function createEngineProbe(options: EngineProbeOptions): EngineProbe {
   const text = options.query ?? DOCTOR_PROBE_QUERY;
@@ -133,6 +145,21 @@ export function createEngineProbe(options: EngineProbeOptions): EngineProbe {
 
     try {
       const engine = options.registry.get(id);
+      // Pace before acquiring a page: the doctor is a live search like any
+      // other, and three back-to-back probes are exactly what a bot looks like.
+      if (options.limiter !== undefined) {
+        try {
+          await options.limiter.acquire(id);
+        } catch (error) {
+          const details = toFailure(error, { code: "E_RATE_LIMITED", stage: "navigate" });
+          return {
+            ms: elapsed(),
+            results: 0,
+            ai: false,
+            error: { code: details.code, stage: details.stage, hint: details.hint },
+          };
+        }
+      }
       const query: Query = { text, n: 1, summary: false, ...probeLocale(id, options.config) };
       const page = await options.connector.acquirePage(id);
       await page.navigate(engine.buildUrl(query));
@@ -181,6 +208,12 @@ export interface DoctorDeps {
   cache?: Cache;
   artifacts?: Artifacts;
   probe?: EngineProbe;
+  /**
+   * Pacing for the injected probe. `buildDoctorReport` does not probe by
+   * itself; the deps factory in `commands/doctor.ts` hands this to
+   * `createEngineProbe`, so `/web-doctor` obeys the same pacing as a search.
+   */
+  limiter?: Limiter;
   env?: NodeJS.ProcessEnv;
   extensionVersion?: string;
   nodeVersion?: string;
@@ -446,7 +479,10 @@ export async function applyDoctorFix(
 
       try {
         await boundedConnect(connector, deps.config);
-        actions.push("reconnected to CDP once");
+        // Distinct from the retry above: a first-attempt failure already logged
+        // "reconnected to CDP once", and printing that twice makes the action
+        // log lie about how many times the doctor actually reconnected.
+        actions.push("reconnected after release");
       } catch (error) {
         const details = toFailure(error, { code: "E_CDP_UNAVAILABLE", stage: "connect" });
         if (details.code === "E_BUSY") busy = true;
@@ -731,7 +767,7 @@ async function engineEntry(
       id,
       enabled: true,
       verdict: "unavailable",
-      note: "probe unavailable (the doctor probe is injected by P4-C)",
+      note: "no probe configured (no live probe was wired into the doctor)",
     };
   }
   if (!probeEnabled) {

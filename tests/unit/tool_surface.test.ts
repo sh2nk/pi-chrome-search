@@ -67,8 +67,24 @@ test("a deferred tool still exposes a callable execute with a schema", () => {
   for (const tool of TOOLS) {
     assert.equal(typeof tool.execute, "function", `${tool.name} must be callable`);
     assert.equal(typeof tool.parameters, "object", `${tool.name} must declare parameters`);
-    assert.equal(tool.annotations.readOnlyHint, true, `${tool.name} must be read-only`);
   }
+});
+
+test("only genuinely inert tools are declared read-only", () => {
+  // `web_doctor` is deliberately NOT read-only: `fix: true` closes the tabs this
+  // connector owns and prunes artifact files, so it mutates the browser and the
+  // disk. A caller that batches read-only tools must not get it for free.
+  for (const name of ["web_search", "web_read", "image_search"]) {
+    const tool = TOOLS.find((candidate) => candidate.name === name);
+    assert.ok(tool !== undefined, `${name} must be registered`);
+    assert.equal(tool.annotations.readOnlyHint, true, `${name} must be read-only`);
+  }
+
+  const doctor = TOOLS.find((tool) => tool.name === "web_doctor");
+  assert.ok(doctor !== undefined, "web_doctor must be registered");
+  assert.equal(doctor.annotations.readOnlyHint, false, "web_doctor's fix mutates: not read-only");
+  assert.equal(doctor.annotations.openWorldHint, true, "web_doctor talks to the live browser");
+  assert.equal(doctor.annotations.idempotentHint, true, "a repeated web_doctor converges");
 });
 
 test("no tool name collides with the core tool names", () => {

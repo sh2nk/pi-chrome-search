@@ -22,13 +22,16 @@ import { createArtifacts } from "./runtime/artifacts.ts";
 import { createCache } from "./runtime/cache.ts";
 import { createSystemClock } from "./runtime/clock.ts";
 import { createLimiter } from "./runtime/limiter.ts";
+import { createEngineProbe } from "./runtime/doctor.ts";
+import type { DoctorDeps } from "./runtime/doctor.ts";
 import { createLogger } from "./runtime/log.ts";
 import type { Artifacts, Cache, Clock, Limiter, Logger } from "./runtime/types.ts";
 import { createTools } from "./tools/index.ts";
 import type { ToolDeps } from "./tools/types.ts";
 import { EXTENSION_NAME, EXTENSION_VERSION } from "./version.ts";
 
-interface Runtime {
+/** The lazily-built runtime the tools, commands and doctor share. */
+export interface Runtime {
   config: Config;
   configPath: string;
   clock: Clock;
@@ -93,23 +96,41 @@ function getRuntime(): Promise<Runtime> {
   return runtimePromise;
 }
 
+/**
+ * The doctor's view of the same runtime the tools use. The probe is the
+ * production factory, not a stub: the shipped `web_doctor` must exercise the
+ * same connector, adapters and limiter as `web_search`, or every engine would
+ * report `unavailable` in real use. Building the closure does no I/O.
+ *
+ * Exported so the doctor suite can prove that wiring — a `web_doctor` without a
+ * probe was the one bug this shape invites.
+ */
+export function toDoctorDeps(runtime: Runtime): DoctorDeps {
+  return {
+    config: runtime.config,
+    configPath: runtime.configPath,
+    connector: runtime.connector,
+    registry: runtime.registry,
+    cache: runtime.cache,
+    artifacts: runtime.artifacts,
+    clock: runtime.clock,
+    limiter: runtime.limiter,
+    probe: createEngineProbe({
+      config: runtime.config,
+      connector: runtime.connector,
+      registry: runtime.registry,
+      clock: runtime.clock,
+      limiter: runtime.limiter,
+    }),
+    extensionVersion: EXTENSION_VERSION,
+    nodeVersion: process.version,
+  };
+}
+
 export default function register(pi: ExtensionAPI): void {
   const tools = createTools({
     getDeps: async () => toToolDeps(await getRuntime()),
-    getDoctorDeps: async () => {
-      const runtime = await getRuntime();
-      return {
-        config: runtime.config,
-        configPath: runtime.configPath,
-        connector: runtime.connector,
-        registry: runtime.registry,
-        cache: runtime.cache,
-        artifacts: runtime.artifacts,
-        clock: runtime.clock,
-        extensionVersion: EXTENSION_VERSION,
-        nodeVersion: process.version,
-      };
-    },
+    getDoctorDeps: async () => toDoctorDeps(await getRuntime()),
   });
   for (const tool of tools) {
     // ToolDetails is success | failure details; pi's inference pins it to the
@@ -132,20 +153,7 @@ export default function register(pi: ExtensionAPI): void {
       await handleDoctorCommand(
         args,
         ctx,
-        async () => {
-          const runtime = await getRuntime();
-          return {
-            config: runtime.config,
-            configPath: runtime.configPath,
-            connector: runtime.connector,
-            registry: runtime.registry,
-            cache: runtime.cache,
-            artifacts: runtime.artifacts,
-            clock: runtime.clock,
-            extensionVersion: EXTENSION_VERSION,
-            nodeVersion: process.version,
-          };
-        },
+        async () => toDoctorDeps(await getRuntime()),
         { cliCommand: "node src/cli/doctor.ts --json" },
       );
     },

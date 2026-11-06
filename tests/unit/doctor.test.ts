@@ -427,7 +427,7 @@ test("registered adapters without an injected probe are unavailable, not ok", as
   assert.equal(report.verdict, "degraded");
   for (const engine of report.engines) {
     assert.equal(engine.verdict, "unavailable");
-    assert.match(engine.note ?? "", /probe unavailable/);
+    assert.match(engine.note ?? "", /no probe configured/);
   }
 });
 
@@ -834,7 +834,7 @@ test("CLI --fix reconnects, releases owned tabs and never kills a process", asyn
     });
     assert.equal(run.code, 0);
     assert.match(run.stderr, /^fix: /, "--fix notes go to stderr so stdout stays schema-valid");
-    assert.match(run.stderr, /reconnected to CDP once/);
+    assert.match(run.stderr, /reconnected after release/);
     assert.ok(connector.connectCalls >= 2, `connect calls: ${connector.connectCalls}`);
     assert.ok(connector.releaseCalls >= 1, `release calls: ${connector.releaseCalls}`);
     assert.equal(probe.calls.length, ALL_ENGINES.length, "--fix must still probe once per engine");
