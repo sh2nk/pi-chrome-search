@@ -633,6 +633,20 @@ export function createArtifacts(options: ArtifactsOptions): Artifacts {
         message: `artifact meta at ${dir} contains a non-serialisable value (cycle or BigInt)`,
       });
     }
+    // P12-A: extra payloads (`doc.pdf`) ride along with the snapshot. The name
+    // is restricted to a basename so a caller cannot escape the directory.
+    if (input.files !== undefined) {
+      for (const [name, bytes] of Object.entries(input.files)) {
+        if (!/^[A-Za-z0-9._-]{1,64}$/.test(name) || name === "." || name === "..") {
+          throw fail("E_CONFIG", "config", {
+            message: `artifact file name ${JSON.stringify(name)} is not a safe basename`,
+            hint: "artifact files use [A-Za-z0-9._-] and live directly in the artifact directory",
+          });
+        }
+        await writeArtifact(join(dir, name), Buffer.from(bytes));
+      }
+    }
+
     await writeArtifact(join(dir, "meta.json"), json);
     return dir;
   }

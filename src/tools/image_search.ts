@@ -10,13 +10,12 @@
  *
  *     alt — pageUrl (thumbUrl)
  *
- * `attach: true` is OFF by default (vision tokens are expensive). pi's tool
- * result can carry image blocks and SPEC §7.3 expects them, but an image block
- * needs the thumbnail *bytes* and this adapter never fetches them: it reads
- * URLs out of the image SERP and never downloads an asset. Rather than emit a
- * block for a payload we do not have, `attach` appends up to four thumbnail
- * URLs as text after the item lines. Fetching the bytes (network + vision
- * tokens) is a deliberate later change, not a limitation of the result type.
+ * `attach` is OFF by default (vision tokens are expensive). P12-C makes it
+ * real: up to four thumbnail *bytes* are fetched through Chrome (`attach:
+ * "bytes"` is the explicit spelling, `true` is the compatible alias) and emitted
+ * as image blocks, so the model actually sees the picture. A fetch that fails
+ * is reported (`attachedImages` < requested) instead of printing a URL and
+ * calling that an attachment.
  *
  * Failures leave through `renderToolFailure` with code + stage + hint (+ an
  * artifact for a wall/parse), exactly like `web_search`.
@@ -38,9 +37,11 @@ import {
 } from "../engines/images.ts";
 import type { Wall } from "../engines/types.ts";
 import type { ErrorCode, FailureDetails, Stage } from "../runtime/error-codes.ts";
+import type { FetchedBytes } from "../cdp/types.ts";
 import { isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, renderToolFailure, toFailure } from "../runtime/errors.ts";
-import type { FailureJson, ToolTextBlock } from "../runtime/errors.ts";
+import { assertPublicUrl, type ResolveHost } from "../runtime/ssrf.ts";
+import type { FailureJson, ToolContentBlock, ToolImageBlock } from "../runtime/errors.ts";
 import { saveFailureArtifact } from "../runtime/artifacts.ts";
 import type { ToolDeps } from "./types.ts";
 
@@ -55,7 +56,8 @@ export const imageSearchSchema = Type.Object({
   q: Type.String({ minLength: 1 }),
   n: Type.Optional(Type.Integer({ minimum: 1, maximum: 12 })),
   engine: Type.Optional(imageEngineSchema),
-  attach: Type.Optional(Type.Boolean()),
+  /** `true` is kept as an alias for `"bytes"`; both attach actual image blocks. */
+  attach: Type.Optional(Type.Union([Type.Boolean(), Type.Literal("bytes")])),
 });
 
 export type ImageSearchInput = Static<typeof imageSearchSchema>;
@@ -74,15 +76,19 @@ export interface ImageSearchDetails {
    * page would be the kind of small lie this phase removes.
    */
   pageUrlKind: "page" | "image";
+  /** Image blocks actually emitted (≤ 4); 0 when `attach` was off. */
+  attachedImages: number;
+  /** Thumbnails whose bytes could not be fetched, with their line index. */
+  attachFailed: number;
 }
 
 export interface ImageSearchSuccess {
-  content: ToolTextBlock[];
+  content: ToolContentBlock[];
   details: ImageSearchDetails;
 }
 
 export interface ImageSearchFailure {
-  content: ToolTextBlock[];
+  content: ToolContentBlock[];
   details: FailureJson;
   isError: true;
 }
@@ -111,7 +117,7 @@ export interface ImageSearchTool {
  * about the two engines, the line shape and the expensive `attach` flag.
  */
 export const IMAGE_SEARCH_DESCRIPTION =
-  "Search images in your visible Chrome (Google, Yandex). Line: alt — pageUrl (thumbUrl); Yandex gives the image file, not a page. n<=12, default 4; attach adds ≤4 thumbnail URLs (no bytes).";
+  "Search images in your visible Chrome (Google, Yandex). Line: alt — pageUrl (thumbUrl); Yandex gives the image file, not a page. n<=12, default 4; attach/attach:\"bytes\" adds ≤4 image blocks.";
 
 const DEFAULT_N = 4;
 const MAX_N = 12;
@@ -124,7 +130,7 @@ const MAX_ALT_CHARS = 200;
  */
 const MIN_OUTPUT_CHARS = 600;
 const MAX_OUTPUT_CHARS = 4_000;
-const ATTACH_HEADER = "attach (thumbnail URLs, not image bytes):";
+const ATTACH_HEADER = "attach: no thumbnail bytes could be fetched (the lines above are still valid):";
 
 const INPUT_HINT =
   'check the image_search arguments: q (non-empty), n 1..12, engine "google"|"yandex", attach boolean';
@@ -199,16 +205,16 @@ function normalizeInput(raw: unknown): Validation {
   }
   const engine: ImageEngineId = raw.engine === undefined ? "google" : raw.engine;
 
-  if (raw.attach !== undefined && typeof raw.attach !== "boolean") {
+  if (raw.attach !== undefined && typeof raw.attach !== "boolean" && raw.attach !== "bytes") {
     return {
       ok: false,
       code: "E_CONFIG",
       stage: "config",
-      message: "attach: expected a boolean",
+      message: 'attach: expected a boolean or "bytes"',
       hint: INPUT_HINT,
     };
   }
-  const attach = raw.attach === true;
+  const attach = raw.attach === true || raw.attach === "bytes";
 
   return { ok: true, value: { q: text, n, engine, attach } };
 }
@@ -320,6 +326,44 @@ function fitLines(lines: readonly string[], maxChars: number): string[] {
   return kept;
 }
 
+/**
+ * P12-C: fetch the thumbnail bytes through Chrome and return image blocks.
+ * Every URL still passes the SSRF guard — an image SERP is attacker-influenced
+ * content, and a `127.0.0.1` thumbnail must not become an agent-readable image.
+ * A per-thumbnail failure is counted, never fatal: the search itself succeeded.
+ */
+async function attachImages(
+  deps: ToolDeps,
+  items: readonly ImageItem[],
+  resolve: ResolveHost | undefined,
+): Promise<{ blocks: ToolImageBlock[]; failed: number }> {
+  const fetcher = deps.cdp.fetchBytes;
+  if (fetcher === undefined) return { blocks: [], failed: Math.min(items.length, MAX_ATTACH) };
+  const blocks: ToolImageBlock[] = [];
+  let failed = 0;
+  for (const item of items.slice(0, MAX_ATTACH)) {
+    try {
+      const requested = await assertPublicUrl(
+        item.thumbUrl,
+        resolve === undefined ? {} : { resolve },
+      );
+      const fetched: FetchedBytes = await fetcher.call(deps.cdp, requested.href, {
+        maxBytes: deps.config.image.attachMaxBytes,
+        ceilingKey: "image.attachMaxBytes",
+      });
+      const mime = fetched.contentType;
+      if (!mime.startsWith("image/") || fetched.bytes.length === 0) {
+        failed += 1;
+        continue;
+      }
+      blocks.push({ type: "image", data: fetched.bytes.toString("base64"), mimeType: mime });
+    } catch {
+      failed += 1;
+    }
+  }
+  return { blocks, failed };
+}
+
 function outputBudget(config: Config): number {
   const configured = Number.isFinite(config.search.outputMaxChars)
     ? Math.floor(config.search.outputMaxChars)
@@ -332,11 +376,10 @@ interface RenderedImages {
   items: number;
 }
 
-function renderImages(items: readonly ImageItem[], attach: boolean, maxChars: number): RenderedImages {
+function renderImages(items: readonly ImageItem[], attachFailed: boolean, maxChars: number): RenderedImages {
   const itemLines = items.map(renderItem);
-  const attachmentUrls = attach ? items.slice(0, MAX_ATTACH).map((item) => item.thumbUrl) : [];
   const lines = [...itemLines];
-  if (attachmentUrls.length > 0) lines.push(ATTACH_HEADER, ...attachmentUrls);
+  if (attachFailed) lines.push(ATTACH_HEADER);
 
   const kept = fitLines(lines, maxChars);
   // A single item line longer than the budget still beats an empty success, and
@@ -367,6 +410,7 @@ async function search(
   deps: ToolDeps,
   params: unknown,
   signal: AbortSignal | undefined,
+  resolve: ResolveHost | undefined,
 ): Promise<ImageSearchResult> {
   const validation = normalizeInput(params);
   if (!validation.ok) {
@@ -482,7 +526,16 @@ async function search(
     );
   }
 
-  const rendered = renderImages(extraction.items, input.attach, outputBudget(deps.config));
+  const attached = input.attach
+    ? await attachImages(deps, extraction.items, resolve)
+    : { blocks: [] as ToolImageBlock[], failed: 0 };
+  // The "could not fetch" note only appears when attach was requested and not
+  // one block made it; a partial attach is visible in `details.attachedImages`.
+  const rendered = renderImages(
+    extraction.items,
+    input.attach && attached.blocks.length === 0 && attached.failed > 0,
+    outputBudget(deps.config),
+  );
   // "pageCarried" answers "did the caller get less than was available?". Two
   // independent places shorten the list: the page (more usable tiles than `n`)
   // and this renderer (whole lines dropped by the output budget). Reporting
@@ -497,8 +550,10 @@ async function search(
     pageCarried,
     attach: input.attach,
     pageUrlKind,
+    attachedImages: attached.blocks.length,
+    attachFailed: attached.failed,
   };
-  return { content: [{ type: "text", text: rendered.text }], details };
+  return { content: [{ type: "text", text: rendered.text }, ...attached.blocks], details };
 }
 
 // ---------------------------------------------------------------------------
@@ -510,8 +565,14 @@ async function search(
  * services lazily and per-context. There is deliberately no module-level
  * instance: constructing CDP/lock/config is wiring work, not a tool's.
  */
+export interface ImageSearchOptions {
+  /** Injected resolver for the thumbnail SSRF guard; tests always set it. */
+  resolve?: ResolveHost;
+}
+
 export function createImageSearchTool(
   getDeps: (ctx?: unknown) => ToolDeps | Promise<ToolDeps>,
+  options: ImageSearchOptions = {},
 ): ImageSearchTool {
   async function execute(
     _toolCallId: string,
@@ -530,7 +591,7 @@ export function createImageSearchTool(
     // Last-resort barrier: a dependency bug still reaches the agent as a
     // rendered failure with a code and a stage, never as a bare throw.
     try {
-      return await search(deps, params, signal);
+      return await search(deps, params, signal, options.resolve);
     } catch (error) {
       return failureResult(error);
     }

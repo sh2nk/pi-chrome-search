@@ -1,0 +1,48 @@
+%PDF-1.4
+%âãÏÓ
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [6 0 R 8 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Title (P12 fixture) /Producer (pi-chrome-search) >>
+endobj
+5 0 obj
+<< /Length 113 >>
+stream
+BT /F1 12 Tf 14 TL 72 720 Td (Hello PDF world.) Tj T* (Second line on page one.) Tj T* (Café résumé naïve.) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+7 0 obj
+<< /Length 83 >>
+stream
+BT /F1 12 Tf 14 TL 72 720 Td (Page two answers.) Tj T* (Numbers 2026 and 42.) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000127 00000 n 
+0000000224 00000 n 
+0000000295 00000 n 
+0000000459 00000 n 
+0000000585 00000 n 
+0000000718 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R /Info 4 0 R >>
+startxref
+844
+%%EOF

@@ -416,3 +416,36 @@ One session through the CDP broker (`07-cdp-broker.mjs`, single Chrome connectio
 7. **Yandex again needed no second navigation trick.** Settle is structural (`.OrganicTitle, .Misspell,
    .SmartCaptcha`); both the typed `ya.ru/search` and the direct `yandex.ru/search` SERPs satisfied it, so
    moving the warm-up host did not change extraction.
+
+## 16. P12 measurements — binary payloads (2026-11-06, Chrome 157)
+
+1. **The PDF viewer's AX tree has no document text on Chrome 157.** Inside the
+   extension iframe (`chrome-extension://mhjfb…/index.html`) the full AX tree is
+   169 nodes: the toolbar (buttons, page number, zoom) plus one `EmbeddedObject`.
+   The tab's own document reports `contentType: application/pdf`, `innerText: ""`
+   and a 5-node AX tree. `Accessibility.enable` changes nothing. Any plan that
+   reads PDFs through a11y is dead on this build; P12 parses bytes instead.
+2. **`Network.getResponseBody` loses the PDF after the viewer swaps in.** The
+   response is observed with `mime=application/pdf, status=200`, but the same
+   `requestId` then returns the viewer's 601-byte HTML. `Fetch` interception at
+   the response stage on a separate `about:blank` **background** target returns
+   the real 574 982-byte `%PDF-1.5` in ~830 ms. The request is issued by
+   `Runtime.evaluate(fetch(url, {credentials:"include"}))`; `Fetch.failRequest`
+   stops the viewer from ever rendering it.
+3. **A PDF can leave a detached flattened session.** After a read, the read tab
+   is a viewer target; reusing it made the next call fail `E_TARGET_LOST`. The
+   fix is to release the owned read tab after the PDF branch
+   (`CdpConnector.releasePage`), not to retry blindly.
+4. **Real PDFs include encrypted ones.** `orimi.com/pdf-test.pdf` is RC4 with an
+   empty user password: Chrome and `pdftotext` read it, the in-tree parser does
+   not implement decryption and reports `E_PDF_UNSUPPORTED`. The optional binary
+   rung earns its place there. `mutool` is not installed on this host; only
+   `pdftotext` and `qpdf` are (`qpdf` does not extract text).
+5. **Live PDF quality:** arxiv `2211.17192` → 13 pages, 43 406 chars in ~60 ms
+   in-tree (`pdftotext -layout` gives 76 396 chars with column layout). Page 1
+   reads cleanly; the known losses are hyphenated line breaks and a `fi`
+   ligature in a `/WinAnsiEncoding` font whose embedded glyph is the ligature
+   (rendered `Þ`, `pdftotext` says `file`).
+6. **Image thumbnails are served as-is.** Two Google thumbnails came back as
+   JPEG (9 087 B and 61 745 B) and were emitted as image blocks without
+   re-encoding; `attach:"bytes"` is two extra requests, not a new image pipeline.

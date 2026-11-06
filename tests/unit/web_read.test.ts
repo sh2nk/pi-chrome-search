@@ -9,7 +9,10 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { Value } from "typebox/value";
 
@@ -75,6 +78,8 @@ interface HarnessOptions {
   artifacts?: Artifacts;
   /** Pooled harness: a distinct page per `PageKey` (a real browser has one tab per slot). */
   pagesByKey?: Record<string, FakePage>;
+  /** P12-A: stub for `CdpConnector.fetchBytes`. */
+  fetchBytes?: CdpConnector["fetchBytes"];
 }
 
 interface Harness {
@@ -84,6 +89,7 @@ interface Harness {
   rows: Record<string, unknown>[];
   pagesRequested: number;
   pageKeys: string[];
+  releasedKeys: string[];
   artifactInputs: ArtifactInput[];
 }
 
@@ -130,6 +136,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
   const cache: Cache = createCache({ maxEntries: 10, clock });
   let pagesRequested = 0;
   const pageKeys: string[] = [];
+  const releasedKeys: string[] = [];
   const cdp: CdpConnector = {
     async connect() {
       throw new Error("connect() is not used by web_read unit tests");
@@ -143,6 +150,10 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     async releaseAll() {},
     isConnected: () => true,
     endpoint: () => null,
+    ...(options.fetchBytes === undefined ? {} : { fetchBytes: options.fetchBytes }),
+    async releasePage(key) {
+      releasedKeys.push(key);
+    },
   };
 
   const deps: ToolDeps = {
@@ -172,6 +183,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
       return pagesRequested;
     },
     pageKeys,
+    releasedKeys,
     artifactInputs,
   };
 }
@@ -259,7 +271,8 @@ test("reads a public page and returns Markdown plus details", async () => {
   assert.deepEqual(harness.pageKeys, ["read"], "a read must use its own work tab, not an engine tab");
   assert.deepEqual(harness.page.navigations(), ["https://example.test/docs/page"]);
   assert.equal(harness.page.callCount("html"), 0, "raw HTML must never be fetched");
-  assert.equal(harness.page.callCount("evaluate"), 1);
+  // 1: document.contentType (the PDF branch probe), 2: the readability pass.
+  assert.equal(harness.page.callCount("evaluate"), 2);
 
   const text = textOf(result);
   assert.match(text, /^# Example page\n/);
@@ -822,3 +835,125 @@ test("V9.5: maxChars over the ceiling is clamped and reported, never silent", as
   assert.equal(normal.details.maxChars, 500);
   assert.equal(normal.details.clamped, false);
 });
+
+
+// ---------------------------------------------------------------------------
+// P12: PDF branch
+// ---------------------------------------------------------------------------
+
+const PDF_FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "pdf");
+const BASIC_PDF = readFileSync(join(PDF_FIXTURES, "basic.pdf"));
+const SCANNED_PDF = readFileSync(join(PDF_FIXTURES, "scanned.pdf"));
+
+function pdfPage(): FakePage {
+  return new FakePage({
+    url: "https://example.test/paper.pdf",
+    title: "paper.pdf",
+    evaluate: (expression: string) => (expression === "document.contentType" ? "application/pdf" : DEFAULT_DOC),
+  });
+}
+
+function pdfHarness(
+  bytes: Buffer,
+  options: Partial<HarnessOptions> & { contentType?: string; fetchUrl?: string } = {},
+): Harness {
+  return makeHarness({
+    page: pdfPage(),
+    fetchBytes: async (url) => ({
+      url: options.fetchUrl ?? url,
+      status: 200,
+      contentType: options.contentType ?? "application/pdf",
+      bytes,
+    }),
+    ...options,
+  });
+}
+
+test("a PDF is read as text with page markers, never through the readability pass (P12)", async () => {
+  const harness = pdfHarness(BASIC_PDF);
+  const result = success(await run(harness, { url: "https://example.test/paper.pdf" }));
+  const text = textOf(result);
+
+  assert.match(text, /^--- p\.1 ---\n/);
+  assert.match(text, /Hello PDF world\./);
+  assert.match(text, /--- p\.2 ---/);
+  assert.match(text, /Page two answers\./);
+  assert.deepEqual(result.details.pdf, { pageCount: 2, extractor: "in-tree" });
+  assert.deepEqual(harness.releasedKeys, ["read"], "a PDF tab is released for the next read");
+  assert.equal(result.details.title, "paper.pdf");
+  assert.equal(result.details.chars, text.length);
+  assert.equal(harness.page.callCount("evaluate"), 1, "only document.contentType is evaluated");
+});
+
+test("PDF offset past the end is E_OFFSET_RANGE with the rendered length", async () => {
+  const harness = pdfHarness(BASIC_PDF);
+  const result = failure(await run(harness, { url: "https://example.test/paper.pdf", offset: 999_999 }));
+  assert.equal(result.details.code, "E_OFFSET_RANGE");
+  assert.match(result.details.message ?? "", /rendered PDF is \d+ chars/);
+});
+
+test("a scanned PDF fails E_PDF_SCANNED with an artifact and no invented text (V12.3)", async () => {
+  const harness = pdfHarness(SCANNED_PDF, {
+    artifacts: {
+      async save(input: ArtifactInput): Promise<string> {
+        harnessArtifact = input;
+        return "/tmp/opencode/pi-chrome-search/artifacts/scanned";
+      },
+      async prune() {
+        return { removed: 0, kept: 0, bytes: 0 };
+      },
+      async size() {
+        return 0;
+      },
+      root: () => "/tmp/opencode/pi-chrome-search/artifacts",
+    },
+  });
+  const result = failure(await run(harness, { url: "https://example.test/scan.pdf" }));
+  assert.equal(result.details.code, "E_PDF_SCANNED");
+  assert.equal(result.details.artifact, "/tmp/opencode/pi-chrome-search/artifacts/scanned");
+  assert.match(textOf(result), /E_PDF_SCANNED|scan/i);
+  assert.doesNotMatch(textOf(result), /Hello PDF world/);
+  assert.ok(harnessArtifact !== undefined, "the failure snapshot is written");
+});
+
+test("read.keepPdf keeps doc.pdf next to the text artifact (P12-A)", async () => {
+  let saved: ArtifactInput | undefined;
+  const harness = pdfHarness(BASIC_PDF, {
+    config: (config) => {
+      config.read.keepPdf = true;
+    },
+    artifacts: {
+      async save(input: ArtifactInput): Promise<string> {
+        saved = input;
+        return "/tmp/opencode/pi-chrome-search/artifacts/pdf";
+      },
+      async prune() {
+        return { removed: 0, kept: 0, bytes: 0 };
+      },
+      async size() {
+        return 0;
+      },
+      root: () => "/tmp/opencode/pi-chrome-search/artifacts",
+    },
+  });
+  const result = success(await run(harness, { url: "https://example.test/paper.pdf" }));
+  assert.equal(result.details.artifact, "/tmp/opencode/pi-chrome-search/artifacts/pdf");
+  assert.ok(saved?.files?.["doc.pdf"] !== undefined);
+  assert.deepEqual(Buffer.from(saved.files["doc.pdf"]), BASIC_PDF);
+});
+
+test("a PDF redirect to a private address is blocked before extraction (V12.4)", async () => {
+  const harness = pdfHarness(BASIC_PDF, { fetchUrl: "http://127.0.0.1/secret.pdf" });
+  const result = failure(await run(harness, { url: "https://example.test/paper.pdf" }));
+  assert.equal(result.details.code, "E_BLOCKED_URL");
+  assert.match(textOf(result), /redirect target blocked|blocked address/i);
+});
+
+test("a PDF viewer with an HTML response is E_PDF_UNSUPPORTED", async () => {
+  const harness = pdfHarness(BASIC_PDF, { contentType: "text/html" });
+  const result = failure(await run(harness, { url: "https://example.test/paper.pdf" }));
+  assert.equal(result.details.code, "E_PDF_UNSUPPORTED");
+  assert.match(result.details.message ?? "", /text\/html/);
+});
+
+let harnessArtifact: ArtifactInput | undefined;

@@ -26,6 +26,11 @@ import type { CdpPage, PageKey } from "../cdp/types.ts";
 import type { Config } from "../config.ts";
 import type { EngineId } from "../engines/types.ts";
 import {
+  extractPdfText,
+  renderPdfWindow,
+  type PdfExtractor,
+} from "../extract/pdf.ts";
+import {
   READ_MAX_CHARS_CEILING,
   extractReadableDocument,
   renderReadableDocument,
@@ -80,6 +85,10 @@ export interface WebReadDetails {
   /** Length of the whole rendered document; the valid `offset` range is `0..totalChars-1`. */
   totalChars: number;
   format: "md" | "text";
+  /** Present when the page was a PDF (P12): which rung produced the text. */
+  pdf?: { pageCount: number; extractor: PdfExtractor };
+  /** Artifact directory, when one was written (e.g. `read.keepPdf`). */
+  artifact?: string;
 }
 
 export interface WebReadSuccess {
@@ -118,7 +127,7 @@ export interface WebReadTool {
  * parameters and the hard security rule, and nothing else.
  */
 export const WEB_READ_DESCRIPTION =
-  "Read one public page through the user's visible Chrome as clean Markdown (nav/ads/scripts stripped). 6000 chars by default; offset/maxChars (<=20000) for long pages. Private/local/non-http URLs refused.";
+  "Read a public page via the user's Chrome as clean Markdown. PDFs become text with page markers; scans are refused. 6000 chars default; offset/maxChars <=20000. Private/local URLs refused.";
 
 export interface WebReadOptions {
   /**
@@ -241,7 +250,7 @@ function failureResult(error: unknown, fallback: FailureFallback): WebReadFailur
 function asFailure(
   error: unknown,
   stage: Stage,
-  fallbackCode: "E_CDP_DISCONNECTED" | "E_PARSE" = "E_CDP_DISCONNECTED",
+  fallbackCode: "E_CDP_DISCONNECTED" | "E_PARSE" | "E_PDF_UNSUPPORTED" = "E_CDP_DISCONNECTED",
   signal?: AbortSignal,
 ): ReturnType<typeof fail> {
   if (signal?.aborted === true && !isWebSearchError(error)) {
@@ -377,6 +386,8 @@ const ARTIFACT_CODES: ReadonlySet<string> = new Set([
   "E_TIMEOUT",
   "E_BLOCKED_URL",
   "E_NAVIGATION_MISMATCH",
+  "E_PDF_SCANNED",
+  "E_PDF_UNSUPPORTED",
 ]);
 
 /**
@@ -513,21 +524,169 @@ export function createWebReadTool(
 
     const lock = pageLockFor(deps.cdp);
     const slots = readSlotKeys(deps.config.read.pool);
-    const slot = lock.pick(slots);
+    const slot = lock.pick(slots) as PageKey;
 
     return await lock.run(slot, () => readSlot(deps, input, requested, slot, signal));
+  }
+
+  /**
+   * `document.contentType` is the only reliable signal that the tab switched to
+   * Chrome's PDF viewer: `innerText()` is empty and the DOM is a placeholder, so
+   * waiting for a readability failure would produce `E_PARSE` on a valid PDF.
+   */
+  async function documentContentType(page: CdpPage): Promise<string> {
+    try {
+      const value = await page.evaluate<unknown>("document.contentType");
+      return typeof value === "string" ? value.trim().toLowerCase() : "";
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * The PDF branch: fetch the bytes through Chrome (cookies/redirects are the
+   * browser's), re-run the SSRF guard on the final hop, then parse in-tree.
+   * `read.keepPdf` keeps the payload next to the text artifact.
+   */
+  async function readPdf(
+    deps: ToolDeps,
+    page: CdpPage,
+    final: URL,
+    requested: URL,
+    input: NormalizedInput,
+    signal: AbortSignal | undefined,
+  ): Promise<WebReadResult> {
+    const fetcher = deps.cdp.fetchBytes;
+    if (fetcher === undefined) {
+      throw await failWithArtifact(
+        deps,
+        page,
+        fail("E_UNSUPPORTED", "read", {
+          message: "this connector cannot fetch response bytes; the PDF branch needs CDP Fetch",
+          hint: "the browser session must be the built-in Chrome connector, not a stub",
+        }),
+      );
+    }
+
+    let fetched;
+    try {
+      fetched = await fetcher.call(deps.cdp, final.href, {
+        maxBytes: deps.config.read.pdfMaxBytes,
+        ...(signal === undefined ? {} : { signal }),
+      });
+    } catch (error) {
+      throw await failWithArtifact(deps, page, asFailure(error, "read", "E_PDF_UNSUPPORTED", signal));
+    }
+
+    // Second SSRF pass: a public PDF URL may redirect to a private host, and the
+    // bytes came from the *final* hop, not from the URL the caller supplied.
+    try {
+      await recheckLanding(fetched.url, options);
+    } catch (error) {
+      throw await failWithArtifact(
+        deps,
+        page,
+        isWebSearchError(error)
+          ? error
+          : fail("E_BLOCKED_URL", "read", { message: "the PDF redirect target failed the SSRF guard" }),
+      );
+    }
+
+    const mime = fetched.contentType;
+    if (mime !== "application/pdf" && !mime.endsWith("+pdf")) {
+      throw await failWithArtifact(
+        deps,
+        page,
+        fail("E_PDF_UNSUPPORTED", "extract", {
+          message: `the viewer showed a PDF but the fetched response is ${mime === "" ? "untyped" : mime}`,
+          hint: "the host may require a login or serve an HTML interstitial; open it in the browser instead",
+        }),
+      );
+    }
+
+    let extracted;
+    try {
+      extracted = await extractPdfText(fetched.bytes, {
+        pageMaxChars: deps.config.read.pdfPageMaxChars,
+        ...(signal === undefined ? {} : { signal }),
+      });
+    } catch (error) {
+      throw await failWithArtifact(deps, page, asFailure(error, "extract", "E_PDF_UNSUPPORTED", signal));
+    }
+
+    const window = renderPdfWindow(extracted, { offset: input.offset, maxChars: input.maxChars });
+    if (input.offset > 0 && input.offset >= window.totalChars) {
+      throw await failWithArtifact(
+        deps,
+        page,
+        fail("E_OFFSET_RANGE", "render", {
+          message:
+            `offset ${input.offset} is past the end: the rendered PDF is ${window.totalChars} chars ` +
+            `(valid range 0..${Math.max(0, window.totalChars - 1)})`,
+        }),
+      );
+    }
+
+    let title = "";
+    try {
+      title = await page.title();
+    } catch {
+      title = "";
+    }
+    if (title.trim() === "") title = final.pathname.split("/").pop() ?? final.host;
+
+    let artifact: string | undefined;
+    if (deps.config.read.keepPdf && deps.config.artifacts.enabled) {
+      try {
+        const dir = await deps.artifacts.save({
+          code: "PDF_OK",
+          stage: "read",
+          url: final.href,
+          query: "",
+          page,
+          files: { "doc.pdf": fetched.bytes },
+          extra: {
+            pdf: { pageCount: extracted.pageCount, extractor: extracted.extractor, bytes: fetched.bytes.length },
+          },
+        });
+        if (dir !== "") artifact = dir;
+      } catch {
+        // Saving a copy is a convenience; the read itself already succeeded.
+      }
+    }
+
+    const details: WebReadDetails = {
+      url: requested.href,
+      finalUrl: final.href,
+      title,
+      chars: window.chars,
+      truncated: window.truncated,
+      ...(window.nextOffset === undefined ? {} : { nextOffset: window.nextOffset }),
+      maxChars: input.maxChars,
+      clamped: input.clamped,
+      totalChars: window.totalChars,
+      format: input.format,
+      pdf: { pageCount: extracted.pageCount, extractor: extracted.extractor },
+      ...(artifact === undefined ? {} : { artifact }),
+    };
+
+    void deps.log
+      .write({ kind: "read", domain: auditDomain(final), chars: window.chars, truncated: window.truncated })
+      .catch(() => undefined);
+
+    return { content: [{ type: "text", text: window.text }], details };
   }
 
   async function readSlot(
     deps: ToolDeps,
     input: NormalizedInput,
     requested: URL,
-    slot: string,
+    slot: PageKey,
     signal: AbortSignal | undefined,
   ): Promise<WebReadResult> {
     let page: CdpPage;
     try {
-      page = await deps.cdp.acquirePage(slot as PageKey);
+      page = await deps.cdp.acquirePage(slot);
     } catch (error) {
       throw asFailure(error, "connect", "E_CDP_DISCONNECTED", signal);
     }
@@ -563,6 +722,23 @@ export function createWebReadTool(
           ? error
           : fail("E_BLOCKED_URL", "read", { message: "the landing URL failed the SSRF guard" }),
       );
+    }
+
+    // P12-A: Chrome's PDF viewer is an out-of-process extension document, so
+    // the readability pass would see an empty placeholder. Branch on the
+    // document's own MIME type before extracting anything, then read the bytes
+    // through Chrome again and parse them in our tree.
+    const mime = await documentContentType(page);
+    if (mime === "application/pdf") {
+      try {
+        return await readPdf(deps, page, final, requested, input, signal);
+      } finally {
+        // Chrome swaps a PDF tab's document into an out-of-process viewer; the
+        // flattened session can be detached afterwards. Reusing that tab makes
+        // the *next* read fail with E_TARGET_LOST, so release this slot and let
+        // the next read open a clean one.
+        await deps.cdp.releasePage?.(slot).catch(() => undefined);
+      }
     }
 
     let raw: unknown;

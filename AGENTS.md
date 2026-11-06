@@ -152,6 +152,8 @@ because of a wall, fix the test to skip, not to hammer.
 | `E_WALL` (yandex) | surface window, ask user to solve; after solve retry once; never automate |
 | `E_WALL` (google `/sorry`) | stop searching for a while; check whether a Playwright launch was used (it must not be); verify `navigator.webdriver === false` |
 | `E_PARSE` | open the artifact dir from the error; compare `page.txt`/`page.html` with the adapter's markers; patch; add a fixture; bump `research/FINDINGS.md` |
+| `E_PDF_SCANNED` | the PDF is images only (no text layer); OCR is out of scope — open it in the browser or find an HTML/text twin; the artifact has the viewer snapshot |
+| `E_PDF_UNSUPPORTED` | the in-tree parser found no text and no installed `pdftotext`/`mutool` succeeded (encrypted/unsupported encoding); try the HTML version or install poppler as an optional fallback |
 | a worker edited a shared file | discard that lane's diff, re-issue with `PLAN.md` §1.3 ownership; the orchestrator applies shared-file changes |
 | a gate fails twice | repair #1 same worker, #2 fresh worker, then escalate to the user with `evidence/P<N>-blocker.md`; never waive silently |
 | two agents need Chrome at once | forbidden: live work is orchestrator-only and serialized; workers are offline |

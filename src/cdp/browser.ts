@@ -76,6 +76,7 @@ import {
   type ProcessProbe,
 } from "../runtime/host.ts";
 import type { Clock, Logger } from "../runtime/types.ts";
+import { captureBytes } from "./bytes.ts";
 import { CdpSession, createCdpPage } from "./session.ts";
 import type {
   BrowserInfo,
@@ -83,6 +84,8 @@ import type {
   CdpConnector,
   CdpEndpoint,
   CdpPage,
+  FetchedBytes,
+  FetchBytesOptions,
   PageKey,
 } from "./types.ts";
 
@@ -514,6 +517,20 @@ class BrowserConnector implements Connector {
     return owned.page;
   }
 
+  /**
+   * P12-A: drop one cached work tab. Used by `web_read` after a PDF, because a
+   * PDF tab may be a detached viewer target that is useless to the next read.
+   */
+  async releasePage(key: PageKey): Promise<void> {
+    const owned = this.#enginePages.get(key);
+    if (owned === undefined) return;
+    this.#enginePages.delete(key);
+    this.#owned.delete(owned.targetId);
+    this.#focusedOnce.delete(key);
+    const session = this.#session;
+    if (session !== undefined) await this.#closeTargetQuietly(session, owned.targetId);
+  }
+
   async releaseAll(): Promise<void> {
     const session = this.#session;
     const targets = [...this.#owned];
@@ -588,6 +605,25 @@ class BrowserConnector implements Connector {
 
   pageFor(engine: PageKey): CdpPage | null {
     return this.#enginePages.get(engine)?.page ?? null;
+  }
+
+  // --- P12: response bytes through the browser ---------------------------
+
+  /**
+   * Fetch a response body through Chrome itself (cookies, redirects,
+   * compression are the browser's). Uses a short-lived background target so the
+   * visible tabs are never navigated or closed; the target is gone before the
+   * caller receives the bytes.
+   */
+  async fetchBytes(url: string, o: FetchBytesOptions = {}): Promise<FetchedBytes> {
+    const session = this.#session;
+    if (session === undefined || !this.isConnected()) {
+      throw fail("E_CDP_UNAVAILABLE", "read", {
+        message: "fetchBytes was called before the browser session was connected",
+        hint: "call connect() (or run /web-doctor) before reading bytes",
+      });
+    }
+    return await captureBytes(session, url, o);
   }
 
   // --- P10: anchor panel and follow-focus --------------------------------

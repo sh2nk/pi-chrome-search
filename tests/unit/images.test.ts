@@ -133,6 +133,8 @@ interface HarnessOptions {
   page: FakePage;
   /** Mutate the cloned config before dependencies are built. */
   config?: (config: Config) => void;
+  /** Stub for `CdpConnector.fetchBytes` (P12-C). Default: a tiny PNG-ish payload. */
+  fetchBytes?: CdpConnector["fetchBytes"];
 }
 
 interface Harness {
@@ -189,6 +191,9 @@ function makeHarness(options: HarnessOptions): Harness {
     async releaseAll() {},
     isConnected: () => true,
     endpoint: () => null,
+    fetchBytes:
+      options.fetchBytes ??
+      (async (url) => ({ url, status: 200, contentType: "image/png", bytes: Buffer.from("fake-image-bytes") })),
   };
 
   const deps: ToolDeps = {
@@ -205,11 +210,14 @@ function makeHarness(options: HarnessOptions): Harness {
   return { deps, page, limiterCalls, pageRequests, saved };
 }
 
+/** Thumbnail hostnames in the fixtures resolve to a public address offline. */
+const PUBLIC_RESOLVER = async (): Promise<string[]> => ["93.184.216.34"];
+
 async function run(
   harness: Harness,
   input: Partial<ImageSearchInput>,
 ): Promise<ImageSearchResult> {
-  const tool = createImageSearchTool(() => harness.deps);
+  const tool = createImageSearchTool(() => harness.deps, { resolve: PUBLIC_RESOLVER });
   return await tool.execute("call-1", input as ImageSearchInput, undefined, undefined);
 }
 
@@ -228,7 +236,10 @@ function expectFailure(result: ImageSearchResult): ImageSearchFailure {
 }
 
 function textOf(result: ImageSearchResult): string {
-  return result.content.map((block) => block.text).join("\n");
+  return result.content
+    .filter((block): block is { type: "text"; text: string } => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +490,7 @@ test("image_search schema accepts the documented shape and rejects out-of-range 
     { q: "red panda", n: 1 },
     { q: "red panda", n: 12, engine: "google", attach: false },
     { q: "red panda", n: 4, engine: "yandex", attach: true },
+    { q: "red panda", n: 4, engine: "yandex", attach: "bytes" },
   ];
   for (const value of valid) assert.equal(Value.Check(imageSearchSchema, value), true, JSON.stringify(value));
 
@@ -612,22 +624,39 @@ test("renderer truncation is reported as pageCarried, not as a short page", asyn
   for (const line of lines) assert.match(line, /^.+ — https?:\/\/\S+ \(https?:\/\/\S+\)$/);
 });
 
-test("attach is off by default and emits up to 4 text thumbnail URLs when asked", async () => {
+test("attach is off by default and emits up to 4 real image blocks when asked (P12-C)", async () => {
   const harness = makeHarness({ page: fixturePage("images-google", "google", GOOGLE_URL).page });
   const off = expectSuccess(await run(harness, { q: "red panda" }));
   assert.equal(off.details.attach, false);
-  assert.equal(textOf(off).includes("attach ("), false);
+  assert.equal(off.details.attachedImages, 0);
+  assert.equal(off.content.some((block) => block.type === "image"), false);
 
-  const on = expectSuccess(await run(harness, { q: "red panda", attach: true }));
-  const text = textOf(on);
+  const on = expectSuccess(await run(harness, { q: "red panda", attach: "bytes" }));
+  const images = on.content.filter((block) => block.type === "image");
   assert.equal(on.details.attach, true);
-  assert.ok(text.includes("attach (thumbnail URLs, not image bytes)"));
-  assert.equal(text.includes("no image blocks"), false, "the result type does allow image blocks");
-  const attachLines = text
-    .split("\n")
-    .slice(text.split("\n").indexOf("attach (thumbnail URLs, not image bytes):") + 1);
-  assert.equal(attachLines.length, 4);
-  for (const url of attachLines) assert.match(url, /^https:\/\/encrypted-tbn/);
+  assert.equal(on.details.attachedImages, 4);
+  assert.equal(on.details.attachFailed, 0);
+  assert.equal(images.length, 4);
+  for (const block of images) {
+    assert.equal(block.type, "image");
+    assert.equal(block.mimeType, "image/png");
+    assert.equal(Buffer.from(block.data, "base64").toString(), "fake-image-bytes");
+  }
+  assert.equal(textOf(on).includes("attach ("), false, "attach no longer prints URLs");
+});
+
+test("attach reports failed thumbnail fetches instead of printing URLs", async () => {
+  const harness = makeHarness({
+    page: fixturePage("images-google", "google", GOOGLE_URL).page,
+    fetchBytes: async () => {
+      throw new Error("blocked");
+    },
+  });
+  const on = expectSuccess(await run(harness, { q: "red panda", attach: "bytes" }));
+  assert.equal(on.details.attachedImages, 0);
+  assert.equal(on.details.attachFailed, 4);
+  assert.equal(on.content.some((block) => block.type === "image"), false);
+  assert.match(textOf(on), /no thumbnail bytes could be fetched/);
 });
 
 // ---------------------------------------------------------------------------

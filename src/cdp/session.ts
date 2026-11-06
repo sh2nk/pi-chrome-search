@@ -159,6 +159,8 @@ function stageForMethod(method: string): Stage {
   if (method.startsWith("Page.navigate") || method.startsWith("Page.frame")) return "navigate";
   if (method.startsWith("Runtime.")) return "extract";
   if (method.startsWith("Network.")) return "read";
+  // P12: a paused request/body belongs to the read pipeline, not to "connect".
+  if (method.startsWith("Fetch.")) return "read";
   if (method === "Page.captureScreenshot") return "render";
   if (method.startsWith("Input.")) return "resolve";
   return "connect";
@@ -355,10 +357,13 @@ export class CdpSession {
     this.#forgetSession(sessionId);
   }
 
-  async createTarget(url: string, opts: { newWindow?: boolean } = {}): Promise<string> {
+  async createTarget(url: string, opts: { newWindow?: boolean; background?: boolean } = {}): Promise<string> {
     const params: Record<string, unknown> = { url };
     // The browser.ts lane needs a dedicated window; Chrome's default is a tab.
     if (opts.newWindow === true) params.newWindow = true;
+    // P12-A: a capture target must not steal the user's foreground tab. Newer
+    // Chrome honours `background`; older builds ignore the unknown param.
+    if (opts.background === true) params.background = true;
     const result = await this.send<Record<string, unknown>>("Target.createTarget", params);
     const targetId = isRecord(result) ? asString(result.targetId) : undefined;
     if (targetId === undefined) {
