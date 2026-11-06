@@ -141,7 +141,7 @@ export interface WebSearchTool {
  * every word.
  */
 export const WEB_SEARCH_DESCRIPTION =
-  "Search the web for free through the user's visible Chrome: Google, DuckDuckGo, Yandex, each with its native AI summary. Returns compact results (n<=10). site:, filetype: and quoted queries are passed through; engines may be one id, a list, or auto.";
+  "Search the web for free in the user's visible Chrome (Google, DuckDuckGo, Yandex) with each engine's native AI summary. Compact results, n<=10; site:/filetype:/quoted queries pass through; engines: id, list, or auto.";
 
 /**
  * Codes a sibling engine can plausibly cure. Everything else (E_PARSE, E_TIMEOUT,

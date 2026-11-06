@@ -110,7 +110,7 @@ export interface WebReadTool {
  * parameters and the hard security rule, and nothing else.
  */
 export const WEB_READ_DESCRIPTION =
-  "Read one public page through the user's visible Chrome and return clean Markdown (nav, ads, scripts stripped). Defaults to 6000 chars; use offset/maxChars (max 20000) for long pages. Private, local and non-http(s) URLs are refused.";
+  "Read one public page through the user's visible Chrome as clean Markdown (nav/ads/scripts stripped). 6000 chars by default; offset/maxChars (<=20000) for long pages. Private/local/non-http URLs refused.";
 
 export interface WebReadOptions {
   /**

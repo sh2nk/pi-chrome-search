@@ -105,7 +105,7 @@ export interface ImageSearchTool {
  * about the two engines, the line shape and the expensive `attach` flag.
  */
 export const IMAGE_SEARCH_DESCRIPTION =
-  "Search images through the user's visible Chrome (Google Images or Yandex Images). Returns compact lines: alt — pageUrl (thumbUrl); n<=12, default 4. attach:true appends up to 4 thumbnail URLs (not image bytes); off by default because images are expensive.";
+  "Search images in the user's visible Chrome (Google or Yandex). Compact lines: alt — pageUrl (thumbUrl). n<=12, default 4; attach:true adds up to 4 thumbnail URLs (no image bytes).";
 
 const DEFAULT_N = 4;
 const MAX_N = 12;
