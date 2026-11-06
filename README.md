@@ -149,6 +149,8 @@ a partial file is deep-merged over the defaults.
 | `search.aiWaitMs`, `search.aiExpand` | `6000`, `false` | Bounded wait for a streaming native AI summary (0 disables; a page with no AI block stops after ≤1.5 s); allow one visible expand click inside the AI block (`false`: never click) |
 | `read.defaultMaxChars`, `read.maxCharsCeiling` | `6000`, `20000` | Default `web_read` window and hard ceiling |
 | `read.pool` | `1` | How many read tabs/locks exist (1..3); 1 serializes every read on one tab |
+| `cdp.attachWaitMs` | `60000` | How long an attach waits for the CDP Allow prompt (`0` = one attempt) |
+| `window.raiseOnPrompt` | `auto` | On the Allow prompt, try once to focus the browser window (best effort; `never` = passive) |
 | `cache.serpTtlMs`, `cache.gotoTtlMs`, `cache.maxEntries` | `600000`, `86400000`, `200` | SERP TTL (10 min), `/goto` TTL (24 h), LRU size |
 | `captcha.waitMs`, `captcha.retryYandexOnce` | `0`, `true` | Extra grace after the one Yandex retry for you to solve a wall (0 = no extra wait); the retry waits ~3 s |
 | `artifacts.enabled`, `artifacts.keep`, `artifacts.maxBytes` | `true`, `30`, `52428800` | Save failure artifacts; retention in dirs / bytes (50 MB) |
@@ -232,6 +234,7 @@ stop and ask — not retry.
 |---|---|
 | `E_CDP_UNAVAILABLE` | Repeat the Allow flow; check `cat ~/.config/google-chrome/DevToolsActivePort`; or set `PI_CHROME_CDP_WS`. A failing `/json/version` is not the problem |
 | `E_CDP_DISCONNECTED` | Retry once (the client reconnects once). If it repeats, run `/web-doctor`; check you did not close Chrome |
+| `E_CDP_AWAITING_ALLOW` | Chrome is running and waiting for the CDP Allow. The extension sends a desktop notification and waits `cdp.attachWaitMs` (60 s); click Allow and the call resumes by itself. `node src/cli/doctor.ts --watch` waits five minutes |
 | `E_WALL` | A captcha/consent/`/sorry` page. The window is brought forward: solve it yourself, then retry once. Never automate it |
 | `E_PARSE` | A selector canary failed. Open the artifact dir from the error, compare `page.html`/`page.txt` with the adapter, run `/web-doctor` |
 | `E_BUSY` | Another pi session holds `~/.pi/agent/web-search.lock`. Close it or wait for the heartbeat (`--fix` reclaims a provably dead lock) |

@@ -254,6 +254,11 @@ interface RigOptions {
   heartbeatMs?: number;
   sessionId?: string;
   discover?: () => Promise<CdpEndpoint>;
+  /** Override the session factory entirely (P11 wait tests throw from here). */
+  connectSession?: () => Promise<CdpSession>;
+  /** P11: `cdp.attachWaitMs` for this connector. */
+  attachWaitMs?: number;
+  onAwaitingAllow?: ConnectorOptions["onAwaitingAllow"];
 }
 
 function rig(t: TestContext, options: RigOptions = {}): Rig {
@@ -277,17 +282,21 @@ function rig(t: TestContext, options: RigOptions = {}): Rig {
     return picked;
   };
 
+  const config = testConfig(options.focus);
+  if (options.attachWaitMs !== undefined) config.cdp.attachWaitMs = options.attachWaitMs;
   const connectorOptions: ConnectorOptions = {
-    config: testConfig(options.focus),
+    config,
     discover: options.discover ?? (async () => ENDPOINT),
     // The fake implements the used surface; the double assertion keeps `any`
     // out of the test while the connector still receives the real type.
-    connectSession: async () => nextSession() as unknown as CdpSession,
+    connectSession:
+      options.connectSession ?? (async () => nextSession() as unknown as CdpSession),
     clock,
     log,
     lockPath,
     ...(options.heartbeatMs === undefined ? {} : { heartbeatMs: options.heartbeatMs }),
     ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+    ...(options.onAwaitingAllow === undefined ? {} : { onAwaitingAllow: options.onAwaitingAllow }),
   };
 
   const connector = createConnector(connectorOptions);
@@ -1072,4 +1081,110 @@ test("ConnectorInfo is what the doctor reads", () => {
     "locked",
   ];
   assert.equal(fields.length, 8);
+});
+
+// ---------------------------------------------------------------------------
+// P11/L3 — waiting for the CDP Allow prompt
+// ---------------------------------------------------------------------------
+
+const PROMPT_ERROR = () =>
+  fail("E_CDP_UNAVAILABLE", "connect", {
+    message: "the WebSocket handshake did not answer",
+  });
+
+test("P11: a pending Allow is waited out and the same connect call succeeds", async (t) => {
+  const clock = new FakeClock();
+  const seen: number[] = [];
+  let attempts = 0;
+  const session = new FakeSession(clock);
+  const { connector } = rig(t, {
+    clock,
+    attachWaitMs: 60_000,
+    onAwaitingAllow: (info) => seen.push(info.elapsedMs),
+    connectSession: async () => {
+      attempts += 1;
+      if (attempts <= 2) throw PROMPT_ERROR();
+      return session as unknown as CdpSession;
+    },
+  });
+
+  const info = await connector.connect();
+  assert.equal(info.webdriver, false);
+  assert.equal(attempts, 3, "two unanswered attempts, then the allow");
+  assert.deepEqual(seen, [0, 2_000], "progress is reported on every wait, with elapsed time");
+});
+
+test("P11: an expired wait is E_CDP_AWAITING_ALLOW, not a generic CDP failure", async (t) => {
+  const clock = new FakeClock();
+  let attempts = 0;
+  const { connector } = rig(t, {
+    clock,
+    attachWaitMs: 4_000,
+    connectSession: async () => {
+      attempts += 1;
+      throw PROMPT_ERROR();
+    },
+  });
+
+  const error = await rejectsWithCode(connector.connect(), "E_CDP_AWAITING_ALLOW");
+  assert.ok(attempts >= 2, `one attempt cannot exhaust a 4 s wait (attempts=${attempts})`);
+  assert.match(error.details.hint, /inspect/);
+  assert.match(error.details.message ?? "", /did not answer for \d+ms/);
+});
+
+test("P11: attachWaitMs 0 keeps the old single-attempt behaviour", async (t) => {
+  const clock = new FakeClock();
+  let attempts = 0;
+  const { connector } = rig(t, {
+    clock,
+    attachWaitMs: 0,
+    connectSession: async () => {
+      attempts += 1;
+      throw PROMPT_ERROR();
+    },
+  });
+
+  await rejectsWithCode(connector.connect(), "E_CDP_UNAVAILABLE");
+  assert.equal(attempts, 1);
+});
+
+test("P11: a refused socket fails immediately — no pointless 60 s wait", async (t) => {
+  const clock = new FakeClock();
+  let attempts = 0;
+  const { connector } = rig(t, {
+    clock,
+    attachWaitMs: 60_000,
+    connectSession: async () => {
+      attempts += 1;
+      throw fail("E_CDP_UNAVAILABLE", "connect", {
+        message: "connect ECONNREFUSED 127.0.0.1:9222",
+      });
+    },
+  });
+
+  await rejectsWithCode(connector.connect(), "E_CDP_UNAVAILABLE");
+  assert.equal(attempts, 1);
+  assert.equal(clock.pendingCount(), 0, "a refused socket must not even start a wait");
+});
+
+test("P11: the awaiting hint names the detected browser family, not always Chrome", async (t) => {
+  const clock = new FakeClock();
+  const braveEndpoint: CdpEndpoint = {
+    port: 9222,
+    wsUrl: "ws://127.0.0.1:9222/devtools/browser/brave",
+    source: "devtools-active-port",
+    profileDir: "/home/u/.config/BraveSoftware/Brave-Browser",
+  };
+  const { connector } = rig(t, {
+    clock,
+    attachWaitMs: 0,
+    discover: async () => braveEndpoint,
+    connectSession: async () => {
+      throw PROMPT_ERROR();
+    },
+  });
+
+  const error = await rejectsWithCode(connector.connect(), "E_CDP_UNAVAILABLE");
+  assert.match(error.details.hint, /brave:\/\/inspect/);
+  assert.doesNotMatch(error.details.hint, /chrome:\/\/inspect/);
 });

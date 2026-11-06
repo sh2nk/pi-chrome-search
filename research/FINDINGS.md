@@ -344,3 +344,33 @@ Findings:
 7. **Yandex `pageUrl` is an image file.** The 2026 tile markup discloses only `img_url` (the source image),
    not its host page. `ImageItem.pageUrlKind` is `"page"` for Google and `"image"` for Yandex; the tool
    description says so, and the payload validator infers the kind from the URL when a payload omits it.
+
+## 14. P11 measurements — the Allow prompt (2026-11-06)
+
+1. **The prompt looks like a dead socket.** Chrome 136+ completes the DevTools WebSocket handshake only
+   after the user clicks Allow; until then the client sits in the handshake and the old 5 s connect budget
+   (7 s with discovery) expired first. The user's report matches the data: "I don't always see the prompt
+   and don't always manage to click Allow." The doctor used to call that `E_CDP_UNAVAILABLE`; two P9 runs
+   logged a failed connect and then reported `cdp: ok` from the same process.
+2. **A refusal is not a prompt.** `ECONNREFUSED`/`ENOTFOUND` means nothing listens, so waiting 60 s would
+   be a lie; the connector fails immediately for those and waits only for a handshake that hangs or is
+   rejected.
+3. **Measurement of the wait (black-hole endpoint, not Chrome):** a TCP server that accepts and never
+   answers, `attachWaitMs: 7000`, `connectTimeoutMs: 5000` → 2 attempts, progress at 3 s,
+   `E_CDP_AWAITING_ALLOW` at 8 015 ms, report `status: awaiting_allow`, exit 2. Notification and raise each
+   fired exactly once.
+4. **L1 works on this host:** `notifyDesktop()` → `{"delivered":true,"via":"notify-send","tried":["notify-send"]}`
+   (urgency critical, `-t 0`, so the popup stays until dismissed).
+5. **L2 works, but Hyprland 0.57 changed its IPC.** The legacy dispatcher
+   `hyprctl dispatch focuswindow class:google-chrome` now fails with a Lua error; the working call is
+   `hyprctl eval 'hl.dsp.focus({window="class:google-chrome"})'`. The adapter tries the modern form first
+   and falls back to the legacy one, so older builds keep working. Window class measured with
+   `hyprctl clients -j`: `google-chrome` (title `… - Google Chrome`), no `wmctrl`/`xdotool`/`kdotool`.
+6. **Attention is signalled, never manufactured.** Nothing in the path opens a window, a tab or a URL,
+   launches the browser or installs a helper; `gio launch chrome.desktop` was deliberately left out of the
+   raise ladder because activating a stopped browser is a side effect, not attention.
+7. **A fresh-Chrome re-reproduction is out of scope by rule.** Forcing the prompt again would require
+   restarting Chrome or revoking the Allow in `chrome://inspect`; the first is forbidden (AGENTS §2), the
+   second would leave the user's session unusable mid-run. The waiting state machine is therefore proven
+   offline (FakeSession) and against a live silent endpoint; the real-prompt case is the one P9 already
+   observed twice.

@@ -36,6 +36,7 @@ import { discoverEndpoint } from "../cdp/discovery.ts";
 import { loadConfig, resolveConfigPath } from "../config.ts";
 import type { Config } from "../config.ts";
 import { createDefaultRegistry } from "../engines/index.ts";
+import { createAllowAttention, oscNotification, type AllowAttention } from "../runtime/attention.ts";
 import type { EngineRegistry } from "../engines/types.ts";
 import { createArtifacts } from "../runtime/artifacts.ts";
 import { systemClock } from "../runtime/clock.ts";
@@ -66,6 +67,8 @@ export interface DoctorCliArgs {
   /** False for `--no-probe`. */
   probe: boolean;
   fix: boolean;
+  /** P11: wait much longer for the Allow prompt (second-terminal recovery). */
+  watch: boolean;
   configPath?: string;
   help: boolean;
 }
@@ -105,15 +108,23 @@ export interface DoctorCliDeps {
   writeError?: (text: string) => void;
   /** Override the doctor JSONL logger (tests). */
   log?: Logger;
+  /** P11 seam: receive the Allow-attention coordinator instead of building one. */
+  attention?: AllowAttention;
+  /** P11 seam: `process.stdout.isTTY`; OSC escapes are emitted only when true. */
+  isTTY?: boolean;
 }
+
+/** `--watch` gives the user five minutes to find the window before giving up. */
+const WATCH_ATTACH_WAIT_MS = 300_000;
 
 function usage(): string {
   return [
-    "usage: node src/cli/doctor.ts [--json] [--no-probe] [--fix] [--config <path>]",
+    "usage: node src/cli/doctor.ts [--json] [--no-probe] [--fix] [--watch] [--config <path>]",
     "",
     "  --json        machine-readable report (schema: tests/fixtures/doctor.schema.json)",
     "  --no-probe    skip the per-engine live probe",
     "  --fix         reconnect once, close owned tabs, reclaim a stale lock, prune artifacts",
+    "  --watch       wait up to 5 min for the CDP Allow prompt (notify + raise once)",
     "  --config P    read config from P instead of ~/.pi/agent/web-search.json",
     "",
     "exit 0 = ok/degraded, 2 = blocked/unavailable",
@@ -122,7 +133,7 @@ function usage(): string {
 
 /** Parse the CLI flags; an unknown flag or a missing `--config` value is E_CONFIG. */
 export function parseDoctorArgs(argv: readonly string[]): DoctorCliArgs {
-  const args: DoctorCliArgs = { json: false, probe: true, fix: false, help: false };
+  const args: DoctorCliArgs = { json: false, probe: true, fix: false, watch: false, help: false };
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -132,6 +143,8 @@ export function parseDoctorArgs(argv: readonly string[]): DoctorCliArgs {
       args.probe = false;
     } else if (arg === "--fix") {
       args.fix = true;
+    } else if (arg === "--watch") {
+      args.watch = true;
     } else if (arg === "--help" || arg === "-h") {
       args.help = true;
     } else if (arg === "--config") {
@@ -147,7 +160,7 @@ export function parseDoctorArgs(argv: readonly string[]): DoctorCliArgs {
     } else {
       throw fail("E_CONFIG", "config", {
         message: `unknown doctor argument ${JSON.stringify(arg)}`,
-        hint: "supported flags: --json, --no-probe, --fix, --config <path>",
+        hint: "supported flags: --json, --no-probe, --fix, --watch, --config <path>",
       });
     }
   }
@@ -216,6 +229,30 @@ export async function runDoctorCli(
     return DOCTOR_BLOCKED_EXIT_CODE;
   }
 
+  // P11: `--watch` is the second-terminal mirror of the extension's wait. It
+  // only extends the attach budget; a normal run stays bounded at
+  // `cdp.attachWaitMs` (60 s).
+  if (args.watch) {
+    config = {
+      ...config,
+      cdp: { ...config.cdp, attachWaitMs: Math.max(config.cdp.attachWaitMs, WATCH_ATTACH_WAIT_MS) },
+    };
+  }
+
+  // L0/L1/L2: progress line, one desktop notification, one best-effort raise.
+  const progressTo = (line: string): void => {
+    if (!json && (deps.isTTY ?? process.stdout.isTTY === true)) {
+      write(`${oscNotification(line)}\n`);
+      return;
+    }
+    // A JSON run must keep stdout parseable; CI logs get plain text (no escapes).
+    if (json) writeError(`${line}\n`);
+    else write(`${line}\n`);
+  };
+  const attention =
+    deps.attention ??
+    createAllowAttention({ config, onProgress: progressTo });
+
   // A logger is only needed by a connector this process builds; an injected
   // connector (tests, or a caller with its own log) never gets a file here.
   let log: Logger | undefined = deps.log;
@@ -239,6 +276,7 @@ export async function runDoctorCli(
         log,
         // `defaultLockPath` reads `process.env`; the CLI may run with an injected env.
         lockPath: defaultLockPath(env),
+        onAwaitingAllow: (info) => attention.onAwaitingAllow(info),
       });
     }
   } catch (error) {
@@ -268,6 +306,7 @@ export async function runDoctorCli(
     config,
     configPath,
     connector,
+    attention,
     registry,
     clock,
     ...(deps.cache === undefined ? {} : { cache: deps.cache }),
@@ -301,8 +340,32 @@ export async function runDoctorCli(
     return DOCTOR_BLOCKED_EXIT_CODE;
   }
 
-  if (json) write(`${JSON.stringify(report, null, 2)}\n`);
-  else write(renderDoctorText(report));
+  const attentionOutcome = await attention.flush();
+  const attentionLine = attentionOutcome.awaited
+    ? `attention: waited ${Math.round(attentionOutcome.waitedMs / 1000)}s · notify ` +
+      `${attentionOutcome.notified?.via ?? "unavailable"} · raise ${attentionOutcome.raise?.via ?? "unavailable"}`
+    : undefined;
+
+  if (json) {
+    write(`${JSON.stringify(report, null, 2)}\n`);
+    // The report JSON is schema-frozen; the attention detail belongs beside it.
+    if (attentionLine !== undefined) writeError(`${attentionLine}\n`);
+  } else {
+    const notified = attentionLine === undefined ? undefined : attentionOutcome.notified;
+    const raised = attentionLine === undefined ? undefined : attentionOutcome.raise;
+    write(
+      renderDoctorText(
+        report,
+        attentionLine === undefined
+          ? undefined
+          : {
+              waitedMs: attentionOutcome.waitedMs,
+              notified: notified?.via ?? "unavailable",
+              raise: raised?.via ?? "unavailable",
+            },
+      ),
+    );
+  }
 
   // A diagnostic must not leave the window/lock it opened behind. `releaseAll`
   // closes only this connector's own targets, so a concurrent pi session is safe.

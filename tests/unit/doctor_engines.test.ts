@@ -1237,6 +1237,9 @@ test("--fix reports a slow connect as late, never as a failed reconnect", async 
   };
   const config = structuredClone(DEFAULT_CONFIG);
   config.cdp.connectTimeoutMs = 1;
+  // This test is about the late-connect grace, not the Allow wait: P11's
+  // attach budget would otherwise cover the 25 ms connect comfortably.
+  config.cdp.attachWaitMs = 0;
 
   const actions = await applyDoctorFix(
     depsFor({ connector, registry: fakeRegistry(["google"]), config }),

@@ -20,6 +20,7 @@ import type { EngineRegistry } from "./engines/types.ts";
 import type { ClassifierRegistry } from "./reflex/classifier.ts";
 import { createReflex, type ReflexBundle } from "./reflex/index.ts";
 import { createArtifacts } from "./runtime/artifacts.ts";
+import { createAllowAttention } from "./runtime/attention.ts";
 import { createCache } from "./runtime/cache.ts";
 import { createSystemClock } from "./runtime/clock.ts";
 import { createLimiter } from "./runtime/limiter.ts";
@@ -57,6 +58,15 @@ function createRuntime(): Runtime {
   const cache = createCache({ maxEntries: config.cache.maxEntries, clock });
   const limiter = createLimiter({ config, clock, statePath: join(stateDir, "state.json") });
   const artifacts = createArtifacts({ config, clock });
+  // P11: while a CDP handshake waits for the user's Allow, fire exactly one
+  // desktop notification and (unless `window.raiseOnPrompt: "never"`) one
+  // best-effort raise. The extension has no terminal to print progress into.
+  const attention = createAllowAttention({
+    config,
+    onProgress: (line) => {
+      void log.write({ level: "info", event: "awaiting_allow", message: line }).catch(() => undefined);
+    },
+  });
   const connector = createConnector({
     config,
     clock,
@@ -67,6 +77,7 @@ function createRuntime(): Runtime {
         ws: config.cdp.ws,
         timeoutMs: config.cdp.connectTimeoutMs,
       }),
+    onAwaitingAllow: (info) => attention.onAwaitingAllow(info),
   });
   const registry = createDefaultRegistry(config);
   return { config, configPath, clock, log, cache, limiter, artifacts, connector, registry };

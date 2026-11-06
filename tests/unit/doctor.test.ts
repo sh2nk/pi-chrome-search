@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import type { Connector, ConnectorInfo } from "../../src/cdp/browser.ts";
+import type { Connector, ConnectorInfo, ConnectorOptions } from "../../src/cdp/browser.ts";
 import type { BrowserInfo, CdpConnectionInfo, CdpEndpoint, CdpPage } from "../../src/cdp/types.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
 import type { Config } from "../../src/config.ts";
@@ -706,6 +706,9 @@ async function runCli(
     cache?: Cache;
     artifacts?: ReturnType<typeof fakeArtifacts>;
     loadConfig?: (opts: { path?: string; env: NodeJS.ProcessEnv }) => Config;
+    /** P11: build the connector in-test so the Allow hook can be exercised. */
+    createConnector?: (options: ConnectorOptions) => Connector;
+    isTTY?: boolean;
   } = {},
 ): Promise<CliRun> {
   const out: string[] = [];
@@ -721,16 +724,19 @@ async function runCli(
     ...(options.probe === undefined ? {} : { probe: options.probe }),
     ...(options.cache === undefined ? {} : { cache: options.cache }),
     ...(options.artifacts === undefined ? {} : { artifacts: options.artifacts }),
+    ...(options.createConnector === undefined ? {} : { createConnector: options.createConnector }),
+    ...(options.isTTY === undefined ? {} : { isTTY: options.isTTY }),
   });
   return { code, stdout: out.join(""), stderr: err.join("") };
 }
 
 test("CLI parses flags strictly", () => {
-  assert.deepEqual(parseDoctorArgs([]), { json: false, probe: true, fix: false, help: false });
+  assert.deepEqual(parseDoctorArgs([]), { json: false, probe: true, fix: false, watch: false, help: false });
   assert.deepEqual(parseDoctorArgs(["--json", "--no-probe", "--fix"]), {
     json: true,
     probe: false,
     fix: true,
+    watch: false,
     help: false,
   });
   assert.equal(parseDoctorArgs(["--config", "/tmp/x.json"]).configPath, "/tmp/x.json");
@@ -1003,3 +1009,85 @@ function fakeArtifacts(): {
     root: () => "/home/tester/.pi/agent/web-search/artifacts",
   };
 }
+
+// ---------------------------------------------------------------------------
+// P11 — the Allow prompt is signalled, never silently timed out
+// ---------------------------------------------------------------------------
+
+/**
+ * A connector that reports a pending Allow (exactly as the real one does) and
+ * then fails with the awaiting code, so the CLI path is exercised end to end.
+ */
+function awaitingConnector(onAwaitingAllow: ConnectorOptions["onAwaitingAllow"]): FakeConnector {
+  const connector = new FakeConnector({ connectFailures: 99 });
+  connector.connectError = fail("E_CDP_AWAITING_ALLOW", "connect", {
+    message: "the endpoint did not answer for 61000ms",
+  });
+  const connect = connector.connect.bind(connector);
+  connector.connect = async () => {
+    onAwaitingAllow?.({
+      attempt: 3,
+      elapsedMs: 4_000,
+      budgetMs: 60_000,
+      hint: "open chrome://inspect/#remote-debugging, tick \"Discover network targets\" and click Allow",
+      brand: null,
+      endpoint: {
+        port: 9222,
+        wsUrl: "ws://127.0.0.1:9222/devtools/browser/x",
+        source: "devtools-active-port",
+      },
+    });
+    return await connect();
+  };
+  return connector;
+}
+
+test("P11: --watch extends the attach budget and wires the attention hook", async () => {
+  let captured: ConnectorOptions | undefined;
+  const config: Config = structuredClone(DEFAULT_CONFIG);
+  config.cdp.attachWaitMs = 60_000;
+
+  const run = await runCli(["--watch", "--json", "--no-probe"], {
+    config,
+    createConnector: (options) => {
+      captured = options;
+      return new FakeConnector();
+    },
+  });
+
+  assert.equal(run.code, 0);
+  assert.equal(captured?.config.cdp.attachWaitMs, 300_000);
+  assert.equal(typeof captured?.onAwaitingAllow, "function");
+});
+
+test("P11: an awaiting Allow is its own status, printed with the brand-aware hint", async () => {
+  const run = await runCli(["--json", "--no-probe"], {
+    createConnector: (options) => awaitingConnector(options.onAwaitingAllow),
+    isTTY: false,
+  });
+
+  assert.equal(run.code, 2, "blocked until the user clicks Allow");
+  const report = JSON.parse(run.stdout) as DoctorReport;
+  assertSchemaValid(report);
+  assert.equal(report.cdp.status, "awaiting_allow");
+  assert.equal(report.cdp.error?.code, "E_CDP_AWAITING_ALLOW");
+  assert.match(report.cdp.error?.hint ?? "", /Allow/);
+  assert.match(run.stderr, /waiting for the Allow prompt… 4s/);
+  assert.equal(run.stderr.includes("\u001b"), false, "no escape bytes in a JSON run");
+});
+
+test("P11: OSC escapes go to a TTY stdout only, never into JSON", async () => {
+  const tty = await runCli(["--no-probe"], {
+    createConnector: (options) => awaitingConnector(options.onAwaitingAllow),
+    isTTY: true,
+  });
+  assert.ok(tty.stdout.includes("\u001b]9;"), "a terminal gets the OSC notification");
+  assert.ok(tty.stdout.includes("\u001b]777;notify;"));
+
+  const json = await runCli(["--json", "--no-probe"], {
+    createConnector: (options) => awaitingConnector(options.onAwaitingAllow),
+    isTTY: true,
+  });
+  assert.equal(json.stdout.includes("\u001b"), false, "JSON output stays parseable");
+  JSON.parse(json.stdout);
+});

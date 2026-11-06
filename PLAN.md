@@ -507,6 +507,7 @@ hard rules were broken along the way.
 | P7 packaging | `[x]` | `evidence/P7.md` | V7.1–V7.6 pass; tarball 46 files, install + load verified, final live smoke recorded |
 | P15 host layer | `[x]` | `evidence/P15.md` | V15.1–V15.6 pass; host seam + audit R13, suite green under `darwin`/`win32` stubs, live capability probe recorded |
 | P8 ai states | `[x]` | `evidence/P8.md` | V8.1–V8.5 pass; `ai:yes` width-gated at 200 chars, `ai:lead` for lead-only blocks, bounded wait (1.4 s none-grace), artifact on AI timeout; live 3-engine run recorded (`none`/`answer`/`answer`) |
+| P11 allow prompt | `[x]` | `evidence/P11.md` | V11.1–V11.6 pass; blocking wait (`cdp.attachWaitMs`, default 60 s), `E_CDP_AWAITING_ALLOW`, one XDG notification, best-effort raise, `--watch`, doctor `awaiting_allow`; live: missed prompt no longer reported as a dead browser |
 | P9 read integrity | `[x]` | `evidence/P9.md` | V9.1–V9.6 pass; per-slot FIFO read locks (`read.pool` 1..3), post-navigate proof (`E_NAVIGATION_MISMATCH`), artifacts on every page-state failure, `E_OFFSET_RANGE`/`clamped`, honest doctor `skipped`/reconnect, per-engine n split + accounting, `pageUrlKind` |
 
 Status values: `[ ]` not started · `[~]` in progress · `[x]` gates pass · `[!]` blocked (reason

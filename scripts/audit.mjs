@@ -524,6 +524,9 @@ function scanPatterns(store, files, patterns, opts = {}) {
 
   for (const pattern of patterns) {
     for (const file of files) {
+      // A pattern may name the only modules allowed to use it (the spawn
+      // allowlist for P11/P12); everything else stays forbidden.
+      if (Array.isArray(pattern.allowFiles) && pattern.allowFiles.includes(file)) continue;
       const raw = store.readText(file);
       if (raw == null) continue;
       const text = opts.stripComments ? stripComments(raw) : raw;
@@ -689,6 +692,14 @@ const R2_PATTERNS = [
   },
 ];
 
+/**
+ * PO3: leaving the process is only legal in the modules that own the adapter
+ * ladder — OS notifications (P11), compositor raising (P11) and, later, the PDF
+ * extractor fallback (P12). Nowhere else may spawn, so Chrome can never be
+ * launched/restarted/killed by accident.
+ */
+const SPAWN_ALLOWED_FILES = ["src/runtime/notify.ts", "src/cdp/raise.ts"];
+
 const R3_PATTERNS = [
   // `kill(pid, 0)` is the portable liveness probe (PO4), and it lives only in
   // src/runtime/host.ts. Every other call, and any signal other than 0, is a
@@ -701,16 +712,19 @@ const R3_PATTERNS = [
     re: /\bprocess\s*\[\s*["'`]kill["'`]\s*\]/,
     hint: "a computed process.kill is still a signal; liveness lives in src/runtime/host.ts",
   },
-  // src/ never needs to spawn a process: CDP is a WebSocket, not a subprocess. `child_process` is
-  // therefore forbidden wholesale (this also covers `node:child_process` and require() forms).
+  // Spawning is forbidden outside the declared adapter modules: CDP is a
+  // WebSocket, not a subprocess, and Chrome must never be launched or killed by
+  // us. notify.ts/raise.ts may spawn their own helper (never Chrome).
   {
     re: /\bchild_process\b/,
-    hint: "no child_process in src/: never spawn, kill or restart Chrome — attach over CDP and ask the user",
+    hint: "child_process is confined to the declared adapters (notify.ts/raise.ts); never spawn, kill or restart Chrome",
+    allowFiles: SPAWN_ALLOWED_FILES,
   },
   // `"node:child" + "_process"` is the same import after concatenation.
   {
     re: /["'`](?:node:)?child["'`]\s*\+\s*["'`]_?process["'`]/,
     hint: "a split child_process import is still a process spawner",
+    allowFiles: SPAWN_ALLOWED_FILES,
   },
   { re: /\bpkill\b/, hint: "never kill the user's Chrome; ask the user" },
   { re: /\btaskkill\b/, hint: "never kill the user's Chrome; ask the user" },
@@ -766,11 +780,13 @@ const R13_PATTERNS = [
   },
   {
     re: /\bchild_process\b/,
-    hint: "src/ never spawns; a capability is probed with access(X_OK), never executed (PO1)",
+    hint: "spawning lives only in notify.ts/raise.ts (declared adapters); capability() is access(X_OK)",
+    allowFiles: SPAWN_ALLOWED_FILES,
   },
   {
     re: /\b(?:execFileSync|execSync|spawnSync)\s*\(/,
-    hint: "no synchronous process spawn outside a declared capability fallback (PO1)",
+    hint: "no synchronous process spawn; the declared adapters use bounded async execFile",
+    allowFiles: SPAWN_ALLOWED_FILES,
   },
 ];
 
@@ -1240,7 +1256,9 @@ function checkEvidence(root, store) {
       inStatusSection = false;
       return;
     }
-    if (!inStatusSection || !/^\|\s*P\d\b/.test(line)) return;
+    // `P\d+`: P10..P16 are phases too; a single-digit pattern silently skipped
+    // every later phase row (found while adding P11).
+    if (!inStatusSection || !/^\|\s*P\d+\b/.test(line)) return;
     const cells = line.split("|").map((cell) => cell.trim());
     const phase = cells[1] ?? "";
     const statusCell = cells[2] ?? "";
@@ -1496,8 +1514,8 @@ function hostConfinementCheck(store, files) {
     capped: scan.capped,
     notes: [
       "allowed module: src/runtime/host.ts (platform, paths, profile tables, capability(), isProcessAlive)",
-      "forbidden elsewhere: node:os, $HOME/PATH/PATHEXT/LOCALAPPDATA, /proc/, /usr/bin|/bin|/etc, .config/, ~/ string surgery, process.kill, child_process",
-      "PO1: a capability is probed with access(X_OK) and never spawned; a missing one is null plus a hint",
+      "forbidden elsewhere: node:os, $HOME/PATH/PATHEXT/LOCALAPPDATA, /proc/, /usr/bin|/bin|/etc, .config/, ~/ string surgery, process.kill",
+      "PO1: a capability is probed with access(X_OK); only notify.ts/raise.ts may spawn, through capability()",
     ],
   };
 }
@@ -1564,7 +1582,7 @@ function runAudit(root) {
     R3_PATTERNS,
     [
       "patterns: process.kill with a real signal, child_process (any spawn/kill form), pkill, taskkill, chrome…--restart",
-      "allowed: signal-free `process.kill(pid, 0)` (the liveness probe); R13 confines it to src/runtime/host.ts",
+      "allowed: signal-free `process.kill(pid, 0)` (the liveness probe, host.ts); child_process only in notify.ts/raise.ts (PO3 adapters)",
     ],
   );
 
@@ -2123,12 +2141,47 @@ const SELF_TEST_CASES = [
         "export const live = (pid: number) => process.kill(pid, 0);",
         "",
       ].join("\n"),
+      // PO3: the declared adapter modules may spawn (their own helper, never Chrome).
+      "src/runtime/notify.ts": [
+        'import { execFile } from "node:child_process";',
+        'export const send = () => execFile("notify-send", ["hi"]);',
+        "",
+      ].join("\n"),
+      "src/cdp/raise.ts": [
+        'import { execFile } from "node:child_process";',
+        'export const raise = () => execFile("wmctrl", ["-a", "Chrome"]);',
+        "",
+      ].join("\n"),
+      // A spawn anywhere else stays a violation.
+      "src/tools/leak_spawn.ts": [
+        'import { execFile } from "node:child_process";',
+        'export const launch = () => execFile("google-chrome", []);',
+        "",
+      ].join("\n"),
     },
     expect: [
       { check: "R13", min: 8, label: "node:os, $HOME, /proc/, /usr/bin/, .config/, ~/ surgery, kill, child_process, app support" },
       { check: "R3", min: 1, label: "a real signal outside the host layer" },
     ],
     guards: [
+      {
+        label: "the declared spawn adapters are exempt (R3/R13)",
+        run: (report) => {
+          const files = ["src/runtime/notify.ts", "src/cdp/raise.ts"];
+          return report.checks
+            .filter((check) => check.id === "R3" || check.id === "R13")
+            .every((check) => !check.findings.some((finding) => files.includes(finding.file)));
+        },
+      },
+      {
+        label: "a spawn outside the adapters is still an R13/R3 finding",
+        run: (report) =>
+          ["R3", "R13"].every((id) =>
+            report.checks
+              .find((check) => check.id === id)
+              .findings.some((finding) => finding.file === "src/tools/leak_spawn.ts"),
+          ),
+      },
       {
         label: "src/runtime/host.ts is the allowlist even when it owns the same tokens",
         run: (report) =>

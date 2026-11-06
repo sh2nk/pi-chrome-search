@@ -25,11 +25,23 @@ export interface CdpConfig {
   ws: string | null;
   connectTimeoutMs: number;
   profileDir: string | null;
+  /**
+   * How long an attach may wait for the user's CDP Allow (P11). The prompt is
+   * the only manual step in the product; a short connect timeout turns an
+   * unanswered prompt into a misleading `E_CDP_UNAVAILABLE`. `0` disables the
+   * wait (one attempt, the pre-P11 behaviour).
+   */
+  attachWaitMs: number;
 }
 
 export interface WindowConfig {
   focus: FocusPolicy;
   reuse: boolean;
+  /**
+   * P11: on the Allow prompt, try to raise the browser window once (best effort,
+   * adapter-based). `never` keeps the session fully passive.
+   */
+  raiseOnPrompt: "auto" | "never";
 }
 
 export interface GoogleConfig {
@@ -151,8 +163,8 @@ export interface Config {
 
 export const DEFAULT_CONFIG: Config = {
   mode: "attach",
-  cdp: { ports: [9222], ws: null, connectTimeoutMs: 5000, profileDir: null },
-  window: { focus: "session", reuse: true },
+  cdp: { ports: [9222], ws: null, connectTimeoutMs: 5000, profileDir: null, attachWaitMs: 60000 },
+  window: { focus: "session", reuse: true, raiseOnPrompt: "auto" },
   humanize: "auto",
   engines: {
     google: { enabled: true, lang: "auto", gl: "auto", dailyCap: 300 },
@@ -231,6 +243,7 @@ const CONFIG_SPEC: Spec = {
         ws: { kind: "nullable", of: STRING_NE },
         connectTimeoutMs: NUM(1),
         profileDir: { kind: "nullable", of: STRING_NE },
+        attachWaitMs: NUM(0, true, 600_000),
       },
     },
     window: {
@@ -238,6 +251,7 @@ const CONFIG_SPEC: Spec = {
       fields: {
         focus: { kind: "enum", values: ["session", "always", "never"] },
         reuse: BOOL,
+        raiseOnPrompt: { kind: "enum", values: ["auto", "never"] },
       },
     },
     humanize: { kind: "enum", values: ["auto", "always"] },

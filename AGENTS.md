@@ -146,6 +146,7 @@ because of a wall, fix the test to skip, not to hammer.
 
 | Symptom | Action |
 |---|---|
+| `E_CDP_AWAITING_ALLOW` | the browser is up and the Allow prompt is unanswered; the extension already notified and waited `cdp.attachWaitMs` (60 s). Ask the user to click Allow (or run `node src/cli/doctor.ts --watch`); never restart Chrome |
 | `E_CDP_UNAVAILABLE` | `cat ~/.config/google-chrome/DevToolsActivePort`; check `curl :9222/json/version`; ask user to Allow in `chrome://inspect`; or set `PI_CHROME_CDP_WS` |
 | `E_CDP_DISCONNECTED` | reconnect once; check the user did not close Chrome; check lock file |
 | `E_WALL` (yandex) | surface window, ask user to solve; after solve retry once; never automate |

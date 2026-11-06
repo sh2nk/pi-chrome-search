@@ -564,8 +564,10 @@ test("Page.loadEventFired is only emitted after Page.enable", async (t) => {
   assert.equal(server.isPageEnabled(attached.sessionId), false);
   assert.equal(server.eventsSent("Page.loadEventFired").length, 0);
 
-  // The real page enables the domain before navigating, so it settles.
-  await page.navigate("https://example.com/enabled", { timeoutMs: 1_000 });
+  // The real page enables the domain before navigating, so it settles. The
+  // deadline is generous because `node --test` runs files concurrently and a
+  // loaded machine can delay the fake server by more than a second.
+  await page.navigate("https://example.com/enabled", { timeoutMs: 5_000 });
   assert.equal(server.isPageEnabled(attached.sessionId), true);
   assert.equal(server.calls("Page.enable").length, 1);
   assert.equal(server.eventsSent("Page.loadEventFired").length, 1);

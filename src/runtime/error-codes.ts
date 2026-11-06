@@ -24,7 +24,8 @@ export type ErrorCode =
   | "E_UNSUPPORTED"
   | "E_CANCELLED"
   | "E_NAVIGATION_MISMATCH"
-  | "E_OFFSET_RANGE";
+  | "E_OFFSET_RANGE"
+  | "E_CDP_AWAITING_ALLOW";
 
 export const ERROR_CODES = [
   "E_CONFIG",
@@ -42,6 +43,7 @@ export const ERROR_CODES = [
   "E_CANCELLED",
   "E_NAVIGATION_MISMATCH",
   "E_OFFSET_RANGE",
+  "E_CDP_AWAITING_ALLOW",
 ] as const satisfies readonly ErrorCode[];
 
 export type Stage =
@@ -110,6 +112,10 @@ export const ERROR_HINTS: Record<ErrorCode, string> = {
   E_OFFSET_RANGE:
     "offset is past the end of the rendered document; pass an offset below the reported totalChars " +
     "(or 0 to start over)",
+  E_CDP_AWAITING_ALLOW:
+    "the browser is waiting for the DevTools Allow: open the remote-debugging page " +
+    "(chrome://inspect/#remote-debugging for Chrome; edge://, brave:// or chromium:// for the other " +
+    "Chromium-family browsers), tick \"Discover network targets\" and click Allow — the call resumes by itself",
 };
 
 export const RETRYABLE: Record<ErrorCode, boolean> = {
@@ -128,6 +134,7 @@ export const RETRYABLE: Record<ErrorCode, boolean> = {
   E_CANCELLED: true,
   E_NAVIGATION_MISMATCH: true,
   E_OFFSET_RANGE: false,
+  E_CDP_AWAITING_ALLOW: true,
 };
 
 export class WebSearchError extends Error {

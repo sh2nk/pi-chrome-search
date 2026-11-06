@@ -51,8 +51,10 @@ import { fail, toFailure } from "../runtime/errors.ts";
 import {
   agentDir,
   browserBrandFor,
+  cdpAllowHint,
   inspectUrl,
   isProcessAlive,
+  type BrowserBrand,
   type ProcessProbe,
 } from "../runtime/host.ts";
 import type { Clock, Logger } from "../runtime/types.ts";
@@ -96,6 +98,26 @@ export interface ConnectorOptions {
   staleMs?: number;
   /** Injectable for tests; defaults to a random UUID. */
   sessionId?: string;
+  /**
+   * P11: called while a connect is waiting for the user's Allow prompt. The
+   * connector never prints, notifies or raises by itself (PO3); the CLI and the
+   * extension wire attention here.
+   */
+  onAwaitingAllow?: (info: AwaitingAllowInfo) => void;
+}
+
+/** What the attention layer needs to know while the Allow prompt is unanswered. */
+export interface AwaitingAllowInfo {
+  /** 1 for the first failed attempt. */
+  attempt: number;
+  elapsedMs: number;
+  budgetMs: number;
+  /** Brand-detected action hint (`chrome://inspect/…` vs `brave://…`). */
+  hint: string;
+  brand: BrowserBrand | null;
+  endpoint: CdpEndpoint;
+  /** True for the last event, emitted just before `E_CDP_AWAITING_ALLOW`. */
+  final?: boolean;
 }
 
 export interface ConnectorInfo {
@@ -215,6 +237,7 @@ class BrowserConnector implements Connector {
   readonly #config: Config;
   readonly #discover: () => Promise<CdpEndpoint>;
   readonly #connectSession: NonNullable<ConnectorOptions["connectSession"]>;
+  readonly #onAwaitingAllow: ConnectorOptions["onAwaitingAllow"];
   readonly #clock: Clock;
   readonly #log: Logger;
   readonly #sessionId: string;
@@ -250,6 +273,7 @@ class BrowserConnector implements Connector {
     this.#config = options.config;
     this.#discover = options.discover;
     this.#connectSession = options.connectSession ?? ((opts) => CdpSession.connect(opts));
+    this.#onAwaitingAllow = options.onAwaitingAllow;
     this.#clock = options.clock;
     this.#log = options.log;
     this.#sessionId = options.sessionId ?? randomUUID();
@@ -287,12 +311,7 @@ class BrowserConnector implements Connector {
 
     try {
       const endpoint = await this.#discover();
-      const session = await this.#connectSession({
-        wsUrl: endpoint.wsUrl,
-        connectTimeoutMs: this.#config.cdp.connectTimeoutMs,
-        clock: this.#clock,
-        log: this.#log,
-      });
+      const session = await this.#connectWithAllowWait(endpoint);
       this.#session = session;
       const browser = await session.version();
 
@@ -332,6 +351,95 @@ class BrowserConnector implements Connector {
     } catch (error) {
       await this.#cleanupFailedConnect();
       throw asConnectorError(error);
+    }
+  }
+
+  /**
+   * P11/L3: the Allow prompt cannot be seen by the agent, so a handshake that
+   * hangs must be waited out rather than turned into a false failure. Each
+   * attempt is bounded by a short socket timeout; a refusal (`ECONNREFUSED`)
+   * means nothing is listening and fails immediately, while a pending or
+   * rejected handshake is retried until `config.cdp.attachWaitMs` expires.
+   * The budget expiring is a distinct, actionable error — not
+   * `E_CDP_UNAVAILABLE`.
+   */
+  async #connectWithAllowWait(endpoint: CdpEndpoint): Promise<CdpSession> {
+    const brand = browserBrandFor(endpoint.profileDir);
+    const waitMs = Math.max(0, Math.floor(this.#config.cdp.attachWaitMs));
+    const attemptTimeoutMs = Math.max(500, Math.min(this.#config.cdp.connectTimeoutMs, 3000));
+    const started = this.#clock.now();
+    let attempt = 0;
+    let last: WebSearchError | undefined;
+
+    for (;;) {
+      attempt += 1;
+      try {
+        return await this.#connectSession({
+          wsUrl: endpoint.wsUrl,
+          connectTimeoutMs: attemptTimeoutMs,
+          clock: this.#clock,
+          log: this.#log,
+        });
+      } catch (error) {
+        const details = isWebSearchError(error)
+          ? error.details
+          : toFailure(error, { code: "E_CDP_UNAVAILABLE", stage: "connect" });
+        // Every transport failure here is a candidate Allow prompt: name the
+        // detected family's inspect page (PO5) instead of a generic hint.
+        last = fail(details.code, details.stage, {
+          hint: cdpAllowHint(brand),
+          ...(details.message === undefined ? {} : { message: details.message }),
+        });
+        // A lock or a config error is decided; retrying only delays the truth.
+        if (details.code === "E_BUSY" || details.code === "E_CONFIG") throw last;
+
+        const message = details.message ?? "";
+        // Nothing listens → waiting cannot help and would stall every search.
+        if (/ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|EAI_AGAIN/i.test(message)) throw last;
+
+        const elapsedMs = this.#clock.now() - started;
+        // The wait is opt-out: `attachWaitMs: 0` is exactly the pre-P11 behaviour
+        // (one attempt, the transport's own error).
+        if (waitMs === 0) throw last;
+        if (elapsedMs >= waitMs) {
+          // One last event so the attention outcome reports the full wait.
+          this.#onAwaitingAllow?.({
+            attempt,
+            elapsedMs,
+            budgetMs: waitMs,
+            hint: cdpAllowHint(brand),
+            brand,
+            endpoint,
+            final: true,
+          });
+          throw fail("E_CDP_AWAITING_ALLOW", "connect", {
+            message:
+              `the CDP endpoint on 127.0.0.1:${endpoint.port} did not answer for ${elapsedMs}ms ` +
+              `(${attempt} attempt(s)); the Allow prompt may be waiting in the browser window`,
+            hint: cdpAllowHint(brand),
+          });
+        }
+
+        this.#onAwaitingAllow?.({
+          attempt,
+          elapsedMs,
+          budgetMs: waitMs,
+          hint: cdpAllowHint(brand),
+          brand,
+          endpoint,
+        });
+
+        const remaining = waitMs - elapsedMs;
+        const pause = Math.min(2_000, Math.max(250, remaining));
+        // The pause is a real wait: a prompt answered during it resumes the
+        // next attempt without the user retyping anything.
+        try {
+          await this.#clock.sleep(pause);
+        } catch {
+          // A clock without sleep (a test clock) must not turn the wait into a
+          // crash; the loop still re-tries immediately and the budget decides.
+        }
+      }
     }
   }
 

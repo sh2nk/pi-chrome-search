@@ -527,6 +527,7 @@ Ship a reflex only if it keeps recall within 2 points and cuts returned tokens �
 |---|---|---|
 | `E_CONFIG` | Invalid config | names file + key |
 | `E_CDP_UNAVAILABLE` | No CDP endpoint | chrome://inspect → Allow; or set `PI_CHROME_CDP_WS` |
+| `E_CDP_AWAITING_ALLOW` | Endpoint is there, the Allow prompt is unanswered (`cdp.attachWaitMs` elapsed) | click Allow in the browser; the call resumes by itself |
 | `E_CDP_DISCONNECTED` | Socket dropped | reconnect; retry once |
 | `E_TARGET_LOST` | Tab closed/navigated away | reopen owned tab |
 | `E_WALL` | captcha / consent / sorry (`details.wall`) | solve in the visible window, then retry |
@@ -563,7 +564,8 @@ Retention: last 30 dirs / 50 MB. Never commit artifacts (`.gitignore`).
 Report (text + `--json`):
 1. extension/pi/node versions, config path
 2. CDP endpoint, browser version, profile dir, `navigator.webdriver`, owned tab/window
-3. lock state, cache size, artifacts size
+3. lock state, cache size, artifacts size, and — while an attach is waiting — the wait duration,
+   notification adapter and raise outcome (`status: awaiting_allow`, P11)
 4. per-engine probe (one cheap query, `n=1`, summary off; skippable with `--no-probe`):
    wall? results count? AI block present? latency? canary counts?
 5. classifier availability (if reflex enabled): provider/id found, last verdict latency
@@ -572,6 +574,13 @@ Report (text + `--json`):
 
 `--fix` may: reconnect CDP, close orphan owned tabs, prune artifacts, clear a stale lock.
 It may **not**: restart Chrome, solve captchas, change the profile, install anything.
+
+`--watch` waits up to 5 minutes for the CDP Allow prompt while printing progress (OSC notification escapes
+only on a TTY). While any attach waits, the extension sends one desktop notification (`notify-send` →
+`gdbus` → `dbus-send` on Linux, `osascript` on macOS, `powershell` on Windows) and, when
+`window.raiseOnPrompt` is `auto`, makes one best-effort attempt to focus an existing browser window
+(`wmctrl`/`xdotool`/`kdotool`/`hyprctl`/`swaymsg`; `raise: unavailable` is a normal outcome). Nothing in
+that path launches a browser, opens a window/tab/URL, or installs anything.
 
 ### 10.4 Repair playbook (for the fixer agent)
 1. `web_doctor --json` → read `stage` and `canaries`.
@@ -592,7 +601,7 @@ Strict JSON; unknown keys are an error (`E_CONFIG`). Env overrides in brackets.
 {
   "mode": "attach",
   "cdp": { "ports": [9222], "ws": null, "connectTimeoutMs": 5000 },
-  "window": { "focus": "session", "reuse": true },
+  "window": { "focus": "session", "reuse": true, "raiseOnPrompt": "auto" },
   "humanize": "auto",
   "engines": {
     "google":     { "enabled": true, "lang": "auto", "gl": "auto", "dailyCap": 300 },

@@ -47,7 +47,7 @@
       "additionalProperties": false,
       "required": ["status", "endpoint", "browser", "webdriver", "windowId", "windowDegraded", "lock"],
       "properties": {
-        "status": { "enum": ["ok", "unavailable", "busy", "error"] },
+        "status": { "enum": ["ok", "unavailable", "busy", "error", "awaiting_allow"] },
         "endpoint": {
           "type": ["object", "null"],
           "additionalProperties": false,

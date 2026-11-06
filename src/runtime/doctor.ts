@@ -40,6 +40,7 @@ import { ENGINE_IDS } from "../engines/types.ts";
 import { ERROR_HINTS, type FailureDetails } from "./error-codes.ts";
 import { fail, toFailure } from "./errors.ts";
 import { browserBrandFor, inspectUrl, tildify } from "./host.ts";
+import type { AllowAttention } from "./attention.ts";
 import type { Artifacts, Cache, Clock, Limiter } from "./types.ts";
 import { EXTENSION_NAME, EXTENSION_VERSION } from "../version.ts";
 
@@ -70,7 +71,7 @@ const WALL_KINDS = ["captcha", "consent", "sorry", "blocked"] as const;
  * the overall verdict at `degraded`: a doctor with no evidence is not healthy.
  */
 export type EngineVerdict = "ok" | "wall" | "layout_changed" | "blocked" | "unavailable" | "skipped";
-export type CdpStatus = "ok" | "unavailable" | "busy" | "error";
+export type CdpStatus = "ok" | "unavailable" | "busy" | "error" | "awaiting_allow";
 export type DoctorVerdict = "ok" | "degraded" | "blocked";
 
 /** Structured failure inside a probe result (SPEC §10.1 fields the probe owns). */
@@ -219,6 +220,12 @@ export interface DoctorDeps {
   config: Config;
   configPath: string;
   connector?: Connector;
+  /**
+   * P11: the CLI's Allow-attention coordinator. Its outcome (wait duration,
+   * notification adapter, raise adapter) is rendered next to the verdict; the
+   * report JSON stays schema-stable.
+   */
+  attention?: AllowAttention;
   registry: EngineRegistry;
   clock: Clock;
   cache?: Cache;
@@ -447,8 +454,13 @@ async function boundedConnect(
   options: DoctorFixOptions = {},
 ): Promise<ConnectOutcome> {
   const task = connector.connect();
+  // P11: the connector itself may wait for the Allow prompt (`attachWaitMs`), so
+  // the doctor's budget must cover that wait instead of cutting it short and
+  // calling a live browser unreachable.
   const budgetMs =
-    config.cdp.connectTimeoutMs + (options.connectGraceMs ?? CONNECT_GRACE_MS);
+    config.cdp.connectTimeoutMs +
+    Math.max(0, Math.floor(config.cdp.attachWaitMs)) +
+    (options.connectGraceMs ?? CONNECT_GRACE_MS);
   const lateGraceMs = options.lateConnectGraceMs ?? LATE_CONNECT_GRACE_MS;
   try {
     await withDeadline(task, budgetMs);
@@ -582,6 +594,9 @@ export async function applyDoctorFix(
 
 function statusForCode(code: string): CdpStatus {
   if (code === "E_BUSY") return "busy";
+  // P11: the endpoint is there, the user simply has not clicked Allow yet.
+  // Reporting it as "unavailable" would claim the browser is gone.
+  if (code === "E_CDP_AWAITING_ALLOW") return "awaiting_allow";
   if (code === "E_CDP_UNAVAILABLE" || code === "E_CDP_DISCONNECTED" || code === "E_TARGET_LOST") {
     return "unavailable";
   }
@@ -641,7 +656,10 @@ async function collectCdp(deps: DoctorDeps): Promise<DoctorCdp> {
 
   if (!connector.isConnected()) {
     try {
-      const timeoutMs = deps.config.cdp.connectTimeoutMs + CONNECT_GRACE_MS;
+      const timeoutMs =
+        deps.config.cdp.connectTimeoutMs +
+        Math.max(0, Math.floor(deps.config.cdp.attachWaitMs)) +
+        CONNECT_GRACE_MS;
       await withDeadline(connector.connect(), timeoutMs);
     } catch (error) {
       const details = toFailure(error, { code: "E_CDP_UNAVAILABLE", stage: "connect" });
@@ -1017,7 +1035,10 @@ function formatBytes(bytes: number): string {
 }
 
 /** Human-readable report for the terminal and `/web-doctor` notifications. */
-export function renderDoctorText(report: DoctorReport): string {
+export function renderDoctorText(
+  report: DoctorReport,
+  attention?: { waitedMs: number; notified: string | null; raise: string | null },
+): string {
   const lines: string[] = [];
 
   lines.push(`${report.extension.name} ${report.extension.version} — doctor (node ${report.extension.node})`);
@@ -1081,6 +1102,12 @@ export function renderDoctorText(report: DoctorReport): string {
     `reflex: ${report.reflex.enabled ? "enabled" : "disabled"} (backend=${report.reflex.backend}, ` +
       `localOnly=${report.reflex.localOnly ? "on" : "off"}, classifier=${report.reflex.classifier})`,
   );
+  if (attention !== undefined) {
+    lines.push(
+      `attention: waited ${Math.max(0, Math.round(attention.waitedMs / 1000))}s · ` +
+        `notify ${attention.notified ?? "unavailable"} · raise ${attention.raise ?? "unavailable"}`,
+    );
+  }
   lines.push(`verdict: ${report.verdict}`);
 
   return `${lines.join("\n")}\n`;
