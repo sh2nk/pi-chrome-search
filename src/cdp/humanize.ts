@@ -153,6 +153,14 @@ function snippet(value: string): string {
   return value.length > MESSAGE_SNIPPET_CHARS ? `${value.slice(0, MESSAGE_SNIPPET_CHARS - 1)}…` : value;
 }
 
+/**
+ * Shared poll primitives (P8-A). `cdp/ai-wait.ts` reuses exactly these three so
+ * the streaming-summary wait has the same clock seam, deadline floor and ±25%
+ * jitter as the settle wait — two waits that drift apart make latency numbers
+ * incomparable.
+ */
+export { jitteredPollMs, normalizeDeadline, normalizePoll };
+
 /** A JS string literal for `Runtime.evaluate`; selectors are data, not code. */
 function literal(value: string): string {
   return JSON.stringify(value);
@@ -178,6 +186,9 @@ function throwIfAborted(signal: AbortSignal | undefined, stage: Stage, engine?: 
     message: "aborted by the caller",
   });
 }
+
+/** Exported for `cdp/ai-wait.ts`: one failure taxonomy for every wait. */
+export { asFailure, throwIfAborted };
 
 /**
  * Normalize anything a page/clock can throw. A `WebSearchError` is already

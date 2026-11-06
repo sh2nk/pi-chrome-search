@@ -506,6 +506,7 @@ hard rules were broken along the way.
 | P6 research | `[x]` | `evidence/P6.md`, `bench/RESULTS-CODEMODE.md` | V6.1–V6.5 pass; three-path comparison recorded |
 | P7 packaging | `[x]` | `evidence/P7.md` | V7.1–V7.6 pass; tarball 46 files, install + load verified, final live smoke recorded |
 | P15 host layer | `[x]` | `evidence/P15.md` | V15.1–V15.6 pass; host seam + audit R13, suite green under `darwin`/`win32` stubs, live capability probe recorded |
+| P8 ai states | `[x]` | `evidence/P8.md` | V8.1–V8.5 pass; `ai:yes` width-gated at 200 chars, `ai:lead` for lead-only blocks, bounded wait (1.4 s none-grace), artifact on AI timeout; live 3-engine run recorded (`none`/`answer`/`answer`) |
 
 Status values: `[ ]` not started · `[~]` in progress · `[x]` gates pass · `[!]` blocked (reason
 required) · `[-]` waived (orchestrator + user approve, reason required).

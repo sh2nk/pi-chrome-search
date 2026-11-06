@@ -43,6 +43,9 @@ const MAX_OUTPUT_CHARS = 2500;
 interface SmokeResult {
   ok: boolean;
   ai: boolean | null;
+  aiState: string | null;
+  aiWaitMs: number | null;
+  aiChars: number | null;
   results: number | null;
   chars: number;
   ms: number;
@@ -86,10 +89,21 @@ async function runOnce(engine: EngineId, q: string): Promise<SmokeResult> {
     const result = await tool.execute("live-smoke", { q, engines: [engine], n: 2 }, undefined, undefined);
     const text = result.content.map((block) => block.text ?? "").join("");
     const failure = "isError" in result && result.isError === true;
-    const details = result.details as { ai?: unknown; results?: unknown; code?: unknown; wall?: unknown };
+    const details = result.details as {
+      ai?: unknown;
+      aiState?: unknown;
+      aiWaitMs?: unknown;
+      aiChars?: unknown;
+      results?: unknown;
+      code?: unknown;
+      wall?: unknown;
+    };
     return {
       ok: !failure,
       ai: typeof details.ai === "boolean" ? details.ai : null,
+      aiState: typeof details.aiState === "string" ? details.aiState : null,
+      aiWaitMs: typeof details.aiWaitMs === "number" ? details.aiWaitMs : null,
+      aiChars: typeof details.aiChars === "number" ? details.aiChars : null,
       results: typeof details.results === "number" ? details.results : null,
       chars: text.length,
       ms: Date.now() - started,
@@ -104,7 +118,12 @@ async function runOnce(engine: EngineId, q: string): Promise<SmokeResult> {
 for (const { engine, q } of QUERIES) {
   test(`live ${engine}: one query, n=2`, { skip: LIVE ? false : "set PI_CHROME_LIVE=1 to run one live query per engine" }, async () => {
     const result = await runOnce(engine, q);
-    const line = `live ${engine}: ok=${String(result.ok)} ai=${String(result.ai)} results=${String(result.results)} chars=${result.chars} ${result.ms}ms${result.code === undefined ? "" : ` code=${result.code}`}`;
+    // P8 gate format: `ai:|aiWaitMs|aiChars` so the evidence table is copy-paste.
+    const line =
+      `live ${engine}: ok=${String(result.ok)} ai=${String(result.aiState ?? result.ai)}` +
+      `|wait=${String(result.aiWaitMs)}ms|chars=${String(result.aiChars)}` +
+      ` results=${String(result.results)} output=${result.chars} ${result.ms}ms` +
+      `${result.code === undefined ? "" : ` code=${result.code}`}`;
     console.log(line);
 
     if (result.wall === true || result.code === "E_WALL") {
@@ -115,6 +134,12 @@ for (const { engine, q } of QUERIES) {
       return;
     }
     assert.equal(result.ok, true, `${engine} failed with ${result.code ?? "unknown"}`);
+    // V8.3: `ai:yes` with under 200 chars of prose is a failure, not a pass.
+    if (result.aiState === "answer") {
+      assert.ok((result.aiChars ?? 0) >= 200, `${engine}: ai:yes with aiChars=${String(result.aiChars)}`);
+    }
+    // V8.4: the wait is bounded; a summary-less page must not pay the full budget.
+    assert.ok((result.aiWaitMs ?? 0) <= 6000, `${engine}: aiWaitMs=${String(result.aiWaitMs)}`);
     assert.ok((result.results ?? 0) >= 1, `${engine} returned no results`);
     assert.ok(result.chars <= MAX_OUTPUT_CHARS, `${engine} returned ${result.chars} chars, cap ${MAX_OUTPUT_CHARS}`);
   });

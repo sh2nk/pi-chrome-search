@@ -29,6 +29,7 @@
 import { Type, type Static } from "typebox";
 
 import { humanSearch } from "../cdp/humanize.ts";
+import { waitForAi, type AiWaitResult } from "../cdp/ai-wait.ts";
 import type { CdpPage } from "../cdp/types.ts";
 import type { Config } from "../config.ts";
 import { compactSerps } from "../extract/compact.ts";
@@ -36,6 +37,7 @@ import { createGotoResolver } from "../extract/goto.ts";
 import { isHttpUrl, normalizeUrl, parseLink } from "../extract/urls.ts";
 import {
   ENGINE_IDS,
+  type AiState,
   type Engine,
   type EngineId,
   type EngineSelection,
@@ -89,7 +91,14 @@ export interface WebSearchDetails {
   engines: EngineId[];
   /** Number of compact items actually rendered, after caps/dedup. */
   results: number;
+  /** True only for an `answer`; kept for callers written before the three states. */
   ai: boolean;
+  /** `answer` | `lead` | `none` (PLAN-v2 P8); `ai` here is honest by construction. */
+  aiState: AiState;
+  /** Clock time spent waiting for the streaming summary (0 when not waited). */
+  aiWaitMs: number;
+  /** Characters of the rendered AI block (0 for a lead/none or when dropped). */
+  aiChars: number;
   chars: number;
   truncated: boolean;
   cached: boolean;
@@ -430,6 +439,8 @@ interface JsonRender {
   results: number;
   truncated: boolean;
   ai: boolean;
+  /** Characters of the AI prose that survived the JSON fit (honest, not pre-fit). */
+  aiChars: number;
 }
 
 /**
@@ -584,6 +595,8 @@ function serializeJsonWithin(data: Record<string, unknown>, maxChars: number): J
   let truncated = copy.truncated === true;
   let results = items.length;
   let ai = copy.ai !== undefined;
+  const aiText = isRecord(copy.ai) && typeof copy.ai.text === "string" ? copy.ai.text : "";
+  let aiChars = aiText.length;
   if (text.length > maxChars) {
     // The cap is below the envelope: return the floor and report exactly that,
     // even if the starting data already had no results/AI to drop.
@@ -591,9 +604,10 @@ function serializeJsonWithin(data: Record<string, unknown>, maxChars: number): J
     truncated = true;
     results = 0;
     ai = false;
+    aiChars = 0;
   }
 
-  return { text, results, truncated, ai };
+  return { text, results, truncated, ai, aiChars };
 }
 
 async function navigateAndSettle(
@@ -1076,6 +1090,58 @@ async function runEngine(
     }
   }
 
+  // PLAN-v2 P8-A: wait for the native summary *before* extracting. Bounded by
+  // `search.aiWaitMs`, and skipped entirely by `summary:false` and by adapters
+  // without a probe — a wait nobody asked for is pure latency.
+  let aiWait: AiWaitResult | undefined;
+  if (query.summary === true && engine.ai !== undefined) {
+    // A visible expand is opt-in (`search.aiExpand`) because it is a real click
+    // in the user's window. A failed expand is not a search failure: extraction
+    // reports the collapsed state honestly.
+    if (deps.config.search.aiExpand === true && engine.ai.expand !== undefined) {
+      try {
+        await engine.ai.expand(page, signal === undefined ? {} : { signal });
+      } catch (error) {
+        if (signal?.aborted === true) throw asFailure(error, "extract", engine.id, signal);
+        void deps.log.write({
+          kind: "ai_expand",
+          engine: engine.id,
+          message: (toFailure(error, { code: "E_PARSE", stage: "extract" }).message ?? "").slice(0, 200),
+        });
+      }
+    }
+
+    aiWait = await waitForAi(page, engine.ai, {
+      deadlineMs: deps.config.search.aiWaitMs,
+      clock: deps.clock,
+      engine: engine.id,
+      ...(signal === undefined ? {} : { signal }),
+    });
+
+    if (aiWait.timedOut) {
+      // V8.5: a wait that ended without an answer leaves proof behind — the page
+      // exactly as the extractor is about to see it — for a lead and for a page
+      // with no AI block alike.
+      await saveArtifact(deps, {
+        code: "AI_TIMEOUT",
+        stage: "extract",
+        engine: engine.id,
+        url: page.url(),
+        query: query.text,
+        page,
+        extra: {
+          aiWait: {
+            state: aiWait.state,
+            chars: aiWait.chars,
+            waitMs: aiWait.waitMs,
+            polls: aiWait.polls,
+            budgetMs: deps.config.search.aiWaitMs,
+          },
+        },
+      });
+    }
+  }
+
   let serp: RawSerp;
   try {
     serp = await engine.extract(page, query);
@@ -1103,6 +1169,9 @@ async function runEngine(
 
   // Google organics arrive as /goto wrappers; resolve them before caching so
   // the stored SERP already holds clickable targets (cache hits skip this).
+  if (aiWait !== undefined) {
+    serp.timings = { ...serp.timings, aiWaitMs: aiWait.waitMs };
+  }
   await resolveGotoResults(page, serp, deps, signal);
 
   // A SERP with zero organic results is a failed search, not an empty success:
@@ -1302,11 +1371,25 @@ export function createWebSearchTool(
     const contributed = [...new Set(refined.map((serp) => serp.engine))];
     const rendered = json === null ? compact.items.length : json.results;
     const truncated = json === null ? compact.truncated : json.truncated;
-    const hasAi = json === null ? compact.ai !== undefined : json.ai;
+    const shownAi = json === null ? compact.ai !== undefined : json.ai;
+    // The JSON fitter can drop the AI for space; the state must follow the
+    // output, never the pre-fit plan (`ai:yes` with no line is the P8 bug).
+    const aiState: AiState = shownAi
+      ? "answer"
+      : json !== null && compact.aiState === "lead"
+        ? "lead"
+        : json === null
+          ? compact.aiState
+          : "none";
+    const aiChars = json === null ? compact.aiChars : json.aiChars;
+    const aiWaitMs = refined.reduce((sum, serp) => sum + (serp.timings.aiWaitMs ?? 0), 0);
     const details: WebSearchDetails = {
       engines: contributed,
       results: rendered,
-      ai: hasAi,
+      ai: aiState === "answer",
+      aiState,
+      aiWaitMs,
+      aiChars,
       chars: text.length,
       truncated,
       cached: cachedAny,
@@ -1315,6 +1398,19 @@ export function createWebSearchTool(
       ...(input.page > 1 && contributed.includes("duckduckgo") ? { pageIgnored: true } : {}),
       ...(compact.degraded ? { degraded: true } : {}),
     };
+
+    // One row per search (SPEC §9.3 observability): the AI verdict and the wait
+    // it cost are the numbers the P8 latency table is built from.
+    void deps.log.write({
+      kind: "search",
+      engines: contributed,
+      aiState,
+      aiWaitMs,
+      aiChars,
+      results: rendered,
+      chars: details.chars,
+      cached: cachedAny,
+    });
 
     return { content: [{ type: "text", text }], details };
   }

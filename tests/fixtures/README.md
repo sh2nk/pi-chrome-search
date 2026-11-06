@@ -29,6 +29,22 @@ Cyrillic prose with real navigation/footer boilerplate.
 `ai`/`assist`/`neuro` absence is a valid A/B outcome — record it as `ai: "no"`,
 never delete the fixture and never fabricate a summary.
 
+## AI-state fixtures (P8)
+
+The AI block has three states (`answer`/`lead`/`none`). The real captures cover
+`answer` (`google-ai`, `ddg-assist`) and `none` (`google-no-ai`, `ddg-empty`,
+`yandex-neuro` is robot-gated). Two *derived* fixtures cover `lead` (the block is
+present but carries no full answer):
+
+| Fixture | Derived from | Change |
+|---|---|---|
+| `google-ai-lead` | `google-ai` | the real AI section content replaced by the live lead line (`Ответ в режиме ИИ, исходный запрос: …`), no prose |
+| `ddg-assist-lead` | `ddg-assist` | the real assist container kept, body replaced by the `Search Assist` label only |
+
+They are labelled `capturedWith: "derived from … (P8 S4)"` and their `notes` say
+so. A derived fixture is never presented as a fresh capture, and no answer text
+is invented: the lead string is the one the live bug produced.
+
 ## `meta.json` schema
 
 ```json

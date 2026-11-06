@@ -313,6 +313,10 @@ AI: <≤1200 chars; source domains in brackets>
 ```
 
 Rules:
+- The AI block has three states (PLAN-v2 P8): `ai:yes` **only** for answer prose of at least 200
+  characters; `ai:lead` when the block exists but carries no answer (an affordance, a prompt, a query
+  echo, a fragment under 200 chars) — the lead line is never rendered as an answer; `ai:no` when the
+  block is absent. A query echo must never appear as an answer.
 - If the AI block is absent: `ai:no`, results unchanged. Never invent a summary.
 - If multiple engines are requested (`engines` is a list; or `auto` + low confidence → 2 engines):
   merge by normalized URL/domain, keep the best snippet, tag the engine per result only when mixed.
@@ -584,7 +588,11 @@ Strict JSON; unknown keys are an error (`E_CONFIG`). Env overrides in brackets.
     "yandex":     { "enabled": true, "lr": "auto", "dailyCap": 150 }
   },
   "pacing": { "google": [2500, 5000], "yandex": [5000, 9000], "duckduckgo": [2000, 4000] },
-  "search": { "n": 5, "nMax": 10, "summaryMaxChars": 1200, "snippetMaxChars": 140, "outputMaxChars": 2500 },
+  "search": {
+    "n": 5, "nMax": 10,
+    "summaryMaxChars": 1200, "snippetMaxChars": 140, "outputMaxChars": 2500,
+    "aiWaitMs": 6000, "aiExpand": false
+  },
   "read":   { "defaultMaxChars": 6000, "maxCharsCeiling": 20000 },
   "cache":  { "serpTtlMs": 600000, "gotoTtlMs": 86400000, "maxEntries": 200 },
   "captcha": { "waitMs": 0, "retryYandexOnce": true },

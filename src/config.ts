@@ -71,6 +71,10 @@ export interface SearchConfig {
   summaryMaxChars: number;
   snippetMaxChars: number;
   outputMaxChars: number;
+  /** Bounded wait for a streaming native AI summary (P8-A); 0 disables waiting. */
+  aiWaitMs: number;
+  /** Allow one visible expand click inside the AI block (P8-B); default off. */
+  aiExpand: boolean;
 }
 
 export interface ReadConfig {
@@ -150,7 +154,15 @@ export const DEFAULT_CONFIG: Config = {
     yandex: { enabled: true, lr: "auto", dailyCap: 150 },
   },
   pacing: { google: [2500, 5000], yandex: [5000, 9000], duckduckgo: [2000, 4000] },
-  search: { n: 5, nMax: 10, summaryMaxChars: 1200, snippetMaxChars: 140, outputMaxChars: 2500 },
+  search: {
+    n: 5,
+    nMax: 10,
+    summaryMaxChars: 1200,
+    snippetMaxChars: 140,
+    outputMaxChars: 2500,
+    aiWaitMs: 6000,
+    aiExpand: false,
+  },
   read: { defaultMaxChars: 6000, maxCharsCeiling: 20000 },
   cache: { serpTtlMs: 600000, gotoTtlMs: 86400000, maxEntries: 200 },
   captcha: { waitMs: 0, retryYandexOnce: true },
@@ -256,6 +268,8 @@ const CONFIG_SPEC: Spec = {
         summaryMaxChars: NUM(1),
         snippetMaxChars: NUM(1),
         outputMaxChars: NUM(1),
+        aiWaitMs: NUM(0, true, 60_000),
+        aiExpand: BOOL,
       },
     },
     read: {

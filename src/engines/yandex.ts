@@ -127,11 +127,14 @@ export interface YandexExtractedItem {
 export interface YandexExtractedAi {
   text: string;
   sources: string[];
+  state: "answer" | "lead";
 }
 
 export interface YandexExtraction {
   results: YandexExtractedItem[];
   ai?: YandexExtractedAi;
+  /** Present only for an `aiOnly` call. */
+  aiProbe?: { state: "answer" | "lead" | "none"; chars: number };
   pageCarried: boolean;
 }
 
@@ -139,6 +142,8 @@ export interface YandexExtractionArg {
   n: number;
   summary: boolean;
   query: string;
+  /** Probe mode (P8-A): measure the AI card, skip the result scan. */
+  aiOnly?: boolean;
 }
 
 /**
@@ -485,6 +490,20 @@ export function extractFromDocument(doc: Document, arg: YandexExtractionArg): Ya
 
   const limit =
     typeof arg.n === "number" && Number.isFinite(arg.n) ? Math.max(0, Math.floor(arg.n)) : 0;
+
+  // Probe mode: the streaming wait asks only about the AI card (P8-A).
+  if (arg.aiOnly === true) {
+    const measured = arg.summary === true ? readAi() : null;
+    return {
+      results: [],
+      aiProbe:
+        measured === null
+          ? { state: "none", chars: 0 }
+          : { state: measured.state, chars: measured.text.length },
+      pageCarried: false,
+    };
+  }
+
   const results: YandexExtractedItem[] = [];
   const seenUrls: { [url: string]: boolean } = {};
   let organics = 0;
@@ -519,24 +538,33 @@ export function extractFromDocument(doc: Document, arg: YandexExtractionArg): Ya
     if (results.length < limit) results.push({ title, url, snippet });
   }
 
-  let ai: YandexExtractedAi | undefined;
-  const bodyLower = bodyText.toLowerCase();
-  const mayHaveAi =
-    bodyLower.indexOf("быстрый ответ") !== -1 ||
-    bodyLower.indexOf("нейро") !== -1 ||
-    bodyLower.indexOf("алиса") !== -1;
-  if (mayHaveAi && arg.summary === true) {
+  /**
+   * The AI card as it stands, or null when there is no card / it is robot-gated.
+   *
+   * A card whose header exists but whose answer body does not is a `lead` (an
+   * empty card, a promo teaser, a collapsed answer): the old code returned null
+   * for it, and a short answer body was reported as a full summary. Only ≥200
+   * chars of answer prose is an `answer` (PLAN-v2 V8.1).
+   */
+  function readAi(): YandexExtractedAi | null {
+    const bodyLower = bodyText.toLowerCase();
+    const mayHaveAi =
+      bodyLower.indexOf("быстрый ответ") !== -1 ||
+      bodyLower.indexOf("нейро") !== -1 ||
+      bodyLower.indexOf("алиса") !== -1;
+    if (!mayHaveAi || arg.summary !== true) return null;
+
     const header = findAiHeader();
-    if (header !== null) {
-      const card = header.closest('[class*="FuturisSearchCard"]') ?? header.closest('[class*="Futuris"]') ?? header.parentElement;
-      if (card !== null && !isRobotGated(card)) {
-        const answerRoot = findAnswerRoot(card, header);
-        const text = answerRoot === null ? "" : answerText(answerRoot, header);
-        // No answer text means a teaser/promo card: return nothing, never fabricate.
-        if (text !== "") ai = { text, sources: collectSources(card) };
-      }
-    }
+    if (header === null) return null;
+    const card = header.closest('[class*="FuturisSearchCard"]') ?? header.closest('[class*="Futuris"]') ?? header.parentElement;
+    if (card === null || isRobotGated(card)) return null;
+
+    const answerRoot = findAnswerRoot(card, header);
+    const text = answerRoot === null ? "" : answerText(answerRoot, header);
+    return { text, sources: collectSources(card), state: text.length >= 200 ? "answer" : "lead" };
   }
+
+  const ai = arg.summary === true ? readAi() ?? undefined : undefined;
 
   return {
     results,
@@ -666,7 +694,7 @@ function parseFailure(message: string): Error {
   });
 }
 
-function asExtraction(value: unknown): { results: SerpItem[]; ai: AiSummary | undefined; pageCarried: boolean } {
+function asExtraction(value: unknown): { results: SerpItem[]; ai: AiSummary | undefined; pageCarried: boolean; aiProbe?: { state: "answer" | "lead" | "none"; chars: number } } {
   if (!isRecord(value)) throw parseFailure("in-page extractor returned no object");
   const rawResults = value.results;
   if (!Array.isArray(rawResults)) throw parseFailure("in-page extractor returned no results array");
@@ -698,10 +726,31 @@ function asExtraction(value: unknown): { results: SerpItem[]; ai: AiSummary | un
     const sources = Array.isArray(rawAi.sources)
       ? rawAi.sources.filter((source): source is string => typeof source === "string" && source !== "")
       : [];
-    if (text !== "") ai = { text, sources };
+    const declared = rawAi.state === "answer" || rawAi.state === "lead" ? rawAi.state : undefined;
+    if (text !== "" || declared === "lead") {
+      ai = declared === undefined ? { text, sources } : { text, sources, state: declared };
+    }
   }
 
-  return { results, ai, pageCarried: value.pageCarried === true };
+  const probe = value.aiProbe;
+  const aiProbe: { state: "answer" | "lead" | "none"; chars: number } | undefined =
+    isRecord(probe) &&
+    (probe.state === "answer" || probe.state === "lead" || probe.state === "none")
+      ? {
+          state: probe.state,
+          chars:
+            typeof probe.chars === "number" && Number.isFinite(probe.chars)
+              ? Math.max(0, Math.floor(probe.chars))
+              : 0,
+        }
+      : undefined;
+
+  return {
+    results,
+    ai,
+    pageCarried: value.pageCarried === true,
+    ...(aiProbe === undefined ? {} : { aiProbe }),
+  };
 }
 
 function asCanaries(value: unknown): Record<string, number> {
@@ -841,7 +890,6 @@ export const yandexEngine: Engine = {
   /** The tool layer waits for the user to solve the captcha; nobody clicks it here. */
   retryOnWall: true,
   interaction: INTERACTION,
-
   buildUrl,
 
   async settle(page: CdpPage, signal?: AbortSignal): Promise<void> {
@@ -871,5 +919,23 @@ export const yandexEngine: Engine = {
   async canaries(page: CdpPage): Promise<Record<string, number>> {
     const raw = await page.evaluate<unknown>(`(${canaryCounts.toString()})(document)`);
     return asCanaries(raw);
+  },
+
+  ai: {
+    /** Same `readAi` path in probe mode (P8-A); never touches results. */
+    async probe(page: CdpPage): Promise<{ state: "answer" | "lead" | "none"; chars: number }> {
+      const arg: YandexExtractionArg = { n: 0, summary: true, query: "", aiOnly: true };
+      const raw = await page.evaluate<unknown>(
+        `(${extractFromDocument.toString()})(document, ${JSON.stringify(arg)})`,
+      );
+      const parsed = asExtraction(raw);
+      return parsed.aiProbe ?? { state: "none", chars: 0 };
+    },
+    /** Called only when `search.aiExpand` is true — the tool owns the opt-in. */
+    expand: (page: CdpPage, options?: { signal?: AbortSignal }) =>
+      expandAiSummaryOnce(page, {
+        enabled: true,
+        ...(options?.signal === undefined ? {} : { signal: options.signal }),
+      }),
   },
 };

@@ -526,11 +526,14 @@ test("extract takes Search Assist from the structural block in both live fixture
   assert.deepEqual([...noAssist.ai.sources], ["tokio.rs", "docs.rs"]);
 });
 
-test("extract never fabricates AI from a toggle-only assist block", () => {
+test("extract reports a toggle-only assist block as a lead, never an answer", () => {
   const html = `<html><body><div data-testid="duckassist-answer-content"><span> Search Assist</span></div></body></html>`;
   const doc = fixtureDocument(html, SERP_URL);
   const serp = extract(doc, { n: 5, summary: true, query: "example" });
-  assert.equal(serp.ai, undefined);
+  // P8: the block exists, so the honest verdict is `lead` with no answer text —
+  // not `none` (which would hide the block) and never `ai:yes`.
+  assert.equal(serp.ai?.state, "lead");
+  assert.equal(serp.ai?.text, "");
 });
 
 test("extract never emits assist UI controls as the answer", () => {
@@ -540,7 +543,8 @@ test("extract never emits assist UI controls as the answer", () => {
     </div>
   </body></html>`;
   const none = extract(fixtureDocument(labelsOnly, SERP_URL), { n: 5, summary: true, query: "x" });
-  assert.equal(none.ai, undefined, "labels are not prose");
+  assert.equal(none.ai?.state, "lead", "labels are not prose");
+  assert.equal(none.ai?.text, "");
 
   const withProse = `<html><body>
     <div data-testid="duckassist-answer-content">
@@ -551,6 +555,8 @@ test("extract never emits assist UI controls as the answer", () => {
   const prose = extract(fixtureDocument(withProse, SERP_URL), { n: 5, summary: true, query: "x" });
   assert.ok(prose.ai);
   assert.equal(prose.ai.text, "Photovoltaic cells turn sunlight into electricity.");
+  // A 47-char fragment is real text but not a full answer (V8.1).
+  assert.equal(prose.ai.state, "lead");
 });
 
 test("extract drops a nested ad from the assist block before taking its text", () => {
@@ -672,4 +678,54 @@ test('detectWall: challenge phrases quoted by real results are not a wall', asyn
   const page = new FakePage({ url: SERP_URL, text, evaluate: () => 3 });
 
   assert.equal(await duckduckgoEngine.detectWall(page), null);
+});
+
+// ---------------------------------------------------------------------------
+// P8: AI states (answer / lead / none) and the streaming probe
+// ---------------------------------------------------------------------------
+
+/** A page that really runs the shipped in-page extractor for any (document, arg) call. */
+function enginePageFrom(doc: Document): FakePage {
+  const page = new FakePage({ url: SERP_URL, text: doc.body?.textContent ?? "" });
+  page.setEvaluateHandlers((expression) => {
+    const counted = COUNT_RE.exec(expression);
+    if (counted !== null) {
+      return doc.querySelectorAll(JSON.parse(counted[1] as string) as string).length;
+    }
+    const call = /\(document, (\{[\s\S]*\})\)$/.exec(expression);
+    if (call === null) return null;
+    return runInPage(inPageExtractor, doc, JSON.parse(call[1] as string));
+  });
+  return page;
+}
+
+test("probe agrees with extraction on answer, lead and none", async () => {
+  assert.ok(duckduckgoEngine.ai, "duckduckgo ships an AI probe");
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["ddg-assist", "answer"],
+    ["ddg-no-assist", "answer"],
+    ["ddg-assist-lead", "lead"],
+    ["ddg-no-assist-missing", "none"],
+  ];
+  for (const [name, expected] of cases) {
+    // `ddg-no-assist-missing` is not a fixture: it is the empty fixture below.
+    const doc =
+      name === "ddg-no-assist-missing"
+        ? fixtureDocumentFor("ddg-empty")
+        : fixtureDocumentFor(name);
+    const page = enginePageFrom(doc);
+    const probed = await duckduckgoEngine.ai.probe(page);
+    const serp = await duckduckgoEngine.extract(page, query({ n: 5, summary: true }));
+    const state = serp.ai?.state ?? "none";
+    assert.equal(probed.state, state, `${name}: probe ${probed.state} vs extract ${state}`);
+    assert.equal(probed.chars, serp.ai?.text.length ?? 0, `${name}: chars disagree`);
+    assert.equal(state, expected, name);
+  }
+});
+
+test("probe on the derived lead fixture reports a lead with zero answer chars", async () => {
+  assert.ok(duckduckgoEngine.ai);
+  const page = enginePageFrom(fixtureDocumentFor("ddg-assist-lead"));
+  const probed = await duckduckgoEngine.ai.probe(page);
+  assert.deepEqual(probed, { state: "lead", chars: 0 });
 });

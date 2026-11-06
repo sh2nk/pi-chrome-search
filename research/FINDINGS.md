@@ -267,3 +267,41 @@ What works (implemented in `cdp/session.ts`):
 
 Measured: redirect chain resolves in ~3 ms; an `interactive`-only page in ~245 ms (grace path); a stalled
 `loading` page still fails at the deadline; a stale replay fails instead of falsely succeeding.
+
+## 12. AI-summary states and streaming (measured 2026-11-06, P8)
+
+The AI block was previously treated as "present or absent", and a present-but-empty block was reported as
+`ai:yes` with the lead line (`Ответ в режиме ИИ, исходный запрос: "…"`) as its text. Measured live with
+`research/probes/10-ai-stream.mjs` (one navigation, one query, adapter `ai.probe()` polled every 250 ms):
+
+| Engine | Query class | First probe after `page.navigate()` | Final | Width |
+|---|---|---|---|---|
+| Google | technical | `answer` at 1 188 ms (no lead/shell phase observed) | answer | 2 304 chars |
+| Yandex (via `web_search`, typed path) | technical | — | answer | 351 chars |
+| DuckDuckGo (via `web_search`, typed path) | technical | — | answer | 525 chars |
+
+Findings:
+
+1. **On this profile the Overview was already complete when the SERP navigation resolved.** No
+   `none → lead → answer` transition was observable on a fresh navigation, so the live stream is not a
+   reliable way to stage the three states. The fixtures model them instead:
+   - `google-no-ai` (no AI section) = the shell/absent state,
+   - `google-ai-lead` (derived from `google-ai`: real section, prose replaced by the live lead line),
+   - `google-ai` (the real capture) = the answer state.
+   `ddg-assist-lead` is derived from `ddg-assist` the same way (container kept, body removed).
+2. **`ai:yes` must be width-gated.** A 351-char Yandex answer and a 525-char DDG answer are answers; a
+   47-char fragment or the query echo is not. The threshold is 200 chars of non-lead prose
+   (`AI_ANSWER_MIN_CHARS`), enforced twice: by the adapters and again by `extract/compact.ts`, so a
+   hand-built or third-party `RawSerp` cannot smuggle a short "answer" through.
+3. **A page with no AI block must not cost the full `aiWaitMs`.** Observed: the wait on a Google SERP
+   without an Overview ends at ~1 400 ms (grace) with `state=none`, and the artifact records
+   `AI_TIMEOUT` with `polls: 10`. A block that *is* present keeps the wait alive to the deadline; Yandex
+   took 2.24 s to render its answer, which is the engine's render time, not our polling overhead (the wait
+   returns on the first probe that sees ≥200 chars).
+4. **Derived fixtures are labelled.** Their `meta.json` `capturedWith`/`notes` say `derived from … (P8 S4)`
+   and never claim a fresh capture. No prose was invented: the lead line is the string the live bug
+   produced, and the answer fixture is the untouched real capture.
+5. **`page.url()` is stale after a typed search (P9 input).** The human path presses Enter inside the page;
+   the navigate-commit tracking in `cdp/session.ts` only runs during `page.navigate()`, so an artifact saved
+   after a typed search records the *home* URL while `page.txt`/`page.html` are the SERP. `detectWall`'s URL
+   evidence has the same blind spot. Recorded here for P9-B (post-navigate proof), not fixed in P8.

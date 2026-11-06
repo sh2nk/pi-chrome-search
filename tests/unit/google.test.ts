@@ -933,3 +933,48 @@ test("a module-scope closure fails in the page, so the extractor cannot rely on 
   assert.equal(serp.results.length, 1);
   assert.equal(serp.results[0]?.url, "https://example.org/one");
 });
+
+// ---------------------------------------------------------------------------
+// P8: AI states (answer / lead / none) and the streaming probe
+// ---------------------------------------------------------------------------
+
+test("extract: the real answer fixture is `answer`, the derived lead fixture is `lead`", async () => {
+  const answer = await googleEngine.extract(fixturePage("google-ai").page, makeQuery());
+  assert.ok(answer.ai);
+  assert.equal(answer.ai.state, "answer");
+  assert.ok((answer.ai.text.length ?? 0) >= 200);
+
+  const lead = await googleEngine.extract(fixturePage("google-ai-lead").page, makeQuery());
+  assert.ok(lead.ai, "a labelled block is reported, even with no prose");
+  assert.equal(lead.ai.state, "lead");
+  assert.ok(lead.ai.text.length < 200);
+  // The lead must not be mistaken for the query echo being an answer (V8.2).
+  assert.notEqual(lead.ai.text, makeQuery().text);
+  assert.ok(lead.results.length > 0);
+});
+
+test("extract: a page with no AI section is `none` (absence is a normal outcome)", async () => {
+  for (const name of ["google-no-ai", "google-empty"]) {
+    const serp = await googleEngine.extract(fixturePage(name).page, makeQuery());
+    assert.equal(serp.ai, undefined, name);
+  }
+});
+
+test("probe agrees with extraction on every AI fixture (state and width)", async () => {
+  assert.ok(googleEngine.ai, "google ships an AI probe");
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["google-ai", "answer"],
+    ["google-ai-lead", "lead"],
+    ["google-no-ai", "none"],
+    ["google-empty", "none"],
+  ];
+  for (const [name, expected] of cases) {
+    const { page } = fixturePage(name);
+    const probed = await googleEngine.ai.probe(page);
+    const serp = await googleEngine.extract(page, makeQuery());
+    const state = serp.ai?.state ?? "none";
+    assert.equal(probed.state, state, `${name}: probe ${probed.state} vs extract ${state}`);
+    assert.equal(probed.chars, serp.ai?.text.length ?? 0, `${name}: chars disagree`);
+    assert.equal(state, expected, name);
+  }
+});

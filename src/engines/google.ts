@@ -30,12 +30,12 @@
 import type { CdpPage } from "../cdp/types.ts";
 import { waitForMarker } from "../cdp/humanize.ts";
 import { isHttpUrl } from "../extract/urls.ts";
+import { systemClock } from "../runtime/clock.ts";
 import type { Clock } from "../runtime/types.ts";
 import { WebSearchError, isWebSearchError } from "../runtime/error-codes.ts";
 import type { Stage } from "../runtime/error-codes.ts";
 import { fail, toFailure } from "../runtime/errors.ts";
 import type {
-  AiSummary,
   Engine,
   EngineId,
   EngineInteraction,
@@ -141,11 +141,25 @@ export interface ExtractArgument {
   summary: boolean;
   /** Echoed back by the wrapper; extraction itself does not depend on it. */
   query: string;
+  /**
+   * Probe mode (PLAN-v2 P8-A): measure the AI block and skip the result scan.
+   * Same code path as a full extraction, so the probe can never disagree with
+   * what `extract()` would report.
+   */
+  aiOnly?: boolean;
+}
+
+export interface ExtractedAi {
+  text: string;
+  sources: string[];
+  state: "answer" | "lead";
 }
 
 export interface ExtractedSerp {
   results: SerpItem[];
-  ai?: AiSummary;
+  ai?: ExtractedAi;
+  /** Present only for an `aiOnly` call. */
+  aiProbe?: { state: "answer" | "lead" | "none"; chars: number };
   pageCarried: boolean;
 }
 
@@ -239,7 +253,20 @@ function asEngineFailure(error: unknown, stage: Stage): WebSearchError {
  */
 export function extractFromDocument(doc: Document, arg: ExtractArgument): ExtractedSerp {
   const AI_LABELS = ["Обзор от ИИ", "AI Overview"];
-  const AI_LEAD_PREFIXES = ["Ответ режима ИИ:", "Ответ в режиме ИИ:", "AI Mode answer:", "AI Mode:"];
+  /**
+   * The lead line is a query echo ("Ответ в режиме ИИ, исходный запрос: …").
+   * The comma forms are the ones seen live; the colon forms cover the older
+   * capture. Both are stripped so the lead text is not mistaken for prose.
+   */
+  const AI_LEAD_PREFIXES = [
+    "Ответ режима ИИ:",
+    "Ответ в режиме ИИ:",
+    "Ответ режима ИИ,",
+    "Ответ в режиме ИИ,",
+    "AI Mode answer:",
+    "AI Mode answer,",
+    "AI Mode:",
+  ];
   /**
    * Trailing control block of the AI Overview. "Подробнее…" carries the ellipsis
    * on purpose: the answer prose legitimately contains "Подробнее об истории…",
@@ -261,7 +288,12 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
    */
   const DEFAULT_N = 5;
   const MAX_RESULTS = 10;
-  const MIN_AI_CHARS = 40;
+  /**
+   * PLAN-v2 V8.1: `ai:yes` means at least this much answer prose. A shorter
+   * fragment is reported as `lead`, never as an answer. Literal because this
+   * function is stringified (see the closure test).
+   */
+  const MIN_ANSWER_CHARS = 200;
   /** Megabyte guard only: the 1200-char display cap belongs to extract/compact.ts. */
   const MAX_AI_CHARS = 20_000;
   const MAX_TITLE_CHARS = 300;
@@ -520,7 +552,7 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
    * that stylesheet win. Falls back to a text cut when no such chunk exists (a
    * layout that nests the controls inside the prose wrapper).
    */
-  function aiAnswerText(section: Element): string {
+  function aiAnswerText(section: Element): { text: string; state: "answer" | "lead" } {
     const full = visibleText(section);
     let body = "";
     for (const node of Array.from(section.querySelectorAll("div, section, article"))) {
@@ -539,7 +571,12 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
     let text = body.length >= MIN_BODY_CHARS ? body : stripAiLead(cutTrailingControls(full));
     text = stripDeclarationResidue(text);
     text = stripAiLead(text);
-    return clampText(text, MAX_AI_CHARS).trim();
+    text = clampText(text, MAX_AI_CHARS).trim();
+    // Two guards, one meaning: only wide prose is an answer. A block that shows
+    // the lead echo, a prompt or a short fragment is a `lead` — the exact shape
+    // that used to be rendered as `ai:yes`.
+    const state = text.length >= MIN_ANSWER_CHARS ? "answer" : "lead";
+    return { text, state };
   }
 
   /** Visible citation domains; never fabricated, Google-owned chrome excluded. */
@@ -560,6 +597,16 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
 
   const requested = Number.isFinite(arg.n) ? Math.floor(arg.n) : DEFAULT_N;
   const limit = requested < 1 ? 1 : requested > MAX_RESULTS ? MAX_RESULTS : requested;
+
+  // Probe mode: measure the AI block only. Same helpers as the full path, so a
+  // probe can never report readiness that extraction would not honour.
+  if (arg.aiOnly === true) {
+    if (arg.summary !== true) return { results: [], aiProbe: { state: "none", chars: 0 }, pageCarried: false };
+    const probeSection = findAiSection();
+    if (probeSection === null) return { results: [], aiProbe: { state: "none", chars: 0 }, pageCarried: false };
+    const measured = aiAnswerText(probeSection);
+    return { results: [], aiProbe: { state: measured.state, chars: measured.text.length }, pageCarried: false };
+  }
 
   const results: SerpItem[] = [];
   const seenUrls = new Set<string>();
@@ -588,13 +635,15 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
     if (results.length < limit) results.push({ title, url: href, snippet });
   }
 
-  let ai: AiSummary | undefined;
+  let ai: ExtractedAi | undefined;
   if (arg.summary === true) {
     const section = findAiSection();
     if (section !== null) {
-      const text = aiAnswerText(section);
-      // A label with no prose is not a summary; returning it would invent one.
-      if (text.length >= MIN_AI_CHARS) ai = { text, sources: aiSources(section) };
+      const measured = aiAnswerText(section);
+      // A labelled section always reports *something*: an answer when it has
+      // prose, otherwise an honest `lead` (possibly with empty text). Returning
+      // nothing here is what let the old code claim an answer it did not have.
+      ai = { text: measured.text, sources: aiSources(section), state: measured.state };
     }
   }
 
@@ -887,14 +936,38 @@ function asSerpItem(value: unknown): SerpItem | null {
   return { title, url, snippet };
 }
 
-function asAiSummary(value: unknown): AiSummary | undefined {
+function asAiState(value: unknown): "answer" | "lead" | undefined {
+  return value === "answer" || value === "lead" ? value : undefined;
+}
+
+/**
+ * The AI payload is untrusted JSON. `answer` requires prose; `lead` may be
+ * empty (a labelled block with nothing in it yet), which is exactly what the
+ * old code turned into a fabricated answer.
+ */
+function asAiSummary(value: unknown): ExtractedAi | undefined {
   if (!isRecord(value)) return undefined;
   const text = typeof value.text === "string" ? value.text.trim() : "";
-  if (text === "") return undefined;
+  const declared = asAiState(value.state);
+  if (declared === undefined) {
+    // An older payload with no state: only non-empty text is reportable, and
+    // compaction re-derives its state (so a short fragment becomes `lead`).
+    if (text === "") return undefined;
+  } else if (declared === "answer" && text === "") {
+    return undefined;
+  }
   const sources = Array.isArray(value.sources)
     ? value.sources.filter((source): source is string => typeof source === "string" && source !== "")
     : [];
-  return { text, sources };
+  return declared === undefined ? { text, sources, state: "lead" } : { text, sources, state: declared };
+}
+
+function asAiProbe(value: unknown): { state: "answer" | "lead" | "none"; chars: number } | null {
+  if (!isRecord(value)) return null;
+  const state = value.state === "answer" || value.state === "lead" ? value.state : value.state === "none" ? "none" : null;
+  if (state === null) return null;
+  const chars = typeof value.chars === "number" && Number.isFinite(value.chars) ? Math.max(0, Math.floor(value.chars)) : 0;
+  return { state, chars };
 }
 
 function asExtractedSerp(value: unknown): ExtractedSerp | null {
@@ -905,9 +978,11 @@ function asExtractedSerp(value: unknown): ExtractedSerp | null {
     if (parsed !== null) results.push(parsed);
   }
   const ai = asAiSummary(value.ai);
+  const probe = asAiProbe(value.aiProbe);
   return {
     results,
     ...(ai === undefined ? {} : { ai }),
+    ...(probe === null ? {} : { aiProbe: probe }),
     pageCarried: value.pageCarried === true,
   };
 }
@@ -948,6 +1023,108 @@ async function extractGoogleSerp(page: CdpPage, q: Query): Promise<RawSerp> {
     pageCarried: payload.pageCarried,
     timings: { extractMs: Date.now() - started },
   };
+}
+
+/**
+ * Cheap "what does the AI block show right now?" call for the streaming wait
+ * (PLAN-v2 P8-A). It runs the *same* in-page extractor in `aiOnly` mode, so the
+ * probe and the authoritative extraction can never disagree about state/width.
+ */
+async function probeGoogleAi(page: CdpPage): Promise<{ state: "answer" | "lead" | "none"; chars: number }> {
+  const arg: ExtractArgument = { n: 0, summary: true, query: "", aiOnly: true };
+  let raw: unknown;
+  try {
+    raw = await page.evaluate<unknown>(`(${extractFromDocument})(document, ${JSON.stringify(arg)})`);
+  } catch (error) {
+    throw asEngineFailure(error, "extract");
+  }
+  const payload = asExtractedSerp(raw);
+  if (payload === null) {
+    throw fail("E_PARSE", "extract", {
+      engine: ENGINE_ID,
+      message: "google AI probe returned no usable payload",
+    });
+  }
+  return payload.aiProbe ?? { state: "none", chars: 0 };
+}
+
+// ---------------------------------------------------------------------------
+// Opt-in AI Overview expansion (visible click, default off)
+// ---------------------------------------------------------------------------
+
+/**
+ * Centre of the AI Overview's own "Show more" control, or null.
+ *
+ * Self-contained for the same `toString()` reason as the extractor. The section
+ * must carry an AI label: a page-wide "Показать все" belongs to the result list,
+ * and clicking it would be a search interaction the caller never asked for.
+ */
+export function findAiExpandTarget(doc: Document): { x: number; y: number } | null {
+  const WHITESPACE = /[\s\u00a0\u202f]+/g;
+  const WANTED = ["показать все", "показать ещё", "показать полностью", "show more"];
+  const AI_LABELS = ["Обзор от ИИ", "AI Overview"];
+  const normalize = (value: string | null): string =>
+    (value === null ? "" : value).replace(WHITESPACE, " ").trim().toLowerCase();
+
+  for (const node of Array.from(doc.querySelectorAll('button, [role="button"], a'))) {
+    const label = normalize(node.textContent);
+    if (WANTED.indexOf(label) === -1) continue;
+    const section = node.closest("section");
+    if (section === null) continue;
+    let labelled = false;
+    for (const heading of Array.from(section.querySelectorAll('h1, h2, h3, h4, [role="heading"]'))) {
+      const text = normalize(heading.textContent);
+      if (text === "") continue;
+      for (const aiLabel of AI_LABELS) {
+        if (text.indexOf(aiLabel.toLowerCase()) === 0) {
+          labelled = true;
+          break;
+        }
+      }
+      if (labelled) break;
+    }
+    if (!labelled) continue;
+    const rect = node.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  }
+  return null;
+}
+
+export interface GoogleAiExpandOptions {
+  /** Explicit opt-in: the caller decides, never extraction itself. */
+  enabled?: boolean;
+  /** After-click grace, default 500 ms. */
+  waitMs?: number;
+  clock?: Clock;
+  signal?: AbortSignal;
+}
+
+const AI_EXPAND_WAIT_MS = 500;
+
+function isPoint(value: unknown): value is { x: number; y: number } {
+  if (!isRecord(value)) return false;
+  return typeof value.x === "number" && Number.isFinite(value.x) && typeof value.y === "number" && Number.isFinite(value.y);
+}
+
+/** One point click on the AI Overview's expand control; bounded, opt-in, never retried. */
+export async function expandGoogleAiOnce(
+  page: CdpPage,
+  options: GoogleAiExpandOptions = {},
+): Promise<boolean> {
+  if (options.enabled !== true) return false;
+  if (options.signal?.aborted === true) {
+    throw fail("E_CANCELLED", "extract", {
+      engine: ENGINE_ID,
+      message: "aborted before expanding the AI Overview",
+    });
+  }
+  const point = await page.evaluate<unknown>(`(${findAiExpandTarget.toString()})(document)`);
+  if (!isPoint(point)) return false;
+  await page.click({ x: point.x, y: point.y });
+  const waitMs = options.waitMs ?? AI_EXPAND_WAIT_MS;
+  if (waitMs > 0) await (options.clock ?? systemClock).sleep(waitMs, options.signal);
+  return true;
 }
 
 function asCanaryCounts(value: unknown): CanaryCounts | null {
@@ -1006,4 +1183,14 @@ export const googleEngine = {
   detectWall: detectGoogleWall,
   extract: extractGoogleSerp,
   canaries: googleCanaries,
+  ai: {
+    probe: probeGoogleAi,
+    // The tool layer only calls this when `search.aiExpand` is true, which is
+    // the opt-in; the wrapper keeps the adapter's explicit `enabled` guard.
+    expand: (page: CdpPage, options?: { signal?: AbortSignal }) =>
+      expandGoogleAiOnce(page, {
+        enabled: true,
+        ...(options?.signal === undefined ? {} : { signal: options.signal }),
+      }),
+  },
 } satisfies Engine;

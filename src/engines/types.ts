@@ -41,16 +41,72 @@ export interface SerpItem {
   engine?: EngineId;
 }
 
+/**
+ * What an engine's AI block actually shows (PLAN-v2 P8, `contract: ai states`).
+ *
+ * - `answer`  — the block carries answer prose of at least
+ *               {@link AI_ANSWER_MIN_CHARS} characters. Only this state may be
+ *               rendered as `ai:yes`.
+ * - `lead`    — the block exists but carries no full answer (an affordance, a
+ *               prompt, a query echo, or a short fragment). Rendered `ai:lead`,
+ *               never `ai:yes` and never as an answer body.
+ * - `none`    — no AI block on the page. Absence is a normal A/B outcome.
+ */
+export type AiState = "answer" | "lead" | "none";
+
+/**
+ * Minimum answer prose for `ai:yes` (PLAN-v2 V8.1). A block below this width is
+ * reported as `lead`: calling forty characters an answer is the small lie this
+ * phase exists to remove.
+ */
+export const AI_ANSWER_MIN_CHARS = 200;
+
 export interface AiSummary {
   text: string;
   /** Visible source names/domains. Never fabricated, may be empty. */
   sources: string[];
+  /**
+   * Optional only for additive compatibility: adapters always set it, and the
+   * compaction layer re-derives the state from `text`/`query` whenever it is
+   * missing, so an adapter cannot smuggle a short or echo-only "answer" past
+   * the promise that `ai:yes` means prose.
+   */
+  state?: AiState;
+}
+
+/** Cheap in-page answer of "what does the AI block show right now?". */
+export interface AiProbe {
+  state: AiState;
+  /** Characters of answer prose the extractor would report for this state. */
+  chars: number;
+}
+
+/**
+ * Streaming-summary hooks (PLAN-v2 P8-A/P8-B). Optional: an adapter without
+ * them simply never waits for a summary, which is honest for a third-party
+ * engine that has no AI block contract.
+ */
+export interface EngineAi {
+  /** Bounded poll target; must be cheap (no result extraction). */
+  probe(page: CdpPage): Promise<AiProbe>;
+  /**
+   * One visible expand click ("Показать полностью", "Show more"). Never called
+   * implicitly: the tool layer only invokes it when `search.aiExpand` is true,
+   * because it is a real interaction inside the user's window.
+   */
+  expand?(page: CdpPage, options?: AiExpandOptions): Promise<boolean>;
+}
+
+export interface AiExpandOptions {
+  signal?: AbortSignal;
 }
 
 export interface SerpTimings {
   navigateMs?: number;
   settleMs?: number;
   extractMs?: number;
+  /** Time spent in the streaming-summary wait (0 when `summary:false`). */
+  aiWaitMs?: number;
 }
 
 export interface RawSerp {
@@ -96,6 +152,8 @@ export interface Engine {
   buildUrl(q: Query): string;
   /** Marker-based settle with a deadline; resolves when the page is ready to extract. */
   settle(page: CdpPage, signal?: AbortSignal): Promise<void>;
+  /** Optional AI-block probe/expand (PLAN-v2 P8). Absent means "never wait". */
+  readonly ai?: EngineAi;
   detectWall(page: CdpPage): Promise<Wall | null>;
   extract(page: CdpPage, q: Query): Promise<RawSerp>;
   /** Selector canaries for the doctor. Zero counts are a `layout_changed` signal, not an error. */

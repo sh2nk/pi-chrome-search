@@ -1,0 +1,10 @@
+{
+  "engine": "google",
+  "urlPathShape": "https://www.google.com/search?q=%3Cquery%3E&hl=ru",
+  "queryClass": "technical-ai-lead",
+  "capturedAt": "2026-11-06T15:00:00.000Z",
+  "ai": "yes",
+  "results": 8,
+  "capturedWith": "derived from google-ai (P8 S4)",
+  "notes": "DERIVED, not a fresh capture: the real google-ai SERP with the AI section content replaced by the live lead line (heading + query echo, no prose). Models the streaming state that used to be reported as ai:yes."
+}

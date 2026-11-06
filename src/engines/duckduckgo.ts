@@ -108,6 +108,8 @@ export interface ExtractFromDocumentArg {
   summary: boolean;
   /** Echoed for debuggability/logs; extraction never rewrites results from it. */
   query: string;
+  /** Probe mode (P8-A): measure the assist block, skip the result scan. */
+  aiOnly?: boolean;
 }
 
 export interface ExtractedResult {
@@ -119,11 +121,14 @@ export interface ExtractedResult {
 export interface ExtractedAi {
   text: string;
   sources: string[];
+  state: "answer" | "lead";
 }
 
 export interface ExtractedSerp {
   results: ExtractedResult[];
   ai?: ExtractedAi;
+  /** Present only for an `aiOnly` call. */
+  aiProbe?: { state: "answer" | "lead" | "none"; chars: number };
   pageCarried: boolean;
 }
 
@@ -193,6 +198,18 @@ export function extractFromDocument(doc: Document, arg: ExtractFromDocumentArg):
     return { href: url.href, ad: false };
   };
 
+  // Probe mode: the streaming wait only needs the assist block (P8-A). Same
+  // `readAssist` used by the full path, so probe and extraction cannot disagree.
+  if (arg.aiOnly === true) {
+    const assist = arg.summary ? readAssist() : null;
+    return {
+      results: [],
+      aiProbe:
+        assist === null ? { state: "none", chars: 0 } : { state: assist.state, chars: assist.text.length },
+      pageCarried: false,
+    };
+  }
+
   const results: ExtractedResult[] = [];
   let carried = 0;
   // Literal on purpose: a module constant would be a free variable in the page.
@@ -232,83 +249,95 @@ export function extractFromDocument(doc: Document, arg: ExtractFromDocumentArg):
     if (results.length < limit) results.push({ title, url: parsed.href, snippet });
   }
 
-  let ai: ExtractedAi | undefined;
-  if (arg.summary) {
+  /**
+   * Search Assist as it stands right now, or null when the block is absent.
+   *
+   * Three states (PLAN-v2 P8): a present block with only a label/control is a
+   * `lead` with empty text; a short fragment is a `lead`; only ≥200 chars of
+   * prose is an `answer`. The old code returned null for a present-but-empty
+   * block and let a 12-char fragment through as a summary, which made
+   * `ai:yes` mean "there is a container" instead of "there is an answer".
+   */
+  function readAssist(): ExtractedAi | null {
     const block = doc.querySelector('[data-testid="duckassist-answer-content"]');
-    if (block !== null) {
-      const sources: string[] = [];
-      const sourceNodes = block.querySelectorAll("a[href]");
-      for (let index = 0; index < sourceNodes.length; index += 1) {
-        const node = sourceNodes[index];
-        // Citation chips wrap the site icon; inline links inside an answer do not.
-        if (node.querySelector("img") === null) continue;
-        let name = normalize(node.textContent);
-        if (name === "") {
-          try {
-            name = new URL(node.getAttribute("href") ?? "", doc.baseURI).hostname.replace(/^www\./, "");
-          } catch {
-            name = "";
-          }
+    if (block === null) return null;
+    const sources: string[] = [];
+    const sourceNodes = block.querySelectorAll("a[href]");
+    for (let index = 0; index < sourceNodes.length; index += 1) {
+      const node = sourceNodes[index];
+      // Citation chips wrap the site icon; inline links inside an answer do not.
+      if (node.querySelector("img") === null) continue;
+      let name = normalize(node.textContent);
+      if (name === "") {
+        try {
+          name = new URL(node.getAttribute("href") ?? "", doc.baseURI).hostname.replace(/^www\./, "");
+        } catch {
+          name = "";
         }
-        if (name === "") continue;
-        const key = name.toLowerCase();
-        if (sources.some((entry) => entry.toLowerCase() === key)) continue;
-        sources.push(name);
       }
-
-      const clone = block.cloneNode(true) as Element;
-      const cloneSources = clone.querySelectorAll("a[href]");
-      for (let index = 0; index < cloneSources.length; index += 1) {
-        const node = cloneSources[index];
-        if (node.querySelector("img") === null) continue;
-        if (node.parentNode !== null) node.parentNode.removeChild(node);
-      }
-
-      // A sponsored card can be nested inside the assist block; its copy is not
-      // part of the answer.
-      const cloneAds = clone.querySelectorAll('[data-result="ad"]');
-      for (let index = 0; index < cloneAds.length; index += 1) {
-        const node = cloneAds[index];
-        if (node.parentNode !== null) node.parentNode.removeChild(node);
-      }
-
-      // Some builds render the expand/stop controls inside the same container.
-      // The comparison is on a whole element's own text, so a paragraph that
-      // merely mentions "more" survives while a button labelled "More" does not.
-      const controlLabels = ["больше", "остановить", "продолжить", "stop", "more", "continue"];
-      const cloneNodes = clone.querySelectorAll("*");
-      for (let index = 0; index < cloneNodes.length; index += 1) {
-        const node = cloneNodes[index];
-        const label = normalize(node.textContent).toLowerCase();
-        if (!controlLabels.includes(label)) continue;
-        if (node.parentNode !== null) node.parentNode.removeChild(node);
-      }
-
-      let text = normalize(clone.textContent);
-      const endings = [
-        "Ответ составлен автоматически",
-        "Answer generated automatically",
-        "Создано с помощью ИИ",
-        "AI-generated",
-      ];
-      for (const ending of endings) {
-        const at = text.indexOf(ending);
-        if (at !== -1) text = text.slice(0, at).trim();
-      }
-      // A toggle-only block carries the label and nothing else: not a summary.
-      if (text.indexOf("Search Assist") === 0) text = text.slice("Search Assist".length).trim();
-      // Belt and braces: a label left as a bare text node has no element to
-      // remove, so the prose *check* also drops label tokens. The emitted answer
-      // keeps its own wording — this filter never rewrites what the user reads.
-      const proseCandidate = normalize(
-        text
-          .split(" ")
-          .filter((word) => !controlLabels.includes(word.toLowerCase().replace(/[.,;:!?«»"'()]/g, "")))
-          .join(" "),
-      );
-      if (isProse(proseCandidate)) ai = { text, sources };
+      if (name === "") continue;
+      const key = name.toLowerCase();
+      if (sources.some((entry) => entry.toLowerCase() === key)) continue;
+      sources.push(name);
     }
+
+    const clone = block.cloneNode(true) as Element;
+    const cloneSources = clone.querySelectorAll("a[href]");
+    for (let index = 0; index < cloneSources.length; index += 1) {
+      const node = cloneSources[index];
+      if (node.querySelector("img") === null) continue;
+      if (node.parentNode !== null) node.parentNode.removeChild(node);
+    }
+
+    // A sponsored card can be nested inside the assist block; its copy is not
+    // part of the answer.
+    const cloneAds = clone.querySelectorAll('[data-result="ad"]');
+    for (let index = 0; index < cloneAds.length; index += 1) {
+      const node = cloneAds[index];
+      if (node.parentNode !== null) node.parentNode.removeChild(node);
+    }
+
+    // Some builds render the expand/stop controls inside the same container.
+    // The comparison is on a whole element's own text, so a paragraph that
+    // merely mentions "more" survives while a button labelled "More" does not.
+    const controlLabels = ["больше", "остановить", "продолжить", "stop", "more", "continue"];
+    const cloneNodes = clone.querySelectorAll("*");
+    for (let index = 0; index < cloneNodes.length; index += 1) {
+      const node = cloneNodes[index];
+      const label = normalize(node.textContent).toLowerCase();
+      if (!controlLabels.includes(label)) continue;
+      if (node.parentNode !== null) node.parentNode.removeChild(node);
+    }
+
+    let text = normalize(clone.textContent);
+    const endings = [
+      "Ответ составлен автоматически",
+      "Answer generated automatically",
+      "Создано с помощью ИИ",
+      "AI-generated",
+    ];
+    for (const ending of endings) {
+      const at = text.indexOf(ending);
+      if (at !== -1) text = text.slice(0, at).trim();
+    }
+    // A toggle-only block carries the label and nothing else: not a summary.
+    if (text.indexOf("Search Assist") === 0) text = text.slice("Search Assist".length).trim();
+    // Belt and braces: a label left as a bare text node has no element to
+    // remove, so the prose *check* also drops label tokens. The emitted answer
+    // keeps its own wording — this filter never rewrites what the user reads.
+    const proseCandidate = normalize(
+      text
+        .split(" ")
+        .filter((word) => !controlLabels.includes(word.toLowerCase().replace(/[.,;:!?«»"'()]/g, "")))
+        .join(" "),
+    );
+    // Chrome-only text is not shipped, but the block is still reported as a
+    // lead: "there is an AI card here, with no answer in it yet".
+    const kept = isProse(proseCandidate) ? text : "";
+    return { text: kept, sources, state: kept.length >= 200 ? "answer" : "lead" };
   }
+
+  const ai = arg.summary ? readAssist() ?? undefined : undefined;
 
   const pageCarried = carried > results.length;
   return ai === undefined ? { results, pageCarried } : { results, ai, pageCarried };
@@ -331,8 +360,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+interface ParsedExtraction {
+  results: ExtractedResult[];
+  ai?: AiSummary;
+  aiProbe?: { state: "answer" | "lead" | "none"; chars: number };
+  pageCarried: boolean;
+}
+
 /** Defensive re-validation of the JSON that crossed the CDP boundary. */
-function parseExtracted(value: unknown): ExtractedSerp {
+function parseExtracted(value: unknown): ParsedExtraction {
   if (!isRecord(value) || !Array.isArray(value.results)) {
     throw fail("E_PARSE", "extract", {
       engine: ENGINE_ID,
@@ -358,18 +394,35 @@ function parseExtracted(value: unknown): ExtractedSerp {
   let ai: AiSummary | undefined;
   if (isRecord(value.ai) && typeof value.ai.text === "string") {
     const text = value.ai.text.trim();
-    if (text !== "") {
+    const declared = value.ai.state === "answer" || value.ai.state === "lead" ? value.ai.state : undefined;
+    if (text !== "" || declared === "lead") {
       const sources = Array.isArray(value.ai.sources)
         ? value.ai.sources
             .filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "")
             .map((entry) => entry.trim())
         : [];
-      ai = { text, sources };
+      ai = declared === undefined ? { text, sources } : { text, sources, state: declared };
     }
   }
 
-  const pageCarried = value.pageCarried === true;
-  return ai === undefined ? { results, pageCarried } : { results, ai, pageCarried };
+  const probe = value.aiProbe;
+  const aiProbe: ParsedExtraction["aiProbe"] =
+    isRecord(probe) && (probe.state === "answer" || probe.state === "lead" || probe.state === "none")
+      ? {
+          state: probe.state,
+          chars:
+            typeof probe.chars === "number" && Number.isFinite(probe.chars)
+              ? Math.max(0, Math.floor(probe.chars))
+              : 0,
+        }
+      : undefined;
+
+  return {
+    results,
+    ...(ai === undefined ? {} : { ai }),
+    ...(aiProbe === undefined ? {} : { aiProbe }),
+    pageCarried: value.pageCarried === true,
+  };
 }
 
 function pathOf(url: string): string {
@@ -592,6 +645,18 @@ async function extractSerp(page: CdpPage, q: Query): Promise<RawSerp> {
 }
 
 /**
+ * Cheap assist-block probe for the streaming wait (P8-A). It runs the same
+ * `readAssist` path in `aiOnly` mode, so a probe can never report readiness the
+ * extraction would not honour.
+ */
+async function probeDuckDuckGoAi(page: CdpPage): Promise<{ state: "answer" | "lead" | "none"; chars: number }> {
+  const arg: ExtractFromDocumentArg = { n: 0, summary: true, query: "", aiOnly: true };
+  const raw = await page.evaluate<unknown>(`(${extractFromDocument})(document, ${JSON.stringify(arg)})`);
+  const extracted = parseExtracted(raw);
+  return extracted.aiProbe ?? { state: "none", chars: 0 };
+}
+
+/**
  * Build one adapter. Production uses the shared `duckduckgoEngine`; tests build
  * a copy with a virtual clock and a short deadline so a settle timeout is
  * proven without spending real seconds.
@@ -605,6 +670,9 @@ export function createDuckDuckGoEngine(options: DuckDuckGoEngineOptions = {}): E
     detectWall: detectSerpWall,
     extract: extractSerp,
     canaries: countCanaries,
+    // No expand hook: DDG's "More" control rewrites the same container, and a
+    // visible click with no measured benefit is not worth a config knob here.
+    ai: { probe: probeDuckDuckGoAi },
   };
 }
 

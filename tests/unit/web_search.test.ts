@@ -20,8 +20,10 @@ import { Value } from "typebox/value";
 import type { CdpConnector, CdpPage } from "../../src/cdp/types.ts";
 import { DEFAULT_CONFIG, type Config } from "../../src/config.ts";
 import type {
+  AiProbe,
   AiSummary,
   Engine,
+  EngineAi,
   EngineId,
   EngineInteraction,
   Query,
@@ -86,6 +88,8 @@ interface StubEngineOptions {
   id: EngineId;
   results?: SerpItem[];
   ai?: AiSummary;
+  /** P8: attach a probe/expand hook to the stub engine. */
+  aiHooks?: EngineAi;
   pageCarried?: boolean;
   interaction?: EngineInteraction;
   retryOnWall?: boolean;
@@ -103,6 +107,7 @@ class StubEngine implements Engine {
   readonly id: EngineId;
   readonly retryOnWall?: boolean;
   readonly interaction?: EngineInteraction;
+  readonly ai?: EngineAi;
 
   readonly queries: Query[] = [];
   readonly urls: string[] = [];
@@ -129,6 +134,7 @@ class StubEngine implements Engine {
     this.#settleError = options.settleError;
     if (options.retryOnWall !== undefined) this.retryOnWall = options.retryOnWall;
     if (options.interaction !== undefined) this.interaction = options.interaction;
+    if (options.aiHooks !== undefined) this.ai = options.aiHooks;
   }
 
   buildUrl(query: Query): string {
@@ -164,7 +170,13 @@ class StubEngine implements Engine {
       pageCarried: this.#pageCarried,
       timings: {},
     };
-    if (this.#ai !== undefined) serp.ai = { text: this.#ai.text, sources: [...this.#ai.sources] };
+    if (this.#ai !== undefined) {
+      serp.ai = {
+        text: this.#ai.text,
+        sources: [...this.#ai.sources],
+        ...(this.#ai.state === undefined ? {} : { state: this.#ai.state }),
+      };
+    }
     return serp;
   }
 
@@ -1366,4 +1378,155 @@ test("a settle timeout without a wall stays E_TIMEOUT and writes no artifact", a
   const failure = expectFailure(await run(harness, { q: "slow query", n: 5 }));
   assert.equal(failure.details.code, "E_TIMEOUT");
   assert.equal(harness.saved.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// P8: AI wait wiring (summary:true/false, artifacts, timing, details)
+// ---------------------------------------------------------------------------
+
+function scriptedProbe(sequence: readonly AiProbe[]): { hooks: EngineAi; calls: () => number } {
+  let index = 0;
+  let calls = 0;
+  return {
+    calls: () => calls,
+    hooks: {
+      probe: async () => {
+        calls += 1;
+        const value = sequence[Math.min(index, sequence.length - 1)] ?? { state: "none", chars: 0 };
+        index += 1;
+        return value;
+      },
+    },
+  };
+}
+
+test("summary:false never probes and reports aiState none with zero wait", async () => {
+  const probe = scriptedProbe([{ state: "answer", chars: 900 }]);
+  const harness = makeHarness({
+    engines: [
+      // No AI at all: a real adapter with `summary:false` skips extraction of
+      // the block, so the stub models the same absence.
+      new StubEngine({ id: "google", aiHooks: probe.hooks }),
+    ],
+  });
+
+  const result = expectSuccess(await run(harness, { q: "x", engines: "google", summary: false }));
+  assert.equal(probe.calls(), 0, "summary:false must not pay for the wait (V8.4)");
+  assert.equal(result.details.aiWaitMs, 0);
+  assert.equal(result.details.aiState, "none");
+  assert.equal(result.details.ai, false);
+});
+
+test("summary:true waits for the answer and records aiWaitMs/aiChars", async () => {
+  const answer = "A".repeat(400);
+  const probe = scriptedProbe([
+    { state: "lead", chars: 20 },
+    { state: "answer", chars: 400 },
+  ]);
+  const harness = makeHarness({
+    engines: [
+      new StubEngine({
+        id: "google",
+        ai: { text: answer, sources: ["a.test"], state: "answer" },
+        aiHooks: probe.hooks,
+      }),
+    ],
+    config: (config) => {
+      config.search.aiWaitMs = 6000;
+    },
+  });
+
+  const result = expectSuccess(await run(harness, { q: "x", engines: "google" }));
+  assert.ok(probe.calls() >= 1);
+  assert.equal(result.details.aiState, "answer");
+  assert.equal(result.details.ai, true);
+  assert.ok(result.details.aiWaitMs > 0, "the clock advanced while waiting");
+  assert.ok(result.details.aiChars > 0);
+  assert.equal(harness.saved.length, 0, "a completed answer needs no artifact");
+  assert.ok(textOf(result).includes("ai:yes"));
+});
+
+test("a lead that never becomes prose saves an artifact and never claims an answer", async () => {
+  const probe = scriptedProbe([{ state: "lead", chars: 20 }]);
+  const harness = makeHarness({
+    engines: [
+      new StubEngine({
+        id: "google",
+        ai: { text: "short lead", sources: [], state: "lead" },
+        aiHooks: probe.hooks,
+      }),
+    ],
+    config: (config) => {
+      config.search.aiWaitMs = 400;
+    },
+  });
+
+  const result = expectSuccess(await run(harness, { q: "x", engines: "google" }));
+  assert.equal(result.details.aiState, "lead");
+  assert.equal(result.details.ai, false);
+  assert.equal(harness.saved.length, 1, "V8.5: the timed-out wait left proof behind");
+  assert.equal(harness.saved[0]?.code, "AI_TIMEOUT");
+  const extra = harness.saved[0]?.extra as { aiWait?: Record<string, unknown> } | undefined;
+  assert.equal(extra?.aiWait?.state, "lead");
+  assert.ok(textOf(result).includes("ai:lead"));
+  assert.equal(textOf(result).includes("AI:"), false);
+});
+
+test("a page with no AI block exits after the none grace and still leaves an artifact", async () => {
+  const probe = scriptedProbe([{ state: "none", chars: 0 }]);
+  const harness = makeHarness({
+    engines: [new StubEngine({ id: "duckduckgo", aiHooks: probe.hooks })],
+    config: (config) => {
+      config.search.aiWaitMs = 6000;
+    },
+  });
+
+  const result = expectSuccess(await run(harness, { q: "x", engines: "duckduckgo" }));
+  assert.equal(result.details.aiState, "none");
+  assert.equal(result.details.ai, false);
+  // V8.4: no AI block must not cost the whole 6 s budget.
+  assert.ok(result.details.aiWaitMs <= 1500, `waited ${result.details.aiWaitMs} ms`);
+  assert.equal(harness.saved[0]?.code, "AI_TIMEOUT");
+});
+
+test("aiWaitMs:0 probes once and returns (config disables the wait)", async () => {
+  const probe = scriptedProbe([{ state: "lead", chars: 20 }]);
+  const harness = makeHarness({
+    engines: [
+      new StubEngine({ id: "google", ai: { text: "short", sources: [], state: "lead" }, aiHooks: probe.hooks }),
+    ],
+    config: (config) => {
+      config.search.aiWaitMs = 0;
+    },
+  });
+
+  const result = expectSuccess(await run(harness, { q: "x", engines: "google" }));
+  assert.equal(probe.calls(), 1);
+  assert.equal(result.details.aiWaitMs, 0);
+});
+
+test("aiExpand is opt-in: the expand hook runs only when configured", async () => {
+  let expanded = 0;
+  const hooks: EngineAi = {
+    probe: async () => ({ state: "answer", chars: 400 }),
+    expand: async () => {
+      expanded += 1;
+      return true;
+    },
+  };
+  const engine = (): StubEngine =>
+    new StubEngine({ id: "google", ai: { text: "A".repeat(400), sources: [], state: "answer" }, aiHooks: hooks });
+
+  const off = makeHarness({ engines: [engine()] });
+  expectSuccess(await run(off, { q: "x", engines: "google" }));
+  assert.equal(expanded, 0, "default config must not click anything");
+
+  const on = makeHarness({
+    engines: [engine()],
+    config: (config) => {
+      config.search.aiExpand = true;
+    },
+  });
+  expectSuccess(await run(on, { q: "x", engines: "google" }));
+  assert.equal(expanded, 1);
 });

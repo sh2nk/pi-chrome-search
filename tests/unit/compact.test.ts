@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { EngineId, RawSerp, SerpItem } from "../../src/engines/types.ts";
+import { AI_ANSWER_MIN_CHARS, type EngineId, type RawSerp, type SerpItem } from "../../src/engines/types.ts";
 import { COMPACT_CAPS, compactSerps, type CompactOptions } from "../../src/extract/compact.ts";
 import { isHttpUrl, normalizeUrl } from "../../src/extract/urls.ts";
+
+/**
+ * P8: only prose of at least `AI_ANSWER_MIN_CHARS` is an answer. Fixtures that
+ * want `ai:yes` must carry real answer width; short "Overview" strings are the
+ * `ai:lead` case now, by design.
+ */
+const ANSWER = "A complete answer paragraph with enough prose to be an answer. ".repeat(4).trim();
+const ANSWER_SHORT = "A short fragment that is not an answer.";
 
 const OPTS: CompactOptions = {
   n: 5,
@@ -47,13 +55,13 @@ function headerOf(text: string): string {
 test("header: exact shape with AI, elapsed, result count", () => {
   const input = [
     serp("google", [1, 2, 3, 4, 5].map((i) => result(i)), {
-      ai: { text: "Overview text", sources: ["a.com", "b.com"] },
+      ai: { text: ANSWER, sources: ["a.com", "b.com"] },
     }),
   ];
   const out = compactSerps(input, { ...OPTS, elapsedMs: 1400 });
 
   assert.equal(headerOf(out.text), "google · 5 results · ai:yes · 1.4s");
-  assert.equal(out.text.split("\n")[1], "AI: Overview text [sources: a.com, b.com]");
+  assert.equal(out.text.split("\n")[1], `AI: ${ANSWER} [sources: a.com, b.com]`);
   assert.ok(out.text.includes("\n\n1. Result 1 — example.com\n   https://example.com/r1\n   snippet 1"));
   assert.equal(out.chars, out.text.length);
 });
@@ -244,7 +252,7 @@ test("budget split: a 1200-char AI at the default cap never starves n results", 
 test("when the results floor does not fit, results win and the AI is dropped", () => {
   const input = [
     serp("google", [1, 2, 3, 4, 5].map((i) => result(i)), {
-      ai: { text: "x".repeat(100), sources: [] },
+      ai: { text: "x".repeat(300), sources: [] },
     }),
   ];
   const out = compactSerps(input, { ...OPTS, outputMaxChars: 250 });
@@ -267,15 +275,19 @@ test("AI block: a 6-char budget renders `AI: …`, a 5-char budget drops it", ()
   // The summary is dropped for space only when its block is narrower than the
   // documented minimum (`\nAI: x` = 6 chars); it is not tied to the results floor.
   // With no results the whole cap is the AI budget, so the boundary is exact.
-  const input = [serp("google", [], { ai: { text: "x".repeat(50), sources: [] } })];
+  const input = [serp("google", [], { ai: { text: "x".repeat(300), sources: [] } })];
   const headerLen = "google · 0 results · ai:yes".length;
+  // The budget reserves the widest possible AI header (`ai:lead`, one char wider
+  // than `ai:yes`), which is what makes the boundary honest before the state is
+  // final: a dropped answer must not leave a `yes` header with no line.
+  const reserve = "google · 0 results · ai:lead".length;
 
-  const tooNarrow = compactSerps(input, { ...OPTS, outputMaxChars: headerLen + 5 });
+  const tooNarrow = compactSerps(input, { ...OPTS, outputMaxChars: reserve + 5 });
   assert.equal(tooNarrow.ai, undefined, "5 chars cannot hold the newline + prefix + prose char");
   assert.equal(tooNarrow.aiChars, 0);
   assert.equal(tooNarrow.text, "google · 0 results · ai:no");
 
-  const minimum = compactSerps(input, { ...OPTS, outputMaxChars: headerLen + 6 });
+  const minimum = compactSerps(input, { ...OPTS, outputMaxChars: reserve + 6 });
   assert.ok(minimum.ai, "exactly 6 chars is the smallest renderable AI block");
   assert.equal(minimum.ai?.text, "…");
   assert.equal(minimum.aiChars, 6);
@@ -307,12 +319,12 @@ test("when nothing fits but the header, the AI cannot outlive the results either
 });
 
 test("AI alone is still rendered when there are no results to compete with", () => {
-  const out = compactSerps([serp("google", [], { ai: { text: "overview", sources: ["a.com"] } })], OPTS);
+  const out = compactSerps([serp("google", [], { ai: { text: ANSWER, sources: ["a.com"] } })], OPTS);
   assert.ok(out.ai);
   assert.equal(out.items.length, 0);
   assert.ok(out.aiChars > 0);
   assert.equal(out.resultsChars, 0);
-  assert.ok(out.text.includes("AI: overview [sources: a.com]"));
+  assert.ok(out.text.includes(`AI: ${ANSWER} [sources: a.com]`));
 });
 
 test("worst case: 140-char titles + 180-215-char URLs + 1200-char AI at n=5", () => {
@@ -438,17 +450,17 @@ test("invalid or non-http results are dropped, empty snippets do not break the f
 
 test("AI sources are de-duplicated and only rendered when present", () => {
   const withSources = compactSerps(
-    [serp("google", [result(1)], { ai: { text: "Overview", sources: ["a.com", "a.com", "", "b.com"] } })],
+    [serp("google", [result(1)], { ai: { text: ANSWER, sources: ["a.com", "a.com", "", "b.com"] } })],
     OPTS,
   );
   assert.deepEqual(withSources.ai?.sources, ["a.com", "b.com"]);
-  assert.ok(withSources.text.includes("AI: Overview [sources: a.com, b.com]"));
+  assert.ok(withSources.text.includes(`AI: ${ANSWER} [sources: a.com, b.com]`));
 
   const withoutSources = compactSerps(
-    [serp("google", [result(1)], { ai: { text: "Overview", sources: [] } })],
+    [serp("google", [result(1)], { ai: { text: ANSWER, sources: [] } })],
     OPTS,
   );
-  assert.equal(withoutSources.text.includes("AI: Overview\n"), true);
+  assert.equal(withoutSources.text.includes(`AI: ${ANSWER}\n`), true);
 });
 
 test("AI block: a long source list is trimmed before the prose is cut", () => {
@@ -664,7 +676,12 @@ test("property: 500 seeded SERPs always fit outputMaxChars and the per-field cap
       }
     }
     const target = Math.min(n, distinct.size);
-    const hasAi = serps.some((s) => (s.ai?.text ?? "").replace(/\s+/g, " ").trim().length > 0);
+    // `hasAi` means "an answer candidate" now: a short random fragment is a
+    // legitimate `ai:lead`, and the invariant below is about answers only.
+    const hasAi = serps.some((s) => {
+      const text = (s.ai?.text ?? "").replace(/\s+/g, " ").trim();
+      return text.length >= AI_ANSWER_MIN_CHARS && text.toLowerCase() !== s.query.toLowerCase();
+    });
 
     assert.ok(out.text.length <= 2500, `case ${caseIndex}: text ${out.text.length} > 2500`);
     assert.equal(out.chars, out.text.length);
@@ -748,7 +765,8 @@ test("property: n=6..10 short SERPs keep exactly n results next to a non-empty A
         ai: {
           // Non-empty by construction: an all-whitespace random value would be
           // collapsed away and turn this into a no-AI case.
-          text: `summary ${caseIndex} ${randomText(rng, Math.floor(rng() * 2000))}`,
+          // ≥200 chars by construction (V8.1): this pass is about answers.
+          text: `summary ${caseIndex} ${randomText(rng, 200 + Math.floor(rng() * 1800))}`,
           sources: ["a.com", "b.com"],
         },
       }),
@@ -778,4 +796,79 @@ test("property: n=6..10 short SERPs keep exactly n results next to a non-empty A
       assert.ok(item.snippet.length <= 140, `case ${caseIndex} (n=${n}): snippet too long`);
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// P8: three AI states
+// ---------------------------------------------------------------------------
+
+test("a lead-only block renders `ai:lead`, no AI line and no answer claim", () => {
+  const out = compactSerps(
+    [serp("google", [result(1)], { ai: { text: ANSWER_SHORT, sources: [], state: "lead" } })],
+    OPTS,
+  );
+  assert.equal(headerOf(out.text), "google · 1 results · ai:lead");
+  assert.equal(out.text.includes("AI:"), false, "a lead has no answer line");
+  assert.equal(out.ai, undefined);
+  assert.equal(out.aiState, "lead");
+  assert.equal(out.aiChars, 0);
+  assert.deepEqual(out.data.ai, undefined);
+  assert.equal(out.data.aiState, "lead");
+});
+
+test("V8.1: a short or query-echo text can never be rendered as ai:yes", () => {
+  const cases: Array<{ text: string; state?: "answer" | "lead" }> = [
+    { text: ANSWER_SHORT, state: "answer" },
+    { text: "test query", state: "answer" },
+    { text: "  Test   Query  ", state: "answer" },
+    { text: "x".repeat(199), state: "answer" },
+  ];
+  for (const { text, state } of cases) {
+    const out = compactSerps([serp("google", [result(1)], { ai: { text, sources: [], ...(state ? { state } : {}) } })], OPTS);
+    assert.equal(headerOf(out.text).includes("ai:yes"), false, JSON.stringify(text.slice(0, 40)));
+    assert.equal(out.ai, undefined);
+    assert.equal(out.aiState, "lead");
+  }
+
+  const exact = compactSerps([serp("google", [result(1)], { ai: { text: "x".repeat(200), sources: [] } })], OPTS);
+  assert.equal(headerOf(exact.text).includes("ai:yes"), true, "200 chars is the documented floor");
+  assert.ok(exact.ai);
+
+  // A declared `none` stays none even if a hostile payload carries long text.
+  const declaredNone = compactSerps(
+    [serp("google", [result(1)], { ai: { text: ANSWER, sources: [], state: "none" } })],
+    OPTS,
+  );
+  assert.equal(declaredNone.aiState, "none");
+  assert.equal(headerOf(declaredNone.text).includes("ai:no"), true);
+});
+
+test("an answer from any engine wins over a lead from an earlier one", () => {
+  const out = compactSerps(
+    [
+      serp("duckduckgo", [result(1, { url: "https://ddg.example/a" })], {
+        ai: { text: ANSWER_SHORT, sources: [], state: "lead" },
+      }),
+      serp("google", [result(2, { url: "https://google.example/b" })], {
+        ai: { text: ANSWER, sources: [], state: "answer" },
+      }),
+    ],
+    OPTS,
+  );
+  assert.equal(headerOf(out.text), "google+duckduckgo · 2 results · ai:yes");
+  assert.equal(out.ai?.text, ANSWER);
+  assert.equal(out.aiState, "answer");
+});
+
+test("an answer dropped for space leaves no `ai:yes` header behind", () => {
+  const input = [
+    serp("google", [1, 2, 3].map((i) => result(i, { url: `https://example.com/${"p".repeat(80)}${i}` })), {
+      ai: { text: "z".repeat(1200), sources: [], state: "answer" },
+    }),
+  ];
+  const out = compactSerps(input, { ...OPTS, outputMaxChars: 260 });
+  assert.equal(out.ai, undefined);
+  assert.equal(out.aiState, "none", "no AI is rendered, so the header must not claim one");
+  assert.equal(headerOf(out.text).includes("ai:yes"), false);
+  assert.equal(out.text.length <= 260, true);
 });

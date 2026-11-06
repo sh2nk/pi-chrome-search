@@ -482,7 +482,10 @@ test("extract: a prose-only AI teaser is not reported as an answer", () => {
   ].join("");
 
   const out = extractFrom(html, SERP_URL, { n: 5, summary: true, query: "q" });
-  assert.equal(out.ai, undefined, "teaser prose must never become ai.text");
+  // P8: the card exists but carries no answer body, so the honest verdict is
+  // `lead` with empty text. Teaser prose must never become ai.text.
+  assert.equal(out.ai?.state, "lead");
+  assert.equal(out.ai?.text, "");
   assert.equal(out.results.length, 1);
 });
 
@@ -671,4 +674,72 @@ test("detectWall: a captcha widget alone is a wall even without marker text", as
   assert.ok(wall !== null);
   assert.equal(wall.kind, "captcha");
   assert.deepEqual(wall.markers, ["captcha-node"]);
+});
+
+// ---------------------------------------------------------------------------
+// P8: AI states (answer / lead / none) and the streaming probe
+// ---------------------------------------------------------------------------
+
+/** Futuris card with a body of exactly `chars` chars (ellipsis-free prose). */
+function futurisCard(chars: number): string {
+  const sentence = "Нейросеть отвечает подробно и по делу. ";
+  const body = sentence.repeat(Math.ceil(chars / sentence.length)).slice(0, chars).trim();
+  return [
+    "<html><body>",
+    '<div class="Organic"><div class="OrganicTitle">',
+    '<a href="https://example.com/one">Органический результат</a>',
+    "</div></div>",
+    '<div class="FuturisSearch FuturisSearchCard" data-fast-name="neuro_answer">',
+    '<div class="FuturisSearchCard-Content">',
+    '<h3 class="FuturisInlineHeader-Title">Быстрый ответ Алисы AI</h3>',
+    '<div class="FuturisContentSection">',
+    `<p>${body}</p>`,
+    "</div></div></div>",
+    "</body></html>",
+  ].join("");
+}
+
+test("extract: a wide Futuris answer is `answer`, a short one is `lead`", () => {
+  const wide = extractFrom(futurisCard(900), SERP_URL, { n: 5, summary: true, query: "q" });
+  assert.equal(wide.ai?.state, "answer");
+  assert.ok((wide.ai?.text.length ?? 0) >= 200);
+
+  const short = extractFrom(futurisCard(120), SERP_URL, { n: 5, summary: true, query: "q" });
+  assert.equal(short.ai?.state, "lead");
+  assert.ok((short.ai?.text.length ?? 0) < 200);
+});
+
+test("extract: a robot-gated card is `none`, not a lead (the answer is withheld)", () => {
+  const out = extractFrom(fixtureDocument(loadFixture("yandex-neuro").html, SERP_URL).documentElement.outerHTML, SERP_URL, {
+    n: 5,
+    summary: true,
+    query: "q",
+  });
+  assert.equal(out.ai, undefined);
+});
+
+test("probe agrees with extraction on every Yandex AI state", async () => {
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["yandex-neuro", "none"],
+    ["yandex-no-neuro", "none"],
+    ["yandex-empty", "none"],
+  ];
+  for (const [name, expected] of cases) {
+    const page = fixturePage(name);
+    const probed = await yandexEngine.ai?.probe(page);
+    const serp = await yandexEngine.extract(page, query({ n: 5, summary: true }));
+    const state = serp.ai?.state ?? "none";
+    assert.equal(probed?.state, state, `${name}: probe ${probed?.state} vs extract ${state}`);
+    assert.equal(probed?.chars, serp.ai?.text.length ?? 0, `${name}: chars disagree`);
+    assert.equal(state, expected, name);
+  }
+
+  for (const [chars, expected] of [[900, "answer"], [120, "lead"]] as const) {
+    const page = pageFor(fixtureDocument(futurisCard(chars), SERP_URL), SERP_URL);
+    const probed = await yandexEngine.ai?.probe(page);
+    const serp = await yandexEngine.extract(page, query({ n: 5, summary: true }));
+    assert.equal(probed?.state, expected, `${chars} chars`);
+    assert.equal(probed?.chars, serp.ai?.text.length ?? 0);
+    assert.equal(serp.ai?.state, expected);
+  }
 });

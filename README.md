@@ -112,8 +112,9 @@ the next one on `E_WALL`/`E_EMPTY`/`E_UNSUPPORTED`/`E_CDP_*`/`E_TARGET_LOST`. A 
 keeps the best snippet and tags the engine only when the results are mixed.
 
 A `web_search` result is capped at **2500 characters** in total, with the summary ≤1200 and snippets ≤140;
-`n` never exceeds 10. If the AI block is absent the header says `ai:no` and results are unchanged — a normal
-A/B outcome, never a fabricated summary.
+`n` never exceeds 10. The AI block has three states: `ai:yes` only for ≥200 characters of answer prose,
+`ai:lead` when the block exists but has no answer yet (an affordance, prompt or query echo), `ai:no` when it
+is absent — a normal A/B outcome. A lead is never rendered as an answer, and a summary is never fabricated.
 
 ```text
 google · 5 results · ai:yes · 1.4s
@@ -145,6 +146,7 @@ a partial file is deep-merged over the defaults.
 | `pacing.google`, `pacing.duckduckgo`, `pacing.yandex` | `[2500,5000]`, `[2000,4000]`, `[5000,9000]` | Min gap + jitter window in ms, per engine |
 | `search.n`, `search.nMax` | `5`, `10` | Default and maximum results; above 10 is `E_CONFIG` |
 | `search.summaryMaxChars`, `search.snippetMaxChars`, `search.outputMaxChars` | `1200`, `140`, `2500` | AI, snippet and total output budgets (results floor reserved first) |
+| `search.aiWaitMs`, `search.aiExpand` | `6000`, `false` | Bounded wait for a streaming native AI summary (0 disables; a page with no AI block stops after ≤1.5 s); allow one visible expand click inside the AI block (`false`: never click) |
 | `read.defaultMaxChars`, `read.maxCharsCeiling` | `6000`, `20000` | Default `web_read` window and hard ceiling |
 | `cache.serpTtlMs`, `cache.gotoTtlMs`, `cache.maxEntries` | `600000`, `86400000`, `200` | SERP TTL (10 min), `/goto` TTL (24 h), LRU size |
 | `captcha.waitMs`, `captcha.retryYandexOnce` | `0`, `true` | Extra grace after the one Yandex retry for you to solve a wall (0 = no extra wait); the retry waits ~3 s |
@@ -235,6 +237,7 @@ stop and ask — not retry.
 | `E_RATE_LIMITED` / `E_EMPTY` | Gap or daily cap active — wait or use another engine; no results — rephrase, drop freshness, try another engine |
 | `E_CONFIG` / `E_BLOCKED_URL` | A key in `~/.pi/agent/web-search.json` is wrong or unknown (unknown keys are rejected); `web_read` refused a private/local/`file:` URL |
 | AI summary missing (`ai:no`) | Normal: AI blocks are A/B and query-dependent. Results are unchanged; nothing is invented |
+| AI summary is `ai:lead` | The page shows the AI affordance but no answer prose (yet, or at all). Wait, retry once, or accept it; it is never rendered as an answer |
 
 `/web-doctor` (or `node src/cli/doctor.ts --json`) reports the CDP endpoint, browser version, profile,
 `navigator.webdriver`, lock state, owned window, artifact/cache size, per-engine verdicts

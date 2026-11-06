@@ -42,7 +42,7 @@
  * without another pass over the SERPs.
  */
 
-import { ENGINE_IDS, type AiSummary, type EngineId, type RawSerp } from "../engines/types.ts";
+import { AI_ANSWER_MIN_CHARS, ENGINE_IDS, type AiState, type AiSummary, type EngineId, type RawSerp } from "../engines/types.ts";
 import { domainOf, isHttpUrl, normalizeUrl } from "./urls.ts";
 
 /** Extra caps that are not in `SearchConfig`, kept here so they stay in one place. */
@@ -85,11 +85,16 @@ export interface CompactItem {
 export interface CompactAi {
   text: string;
   sources: string[];
+  /** `answer` is the only state that renders an `AI:` line; `lead` is header-only. */
+  state?: AiState;
 }
 
 export interface CompactResult {
   engineLabel: string;
+  /** Present only for an `answer`; a `lead` is reported through `aiState`. */
   ai?: CompactAi;
+  /** Three-state AI verdict; drives the header (`ai:yes` / `ai:lead` / `ai:no`). */
+  aiState: AiState;
   items: CompactItem[];
   pageCarried: boolean;
   degraded: boolean;
@@ -264,13 +269,52 @@ function fitAi(ai: CompactAi | undefined, blockBudget: number): FittedAi {
  * First non-empty summary wins: engines are passed in canonical order, so this
  * is deterministic. Sources are de-duplicated and capped; they are never derived
  * from the results (that would be fabrication).
+ *
+ * Three states (PLAN-v2 P8). An answer anywhere wins over a lead elsewhere; a
+ * lead is header-only (`ai:lead`) and never gets an `AI:` line, because a lead
+ * by definition has no answer prose to show.
  */
-function pickAi(serps: readonly RawSerp[], summary: number): CompactAi | undefined {
+interface PickedAi {
+  state: AiState;
+  ai?: CompactAi;
+}
+
+/**
+ * Re-derive the honest state from the text — never trust the adapter alone.
+ *
+ * Two promises are enforced here for *every* input (including a hand-built
+ * `RawSerp` in a test or a third-party adapter): `ai:yes` means at least
+ * {@link AI_ANSWER_MIN_CHARS} characters, and an echo of the query is never an
+ * answer (V8.1/V8.2). An adapter that disagrees is downgraded to `lead`, which
+ * is a valid, non-fabricating outcome.
+ */
+function aiStateOf(candidate: AiSummary, query: string): AiState {
+  const declared = candidate.state;
+  if (declared === "none") return "none";
+  const text = collapse(candidate.text);
+  if (text === "") return declared === "answer" || declared === "lead" ? "lead" : "none";
+  if (text.toLowerCase() === collapse(query).toLowerCase()) return "lead";
+  if (text.length < AI_ANSWER_MIN_CHARS) return "lead";
+  return "answer";
+}
+
+function pickAi(serps: readonly RawSerp[], summary: number, query: string): PickedAi {
+  let lead = false;
   for (const serp of serps) {
     const candidate: AiSummary | undefined = serp.ai;
     if (!candidate) continue;
+    const state = aiStateOf(candidate, query);
+    if (state === "none") continue;
+    if (state === "lead") {
+      lead = true;
+      continue;
+    }
+
     const text = truncate(collapse(candidate.text), summary);
-    if (!text) continue;
+    if (!text) {
+      lead = true;
+      continue;
+    }
 
     const sources: string[] = [];
     for (const source of candidate.sources) {
@@ -279,9 +323,9 @@ function pickAi(serps: readonly RawSerp[], summary: number): CompactAi | undefin
       sources.push(clean);
       if (sources.length >= COMPACT_CAPS.maxAiSources) break;
     }
-    return { text, sources };
+    return { state: "answer", ai: { text, sources, state: "answer" } };
   }
-  return undefined;
+  return lead ? { state: "lead" } : { state: "none" };
 }
 
 function renderItem(item: CompactItem, index: number): string {
@@ -400,13 +444,18 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
     selected.push(...overflow.slice(0, opts.n - selected.length));
   }
 
-  const ai = pickAi(input, opts.summaryMaxChars);
+  const picked = pickAi(input, opts.summaryMaxChars, query);
+  const ai = picked.ai;
+  let aiState: AiState = picked.state;
   // "More on the page than we show": dedup-aware so a two-engine overlap does not
   // claim pagination that does not exist.
   const pageCarried = input.some((serp) => serp.pageCarried === true) || merged.size > opts.n;
 
-  const headerFor = (count: number, hasAi: boolean): string => {
-    const parts = [engineLabel, `${count} results`, `ai:${hasAi ? "yes" : "no"}`];
+  /** `ai:yes` is reserved for an answer; a lead says exactly that. */
+  const aiLabel = (state: AiState): string => (state === "answer" ? "yes" : state === "lead" ? "lead" : "no");
+
+  const headerFor = (count: number, state: AiState): string => {
+    const parts = [engineLabel, `${count} results`, `ai:${aiLabel(state)}`];
     const elapsed = formatElapsed(opts.elapsedMs);
     if (elapsed) parts.push(elapsed);
     if (opts.cached) parts.push("cached");
@@ -414,8 +463,8 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
     return parts.join(" · ");
   };
 
-  const render = (items: CompactItem[], summary: CompactAi | undefined): string => {
-    const head = [headerFor(items.length, summary !== undefined)];
+  const render = (items: CompactItem[], summary: CompactAi | undefined, state: AiState): string => {
+    const head = [headerFor(items.length, state)];
     if (summary) head.push(aiLine(summary));
     let text = head.join("\n");
     if (items.length > 0) text += `\n\n${items.map(renderItem).join("\n")}`;
@@ -446,8 +495,8 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
   const resultsFloor = floorBlockLen(selected.map((item) => toItem(item, fallbackCap)));
 
   // `headerFor(selected.length, …)` is the widest header still possible: dropping
-  // tail items only shortens the count, and "ai:yes"/"ai:no" are equal width.
-  const headerReserve = headerFor(selected.length, ai !== undefined).length + pageSuffixLen;
+  // tail items only shortens the count, and `ai:lead` (7) is the widest AI label.
+  const headerReserve = headerFor(selected.length, "lead").length + pageSuffixLen;
   const aiBudget = Math.max(
     0,
     Math.min(opts.summaryMaxChars, outputMaxChars - headerReserve - resultsFloor),
@@ -456,16 +505,19 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
   const fitted = fitAi(ai, aiBudget);
   let aiOut = fitted.ai;
   let truncated = fitted.cut;
+  // An answer that lost its space is not rendered, so the header must not claim
+  // it either — a `yes` with no line under it is the original bug.
+  if (aiOut === undefined) aiState = picked.state === "lead" ? "lead" : "none";
 
   let snippetCap = opts.snippetMaxChars;
   let shown = selected.map((item) => toItem(item, snippetCap));
-  let text = render(shown, aiOut);
+  let text = render(shown, aiOut, aiState);
 
   // Step 1: shrink every snippet to 100 before dropping any result.
   if (text.length > outputMaxChars && snippetCap > fallbackCap) {
     snippetCap = fallbackCap;
     shown = selected.map((item) => toItem(item, snippetCap));
-    text = render(shown, aiOut);
+    text = render(shown, aiOut, aiState);
     truncated = true;
   }
 
@@ -473,7 +525,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
   // itself did not fit, in which case the AI budget was already 0.
   while (text.length > outputMaxChars && shown.length > 0) {
     shown = shown.slice(0, -1);
-    text = render(shown, aiOut);
+    text = render(shown, aiOut, aiState);
     truncated = true;
   }
 
@@ -481,7 +533,8 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
   // fits), so this cuts prose — never a URL.
   if (text.length > outputMaxChars) {
     aiOut = undefined;
-    text = truncate(headerFor(0, false), outputMaxChars);
+    aiState = "none";
+    text = truncate(headerFor(0, "none"), outputMaxChars);
     truncated = true;
   }
 
@@ -496,12 +549,14 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
     chars: text.length,
     truncated,
   };
-  if (aiOut) data.ai = { text: aiOut.text, sources: [...aiOut.sources] };
+  if (aiOut) data.ai = { text: aiOut.text, sources: [...aiOut.sources], state: "answer" };
+  if (aiState === "lead") data.aiState = "lead";
   if (degraded) data.degraded = true;
   if (opts.cached) data.cached = true;
 
   const result: CompactResult = {
     engineLabel,
+    aiState,
     items,
     pageCarried,
     degraded,
