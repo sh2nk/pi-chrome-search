@@ -11,7 +11,9 @@
  *    is a title-level marker only, never the organic key.
  *  - Ads are served through Yandex redirect/counter hosts (`/an/count`,
  *    `/clck/jsredir`, `yabs.*`) and often (not always) carry a visible
- *    `Промо`/`Реклама` label in the card header. Both signals are checked.
+ *    `Промо`/`Реклама` label in the card header. Both signals are checked, and
+ *    the path fragments only count on a Yandex host: `example.com/clck/…` is a
+ *    legitimate third-party path, not an ad redirect.
  *  - The AI card is `Futuris*` (`FuturisSearch`, `FuturisSearchCard`,
  *    `FuturisContentSection`). `data-fast-name="neuro_answer"` appears in some
  *    captures only, so it is a bonus signal, never the contract.
@@ -88,7 +90,7 @@ const INTERACTION: EngineInteraction = Object.freeze({
  * robot gate on perfectly normal SERPs (both AI fixtures contain it), so it is a
  * soft gate on one block, not a page wall.
  */
-const CAPTCHA_URL_MARKERS: readonly string[] = Object.freeze(["/showcaptcha"]);
+const CAPTCHA_URL_MARKERS: readonly string[] = Object.freeze(["/showcaptcha", "captcha.yandex"]);
 const CAPTCHA_TEXT_MARKERS: readonly string[] = Object.freeze([
   "SmartCaptcha",
   "Я не робот",
@@ -103,7 +105,14 @@ const BLOCKED_TEXT_MARKERS: readonly string[] = Object.freeze([
   "Запрос заблокирован",
 ]);
 
+/**
+ * A captcha widget in the DOM. This is what separates a real wall from a SERP
+ * whose snippet merely quotes "SmartCaptcha" or "Я не робот".
+ */
+const CAPTCHA_NODE_SELECTOR = '.SmartCaptcha, [class*="SmartCaptcha"]';
+
 const ORGANIC_COUNT_EXPRESSION = 'document.querySelectorAll(".OrganicTitle").length';
+const CAPTCHA_NODE_EXPRESSION = `document.querySelectorAll(${JSON.stringify(CAPTCHA_NODE_SELECTOR)}).length`;
 
 // ---------------------------------------------------------------------------
 // In-page extraction (must stay self-contained: no imports, no closures)
@@ -193,13 +202,21 @@ export function extractFromDocument(doc: Document, arg: YandexExtractionArg): Ya
     "sca_esv",
     "sxsrf",
   ];
-  const AD_HREF_FRAGMENTS = ["jsredir", "/clck/", "/an/count", "yabs."];
+  const AD_HREF_PATHS = ["jsredir", "/clck/", "/an/count"];
+  /** Yandex ad counter family: `yabs.yandex.ru`, `yabs.yandex.com`, … */
+  const AD_HOST_PREFIX = "yabs.";
   const AD_LABELS = ["промо", "реклама", "sponsored", "advertisement"];
   const AI_HEADER_HINTS = ["быстрый ответ", "нейро", "алиса ai"];
+  /**
+   * Answer-body candidates, most specific first. `[class*="FuturisContent"]` is
+   * deliberately absent: on a teaser card it matches the whole card, which used
+   * to ship the promo line as an answer. `FuturisAnswer` is the newer name seen
+   * in some builds; the other two are the captured ones.
+   */
   const AI_CONTENT_SELECTORS = [
     '[class*="FuturisContentSection"]',
     '[class*="FuturisGPTMessage"]',
-    '[class*="FuturisContent"]',
+    '[class*="FuturisAnswer"]',
   ];
   const LABEL_LINES = [
     "содержимое ответа",
@@ -253,13 +270,38 @@ export function extractFromDocument(doc: Document, arg: YandexExtractionArg): Ya
   const looksLikeHost = (value: string): boolean =>
     /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:\/.*)?$/i.test(value) && value.indexOf(" ") === -1;
 
+  /**
+   * Yandex's own hosts. Used twice: visible domain text in the AI card is chrome
+   * (share/Alice links), never a source; and the ad path fragments below only
+   * mean "ad" on these hosts.
+   */
   const isYandexHost = (host: string): boolean =>
     host === "ya.ru" || host === "yandex.ru" || /(^|\.)yandex\.[a-z.]{2,}$/.test(host);
 
+  /** Host of a visible domain line like `banki.ru` or `yandex.ru/alice`. */
+  const hostOfText = (text: string): string =>
+    hostOf(text.indexOf("://") === -1 ? `https://${text}` : text);
+
+  /**
+   * Yandex serves ads through redirect/counter URLs on its own hosts, so the
+   * path fragments are checked only after the host check. Matching them
+   * anywhere would drop a legitimate `https://example.com/clck/…` result.
+   */
   const isAdHref = (href: string): boolean => {
-    const lower = href.toLowerCase();
-    for (const fragment of AD_HREF_FRAGMENTS) {
-      if (lower.indexOf(fragment) !== -1) return true;
+    const trimmed = href.trim();
+    if (trimmed === "") return false;
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed, base === "" ? undefined : base);
+    } catch {
+      return false;
+    }
+    const host = hostOf(parsed.href);
+    if (host.indexOf(AD_HOST_PREFIX) === 0) return true;
+    if (!isYandexHost(host)) return false;
+    const path = (parsed.pathname + parsed.search).toLowerCase();
+    for (const fragment of AD_HREF_PATHS) {
+      if (path.indexOf(fragment) !== -1) return true;
     }
     return false;
   };
@@ -360,7 +402,10 @@ export function extractFromDocument(doc: Document, arg: YandexExtractionArg): Ya
     for (const node of Array.from(card.querySelectorAll("*"))) {
       if (node.children.length > 0) continue;
       const text = normalize(node.textContent);
-      if (looksLikeHost(text)) push(text);
+      if (!looksLikeHost(text)) continue;
+      // A Yandex host line is the card's own chrome, not a cited source.
+      if (isYandexHost(hostOfText(text))) continue;
+      push(text);
     }
     for (const anchor of Array.from(card.querySelectorAll("a[href]"))) {
       const href = anchor.getAttribute("href");
@@ -401,16 +446,36 @@ export function extractFromDocument(doc: Document, arg: YandexExtractionArg): Ya
     return normalize(card.textContent).toLowerCase().indexOf("мы скрыли ответ") !== -1;
   };
 
-  const findAnswerRoot = (card: Element): Element | null => {
+  /**
+   * `.FuturisContentSection-Label` contains the `FuturisContentSection` prefix
+   * and sits before the answer inside the card. Taking it would leave only a
+   * label line, which `answerText` then drops — and a real answer would vanish.
+   */
+  const isLabelNode = (node: Element): boolean =>
+    /-label(?:$|[\s_])/i.test(node.getAttribute("class") ?? "");
+
+  /**
+   * The answer body, or null when the card carries chrome only (header, promo
+   * teaser, robot-gate controls).
+   *
+   * There is deliberately **no fallback to the whole card**: a teaser says
+   * "Задайте вопрос Алисе…" and shipping that as `ai.text` would be a fabricated
+   * answer. No answer node means `ai:no`, which is a valid A/B outcome.
+   */
+  const findAnswerRoot = (card: Element, header: Element): Element | null => {
     for (const selector of AI_CONTENT_SELECTORS) {
       for (const node of Array.from(card.querySelectorAll(selector))) {
-        if (normalize(node.textContent) === "") continue;
-        // A wrapper that only holds the label is not the answer.
-        if (node.querySelector("h3") !== null && normalize(node.textContent).length < 60) continue;
+        if (isLabelNode(node)) continue;
+        // A wrapper that owns the heading is chrome, not the answer body.
+        if (node === header || node.contains(header)) continue;
+        const text = normalize(node.textContent);
+        if (text === "") continue;
+        // A wrapper that only holds the label/heading is not the answer.
+        if (node.querySelector("h3") !== null && text.length < 60) continue;
         return node;
       }
     }
-    return normalize(card.textContent) === "" ? null : card;
+    return null;
   };
 
   // A body with no text is a blank/odd page: return an honest empty SERP, never throw.
@@ -465,7 +530,7 @@ export function extractFromDocument(doc: Document, arg: YandexExtractionArg): Ya
     if (header !== null) {
       const card = header.closest('[class*="FuturisSearchCard"]') ?? header.closest('[class*="Futuris"]') ?? header.parentElement;
       if (card !== null && !isRobotGated(card)) {
-        const answerRoot = findAnswerRoot(card);
+        const answerRoot = findAnswerRoot(card, header);
         const text = answerRoot === null ? "" : answerText(answerRoot, header);
         // No answer text means a teaser/promo card: return nothing, never fabricate.
         if (text !== "") ai = { text, sources: collectSources(card) };
@@ -527,6 +592,12 @@ export interface YandexExpandOptions {
 
 /**
  * Click "Показать полностью" at most once, only when the caller opted in.
+ *
+ * FUTURE HOOK, not wired: nothing in `src/` calls this yet (no tool/reflex
+ * option exists for it). It is kept because the click is the only way to get a
+ * collapsed answer, and it is exported so a later opt-in can reuse it without
+ * touching the extractor. Until then this is dead production code with a
+ * default-off contract, which is why the `enabled` check is the first statement.
  *
  * The click is a point click on the real control (no DOM mutation, no generated
  * selector), and the wait is bounded. Returns `true` only when a click happened,
@@ -679,9 +750,20 @@ async function organicCount(page: CdpPage): Promise<number> {
   return typeof count === "number" && Number.isFinite(count) ? count : 0;
 }
 
+async function captchaNodeCount(page: CdpPage): Promise<number> {
+  const count = await page.evaluate<unknown>(CAPTCHA_NODE_EXPRESSION);
+  return typeof count === "number" && Number.isFinite(count) ? count : 0;
+}
+
 /**
  * Wall detection, text-first so it survives class-name churn. Markers are the
  * exact constants that matched, for artifacts and doctor output.
+ *
+ * Text markers alone are **not** enough for a captcha: a normal SERP snippet can
+ * quote "SmartCaptcha" or "Я не робот". The text counts only together with URL
+ * evidence (`/showcaptcha`, `captcha.yandex`), a captcha widget in the DOM, or a
+ * page with zero `.OrganicTitle` — the same corroboration the `blocked` rule
+ * uses. Nobody clicks anything here.
  */
 export async function detectYandexWall(page: CdpPage): Promise<Wall | null> {
   const url = page.url();
@@ -689,21 +771,38 @@ export async function detectYandexWall(page: CdpPage): Promise<Wall | null> {
   const loweredUrl = url.toLowerCase();
   const loweredText = text.toLowerCase();
 
-  const captchaMarkers: string[] = [];
+  const captchaUrlMarkers: string[] = [];
   for (const marker of CAPTCHA_URL_MARKERS) {
-    if (loweredUrl.indexOf(marker.toLowerCase()) !== -1) captchaMarkers.push(marker);
+    if (loweredUrl.indexOf(marker.toLowerCase()) !== -1) captchaUrlMarkers.push(marker);
   }
+  const captchaTextMarkers: string[] = [];
   for (const marker of CAPTCHA_TEXT_MARKERS) {
-    if (loweredText.indexOf(marker.toLowerCase()) !== -1) captchaMarkers.push(marker);
+    if (loweredText.indexOf(marker.toLowerCase()) !== -1) captchaTextMarkers.push(marker);
   }
-  if (captchaMarkers.length > 0) return { kind: "captcha", url, markers: captchaMarkers };
+  const captchaMarkers = [...captchaUrlMarkers, ...captchaTextMarkers];
+
+  // The organic count is needed by both rules; evaluate it at most once.
+  let organicTotal: number | null = null;
+  const organics = async (): Promise<number> => {
+    if (organicTotal === null) organicTotal = await organicCount(page);
+    return organicTotal;
+  };
+
+  if (captchaUrlMarkers.length > 0) {
+    return { kind: "captcha", url, markers: captchaMarkers };
+  }
+  if (captchaTextMarkers.length > 0) {
+    if ((await captchaNodeCount(page)) > 0 || (await organics()) === 0) {
+      return { kind: "captcha", url, markers: captchaMarkers };
+    }
+  }
 
   const blockedMarkers: string[] = [];
   for (const marker of BLOCKED_TEXT_MARKERS) {
     if (loweredText.indexOf(marker.toLowerCase()) !== -1) blockedMarkers.push(marker);
   }
   // A snippet can contain "нет доступа"; a real block page has no organics at all.
-  if (blockedMarkers.length > 0 && (await organicCount(page)) === 0) {
+  if (blockedMarkers.length > 0 && (await organics()) === 0) {
     return { kind: "blocked", url, markers: blockedMarkers };
   }
 

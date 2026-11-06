@@ -202,6 +202,30 @@ test("settle propagates abort as E_CANCELLED", async () => {
   );
 });
 
+test("settle resolves on the captcha and empty states through the pinned selector", async () => {
+  // Every branch of YANDEX_READY_SELECTOR is a settled page that must not burn
+  // E_TIMEOUT: the wall (post-retry re-settle) and the zero-result SERP.
+  const cases = [
+    { name: "yandex-captcha", url: CAPTCHA_URL, branch: ".SmartCaptcha" },
+    { name: "yandex-empty", url: SERP_URL, branch: ".Misspell" },
+  ] as const;
+
+  for (const { name, url, branch } of cases) {
+    const fixture = loadFixture(name);
+    const doc = fixtureDocument(fixture.html, url);
+    // Pin the selector itself: mutating YANDEX_READY_SELECTOR fails here first.
+    assert.ok(
+      doc.querySelector(YANDEX_READY_SELECTOR) !== null,
+      `${name} has no node matching ${YANDEX_READY_SELECTOR}`,
+    );
+    assert.ok(doc.querySelector(branch) !== null, `${name} lost the ${branch} branch`);
+
+    const page = pageFor(doc, url);
+    await settleYandex(page, { clock: new FakeClock(), deadlineMs: 500, pollMs: 10 });
+    assert.equal(page.evaluateCalls().length, 1, `${name} must settle on the first check`);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // detectWall
 // ---------------------------------------------------------------------------
@@ -244,6 +268,57 @@ test("detectWall reports a blocked page only when no organics are present", asyn
   ].join("");
   const serp = pageFor(fixtureDocument(serpHtml, SERP_URL), SERP_URL);
   assert.equal(await yandexEngine.detectWall(serp), null);
+});
+
+test("detectWall: captcha words in an ordinary snippet are not a wall", async () => {
+  const html = [
+    "<html><body>",
+    "<p>Обзор: SmartCaptcha и «Я не робот» — как устроена защита</p>",
+    '<div class="Organic"><div class="OrganicTitle">',
+    '<a href="https://example.com/a">Статья о капче</a></div>',
+    '<span class="OrganicTextContentSpan">похожи на автоматические запросы</span></div>',
+    "</body></html>",
+  ].join("");
+  const page = pageFor(fixtureDocument(html, SERP_URL), SERP_URL);
+  // Text markers match, but the URL is a SERP, there is no widget and organics exist.
+  assert.equal(await yandexEngine.detectWall(page), null);
+});
+
+test("detectWall: captcha text plus a widget or zero organics is a wall", async () => {
+  // Corroboration #1: the real SmartCaptcha widget is in the DOM.
+  const widgetHtml = [
+    "<html><body>",
+    '<div class="SmartCaptcha"><span>Я не робот</span></div>',
+    '<div class="Organic"><div class="OrganicTitle">',
+    '<a href="https://example.com/a">Обычный результат</a></div></div>',
+    "</body></html>",
+  ].join("");
+  const widget = pageFor(fixtureDocument(widgetHtml, SERP_URL), SERP_URL);
+  const widgetWall = await yandexEngine.detectWall(widget);
+  assert.ok(widgetWall !== null);
+  assert.equal(widgetWall.kind, "captcha");
+  assert.ok(widgetWall.markers.includes("Я не робот"));
+
+  // Corroboration #2: zero `.OrganicTitle` — the page has no normal results.
+  const bareHtml = "<html><body><p>Подтвердите, что запросы отправляли вы</p></body></html>";
+  const bare = pageFor(fixtureDocument(bareHtml, SERP_URL), SERP_URL);
+  const bareWall = await yandexEngine.detectWall(bare);
+  assert.ok(bareWall !== null);
+  assert.equal(bareWall.kind, "captcha");
+  assert.ok(bareWall.markers.includes("Подтвердите, что запросы отправляли вы"));
+
+  // URL evidence alone is enough, even with organics on the page.
+  const urlHtml = [
+    "<html><body>",
+    '<div class="Organic"><div class="OrganicTitle">',
+    '<a href="https://example.com/a">Результат</a></div></div>',
+    "</body></html>",
+  ].join("");
+  const urlPage = pageFor(fixtureDocument(urlHtml, CAPTCHA_URL), CAPTCHA_URL);
+  const urlWall = await yandexEngine.detectWall(urlPage);
+  assert.ok(urlWall !== null);
+  assert.equal(urlWall.kind, "captcha");
+  assert.ok(urlWall.markers.includes("/showcaptcha"));
 });
 
 // ---------------------------------------------------------------------------
@@ -322,6 +397,9 @@ test("extract: jsredir, Yandex ad redirects, promo labels and tracking params", 
     '<a href="https://yandex.ru/an/count/abc">Ad two</a>',
     "</div></div>",
     '<div class="Organic"><div class="OrganicTitle">',
+    '<a href="https://yabs.yandex.ru/count/abc">Ad counter host</a>',
+    "</div></div>",
+    '<div class="Organic"><div class="OrganicTitle">',
     '<a href="https://example.org/labelled">Labelled promo</a>',
     '</div><div class="OrganicHeader-Subtitle"><span>Промо</span></div></div>',
     '<div class="Organic"><div class="OrganicTitle">',
@@ -332,14 +410,24 @@ test("extract: jsredir, Yandex ad redirects, promo labels and tracking params", 
     '<a href="https://example.info/doc?utm_source=ya&amp;from=serp&amp;q=rust">',
     '<span class="OrganicTitleContentSpan">Tracked result</span></a>',
     "</div></div>",
+    // The ad fragments only count on Yandex hosts: these are legit third-party paths.
+    '<div class="Organic"><div class="OrganicTitle">',
+    '<a href="https://example.com/clck/legit-path">Clck path result</a></div></div>',
+    '<div class="Organic"><div class="OrganicTitle">',
+    '<a href="https://example.com/an/count-report">Count path result</a></div></div>',
     "</body></html>",
   ].join("");
   const out = extractFrom(html, SERP_URL, { n: 10, summary: false, query: "q" });
-  assert.equal(out.results.length, 2);
-  assert.equal(out.results[0].title, "Real result");
+  assert.equal(out.results.length, 4);
+  assert.deepEqual(
+    Array.from(out.results, (item) => item.title),
+    ["Real result", "Tracked result", "Clck path result", "Count path result"],
+  );
   assert.equal(out.results[0].url, "https://example.net/page?id=7");
   assert.equal(out.results[0].snippet, "real snippet");
   assert.equal(out.results[1].url, "https://example.info/doc?q=rust");
+  assert.equal(out.results[2].url, "https://example.com/clck/legit-path");
+  assert.equal(out.results[3].url, "https://example.com/an/count-report");
 });
 
 test("extract: a real Futuris answer is cleaned (label, button, bare domains) with sources", () => {
@@ -374,6 +462,64 @@ test("extract: a real Futuris answer is cleaned (label, button, bare domains) wi
   assert.ok(out.ai.sources.includes("example.com"));
   assert.ok(out.ai.sources.includes("docs.example.org"));
   for (const source of out.ai.sources) assert.equal(source.includes(" "), false);
+});
+
+test("extract: a prose-only AI teaser is not reported as an answer", () => {
+  // The exact teaser shape: heading + promo sentence, no answer body. The old
+  // whole-card fallback shipped "Задайте вопрос Алисе…" as ai.text.
+  const html = [
+    "<html><body>",
+    '<div class="Organic"><div class="OrganicTitle">',
+    '<a href="https://example.com/one">Органический результат</a></div></div>',
+    '<div class="FuturisSearch FuturisSearchCard" data-fast-name="neuro_answer">',
+    '<div class="FuturisSearchCard-Content">',
+    '<h3 class="FuturisInlineHeader-Title">Быстрый ответ Алисы AI</h3>',
+    // The body is wrapped in the old broad `[class*="FuturisContent"]` class: that
+    // selector is no longer a candidate, because on a teaser it is just chrome.
+    '<div class="FuturisContent"><p>Задайте вопрос Алисе…</p></div>',
+    "</div></div>",
+    "</body></html>",
+  ].join("");
+
+  const out = extractFrom(html, SERP_URL, { n: 5, summary: true, query: "q" });
+  assert.equal(out.ai, undefined, "teaser prose must never become ai.text");
+  assert.equal(out.results.length, 1);
+});
+
+test("extract: a -Label sibling before the answer does not hide the answer", () => {
+  // `[class*="FuturisContentSection"]` also matches `.FuturisContentSection-Label`.
+  // Picking the label first would filter every line away and lose the real answer.
+  const html = [
+    "<html><body>",
+    '<div class="FuturisSearch FuturisSearchCard">',
+    '<h3 class="FuturisInlineHeader-Title">Быстрый ответ Алисы AI</h3>',
+    '<div class="FuturisContentSection-Label">Содержимое ответа</div>',
+    '<div class="FuturisContentSection"><p>Текст настоящего ответа.</p></div>',
+    "</div></body></html>",
+  ].join("");
+
+  const out = extractFrom(html, SERP_URL, { n: 5, summary: true, query: "q" });
+  assert.ok(out.ai !== undefined, "the label sibling must not shadow the answer");
+  assert.equal(out.ai.text, "Текст настоящего ответа.");
+});
+
+test("extract: Yandex's own links never become AI sources", () => {
+  const html = [
+    "<html><body>",
+    '<div class="FuturisSearch FuturisSearchCard">',
+    '<h3 class="FuturisInlineHeader-Title">Быстрый ответ Алисы AI</h3>',
+    '<div class="FuturisContentSection"><p>Короткий ответ на вопрос.</p></div>',
+    '<div class="FuturisContentSection-Sources">',
+    '<a href="https://yandex.ru/support/search/ru/alica">Яндекс</a>',
+    '<a href="https://ya.ru/images">ya.ru</a>',
+    '<a href="https://example.com/a">example.com</a>',
+    "</div></div></body></html>",
+  ].join("");
+
+  const out = extractFrom(html, SERP_URL, { n: 5, summary: true, query: "q" });
+  assert.ok(out.ai !== undefined);
+  // Yandex chrome (owner links, ya.ru) is filtered by host, not by anchor text.
+  assert.deepEqual(Array.from(out.ai.sources), ["example.com"]);
 });
 
 test("extract: summary=false never runs the AI path; a gated card stays gated", () => {
