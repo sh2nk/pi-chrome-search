@@ -108,6 +108,8 @@ class StubEngine implements Engine {
   readonly urls: string[] = [];
   settles = 0;
   wallsChecked = 0;
+  /** Forced wall for the settle-failure path; undefined means "use #walls". */
+  wallOnDetect?: Wall;
   extracts = 0;
 
   readonly #results: SerpItem[];
@@ -142,6 +144,7 @@ class StubEngine implements Engine {
   }
 
   async detectWall(_page: CdpPage): Promise<Wall | null> {
+    if (this.wallOnDetect !== undefined) return this.wallOnDetect;
     if (this.#walls.length === 0) {
       this.wallsChecked += 1;
       return null;
@@ -1327,4 +1330,40 @@ test("a failing /goto fetch keeps the wrapper and never becomes a search failure
 
   const result = expectSuccess(await run(harness, { q: "wrapper query", n: 5 }));
   assert.match(result.content.map((block) => block.text).join(""), /google\.com\/goto/);
+});
+
+// ---------------------------------------------------------------------------
+// Settle failures on a wall page must become E_WALL, not E_TIMEOUT
+// ---------------------------------------------------------------------------
+
+const SETTLE_WALL: Wall = { kind: "captcha", url: "https://google.example.test/sorry", markers: ["captcha"] };
+
+test("a settle timeout on a wall page is reported as E_WALL with an artifact", async () => {
+  // Real wall pages (/sorry, a captcha, consent) do not carry the adapter's
+  // result containers, so settle times out. Before this, the tool returned
+  // E_TIMEOUT — which is not fallbackable — and the user saw a timeout on a
+  // page that clearly asked for a human.
+  const engine = new StubEngine({
+    id: "google",
+    settleError: fail("E_TIMEOUT", "settle", { engine: "google" }),
+  });
+  engine.wallOnDetect = SETTLE_WALL;
+  const harness = makeHarness({ engines: [engine] });
+
+  const failure = expectFailure(await run(harness, { q: "wall query", n: 5 }));
+  assert.equal(failure.details.code, "E_WALL");
+  assert.equal(failure.details.wall, "captcha");
+  assert.equal(harness.saved.length, 1, "the wall snapshot must be written once");
+});
+
+test("a settle timeout without a wall stays E_TIMEOUT and writes no artifact", async () => {
+  const engine = new StubEngine({
+    id: "google",
+    settleError: fail("E_TIMEOUT", "settle", { engine: "google" }),
+  });
+  const harness = makeHarness({ engines: [engine] });
+
+  const failure = expectFailure(await run(harness, { q: "slow query", n: 5 }));
+  assert.equal(failure.details.code, "E_TIMEOUT");
+  assert.equal(harness.saved.length, 0);
 });

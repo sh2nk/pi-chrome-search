@@ -713,6 +713,42 @@ async function runEngine(
   const interaction = engine.interaction;
   const useHuman = interaction !== undefined && (firstInSession || deps.config.humanize === "always");
 
+  /**
+   * A wall page often does not satisfy the adapter's "results are ready" gate
+   * (`/sorry`, a captcha, a consent interstitial), so settle fails with
+   * `E_TIMEOUT`/`E_PARSE` before `detectWall` ever runs. Asking the adapter one
+   * more question turns that into the honest `E_WALL` plus a snapshot instead of
+   * an unexplainable timeout (and `E_TIMEOUT` is not a fallbackable code).
+   */
+  const wallOnNavigationFailure = async (
+    failure: FailureDetails,
+  ): Promise<Wall | null> => {
+    if (failure.code !== "E_TIMEOUT" && failure.code !== "E_PARSE") return null;
+    try {
+      return await engine.detectWall(page);
+    } catch {
+      return null;
+    }
+  };
+
+  /** One artifact for the wall the caller actually sees, then surface and fail. */
+  const reportWall = async (wall: Wall, retried: boolean): Promise<never> => {
+    const artifact = await saveArtifact(deps, {
+      code: "E_WALL",
+      stage: "navigate",
+      engine: engine.id,
+      url: page.url(),
+      query: query.text,
+      page,
+      extra: {
+        wall: { kind: wall.kind, url: wall.url, markers: [...wall.markers] },
+        ...(retried ? { retried: true } : {}),
+      },
+    });
+    await surface(page);
+    throw wallFailure(engine.id, wall, artifact);
+  };
+
   if (useHuman && interaction !== undefined) {
     try {
       await humanSearch({
@@ -732,10 +768,20 @@ async function runEngine(
         ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
-      throw asFailure(error, "navigate", engine.id, signal);
+      const failure = asFailure(error, "navigate", engine.id, signal);
+      const wall = await wallOnNavigationFailure(failure.details);
+      if (wall !== null) await reportWall(wall, false);
+      throw failure;
     }
   } else {
-    await navigateAndSettle(page, engine, query, signal);
+    try {
+      await navigateAndSettle(page, engine, query, signal);
+    } catch (error) {
+      const failure = asFailure(error, "navigate", engine.id, signal);
+      const wall = await wallOnNavigationFailure(failure.details);
+      if (wall !== null) await reportWall(wall, false);
+      throw failure;
+    }
   }
 
   let wall: Wall | null;
@@ -783,22 +829,9 @@ async function runEngine(
     }
 
     if (wall !== null) {
-      // One artifact for the wall the caller actually sees: capturing before the
-      // retry would leave an orphan directory when the retry clears it.
-      const artifact = await saveArtifact(deps, {
-        code: "E_WALL",
-        stage: "navigate",
-        engine: engine.id,
-        url: page.url(),
-        query: query.text,
-        page,
-        extra: {
-          wall: { kind: wall.kind, url: wall.url, markers: [...wall.markers] },
-          ...(retried ? { retried: true } : {}),
-        },
-      });
-      await surface(page);
-      throw wallFailure(engine.id, wall, artifact);
+      // Capturing before the retry would leave an orphan directory when the
+      // retry clears it, so the snapshot happens once, here.
+      await reportWall(wall, retried);
     }
   }
 
