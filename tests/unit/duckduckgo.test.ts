@@ -117,6 +117,33 @@ test("buildUrl derives kl from region+lang", () => {
   );
 });
 
+test("buildUrl passes a complete region-lang pair through verbatim (config kl lives in Query.region)", () => {
+  const build = duckduckgoEngine.buildUrl;
+
+  // The tool layer copies `engines.duckduckgo.kl` ("ru-ru") into Query.region;
+  // self-pairing it would produce the invalid `kl=ru-ru-ru-ru`.
+  assert.equal(
+    build(query({ text: "test", region: "ru-ru" })),
+    "https://duckduckgo.com/?q=test&kl=ru-ru",
+  );
+  assert.equal(
+    build(query({ text: "test", region: "ru-ru", lang: "ru" })),
+    "https://duckduckgo.com/?q=test&kl=ru-ru",
+  );
+  // A complete pair wins over a conflicting lang, because the pair is what the
+  // user configured and DDG accepts exactly one pair.
+  assert.equal(
+    build(query({ text: "test", region: "ru-ru", lang: "en" })),
+    "https://duckduckgo.com/?q=test&kl=ru-ru",
+  );
+  // "auto"/absent still means "no region preference".
+  assert.equal(
+    build(query({ text: "test", region: "auto" })),
+    "https://duckduckgo.com/?q=test&kl=wt-wt",
+  );
+  assert.equal(build(query({ text: "test" })), "https://duckduckgo.com/?q=test&kl=wt-wt");
+});
+
 test("buildUrl percent-encodes the query (not form-encoded with +)", () => {
   const url = duckduckgoEngine.buildUrl(query({ text: "a b&c=d#e/ru", n: 5 }));
   assert.equal(url, "https://duckduckgo.com/?q=a%20b%26c%3Dd%23e%2Fru&kl=wt-wt");
@@ -227,6 +254,71 @@ test("settle propagates an abort as E_CANCELLED without sleeping", async () => {
   const engine = createDuckDuckGoEngine({ clock, deadlineMs: 1_000, pollMs: 100 });
   await assert.rejects(engine.settle(page, controller.signal), rejectsWithCode("E_CANCELLED"));
   assert.equal(clock.totalSleptMs(), 0);
+});
+
+const CHALLENGE_TEXT =
+  "Unfortunately, bots use DuckDuckGo too. Please complete the following challenge to confirm this search was made by a human.";
+
+test("settle returns on a DDG challenge page instead of burning the deadline", async () => {
+  const clock = new FakeClock();
+  // First probe still looks like the brand-only home page, the second one is the
+  // anomaly page. Without the wall branch this settles only at the deadline and
+  // the tool reports E_TIMEOUT instead of E_WALL.
+  let reads = 0;
+  const page = new FakePage({
+    url: SERP_URL,
+    text: () => (reads++ === 0 ? "DuckDuckGo" : CHALLENGE_TEXT),
+    evaluate: () => 0,
+  });
+
+  const engine = createDuckDuckGoEngine({ clock, deadlineMs: 2_400, pollMs: 80, rng: () => 0.5 });
+  await engine.settle(page);
+
+  assert.equal(clock.totalSleptMs(), 80, "one poll, not the whole deadline");
+  const wall = await engine.detectWall(page);
+  assert.ok(wall);
+  assert.equal(wall.kind, "captcha");
+  assert.deepEqual(wall.markers, [
+    "Unfortunately, bots use DuckDuckGo too",
+    "Please complete the following challenge",
+  ]);
+});
+
+test("settle recognises the anomaly URL and the weak traffic marker too", async () => {
+  const clock = new FakeClock();
+
+  const anomalyUrl = new FakePage({
+    url: "https://duckduckgo.com/anomaly/",
+    text: "DuckDuckGo",
+    evaluate: () => 0,
+  });
+  await createDuckDuckGoEngine({ clock, deadlineMs: 2_400, pollMs: 80 }).settle(anomalyUrl);
+  assert.equal(clock.totalSleptMs(), 0, "a matching anomaly URL is terminal");
+  const blocked = await duckduckgoEngine.detectWall(anomalyUrl);
+  assert.ok(blocked);
+  assert.equal(blocked.kind, "blocked");
+  assert.deepEqual(blocked.markers, ["url:/anomaly/"]);
+
+  // Weak marker + zero anchors is the same rule detectWall applies; a query
+  // *about* unusual traffic has anchors and therefore settles as a normal SERP.
+  const weak = new FakePage({
+    url: SERP_URL,
+    text: "DuckDuckGo: we detected unusual traffic from your network",
+    evaluate: () => 0,
+  });
+  await duckduckgoEngine.settle(weak);
+  const weakWall = await duckduckgoEngine.detectWall(weak);
+  assert.ok(weakWall);
+  assert.equal(weakWall.kind, "blocked");
+  assert.deepEqual(weakWall.markers, ["unusual traffic"]);
+
+  const normal = new FakePage({
+    url: SERP_URL,
+    text: "DuckDuckGo unusual traffic explained",
+    evaluate: () => 1,
+  });
+  await duckduckgoEngine.settle(normal);
+  assert.equal(await duckduckgoEngine.detectWall(normal), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -357,6 +449,47 @@ test("extract skips ads, unwraps /l/?uddg links, and keeps n counting organics o
   assert.equal(serp.pageCarried, false);
 });
 
+test("extract skips an ad wrapper that IS the result container", () => {
+  // `<div data-result="ad"><a .../></div>` has no `article` ancestor, so the
+  // container is the ad wrapper itself; a descendant-only query cannot see it.
+  const html = `<!doctype html><html><body>
+    <div data-result="ad">
+      <a data-testid="result-title-a" href="https://ads.example/wrapped">Wrapped ad</a>
+    </div>
+    <article data-testid="result">
+      <a data-testid="result-title-a" href="https://ok.example/a">Organic result</a>
+      <div data-result="snippet">A real snippet, long enough to be plausible.</div>
+    </article>
+  </body></html>`;
+
+  const serp = extract(fixtureDocument(html, SERP_URL), { n: 10, summary: false, query: "x" });
+  assert.deepEqual(Array.from(serp.results, (result) => result.title), ["Organic result"]);
+  assert.equal(serp.pageCarried, false);
+});
+
+test("extract skips every supported result-badge label and keeps unrelated badges", () => {
+  const variants = ["Ad", "Реклама", "Sponsored"];
+  const articles = variants
+    .map(
+      (label, index) => `<article data-testid="result">
+        <a data-testid="result-title-a" href="https://badge${index}.example/x">Badged ${index}</a>
+        <span data-testid="result-badge">${label}</span>
+        <div data-result="snippet">Paid placement, must be skipped.</div>
+      </article>`,
+    )
+    .join("");
+  const html = `<!doctype html><html><body>${articles}
+    <article data-testid="result">
+      <a data-testid="result-title-a" href="https://keep.example/x">Organic kept</a>
+      <span data-testid="result-badge">Site</span>
+      <div data-result="snippet">An organic result with an unrelated badge.</div>
+    </article>
+  </body></html>`;
+
+  const serp = extract(fixtureDocument(html, SERP_URL), { n: 10, summary: false, query: "x" });
+  assert.deepEqual(Array.from(serp.results, (result) => result.title), ["Organic kept"]);
+});
+
 test("extract on the empty fixture returns zero results without crashing", () => {
   const doc = fixtureDocumentFor("ddg-empty");
   const serp = extract(doc, { n: 10, summary: true, query: "example" });
@@ -398,6 +531,39 @@ test("extract never fabricates AI from a toggle-only assist block", () => {
   const doc = fixtureDocument(html, SERP_URL);
   const serp = extract(doc, { n: 5, summary: true, query: "example" });
   assert.equal(serp.ai, undefined);
+});
+
+test("extract never emits assist UI controls as the answer", () => {
+  const labelsOnly = `<html><body>
+    <div data-testid="duckassist-answer-content">
+      <span>Search Assist</span><button>Остановить</button><button>Продолжить</button>
+    </div>
+  </body></html>`;
+  const none = extract(fixtureDocument(labelsOnly, SERP_URL), { n: 5, summary: true, query: "x" });
+  assert.equal(none.ai, undefined, "labels are not prose");
+
+  const withProse = `<html><body>
+    <div data-testid="duckassist-answer-content">
+      <p>Photovoltaic cells turn sunlight into electricity.</p>
+      <button>Остановить</button><button>Продолжить</button><button>More</button>
+    </div>
+  </body></html>`;
+  const prose = extract(fixtureDocument(withProse, SERP_URL), { n: 5, summary: true, query: "x" });
+  assert.ok(prose.ai);
+  assert.equal(prose.ai.text, "Photovoltaic cells turn sunlight into electricity.");
+});
+
+test("extract drops a nested ad from the assist block before taking its text", () => {
+  const html = `<html><body>
+    <div data-testid="duckassist-answer-content">
+      <p>A real answer with enough words to be prose.</p>
+      <div data-result="ad"><p>Sponsored text that is not an answer.</p></div>
+    </div>
+  </body></html>`;
+  const serp = extract(fixtureDocument(html, SERP_URL), { n: 5, summary: true, query: "x" });
+  assert.ok(serp.ai);
+  assert.equal(serp.ai.text, "A real answer with enough words to be prose.");
+  assert.ok(!serp.ai.text.includes("Sponsored"));
 });
 
 test("extract ignores the assist block entirely when summary=false", () => {

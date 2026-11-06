@@ -21,9 +21,10 @@
  */
 
 import type { CdpPage } from "../cdp/types.ts";
-import { waitForMarker } from "../cdp/humanize.ts";
+import { systemClock } from "../runtime/clock.ts";
+import { WebSearchError } from "../runtime/error-codes.ts";
 import type { Clock } from "../runtime/types.ts";
-import { fail } from "../runtime/errors.ts";
+import { fail, toFailure } from "../runtime/errors.ts";
 import type {
   AiSummary,
   Engine,
@@ -74,6 +75,21 @@ const ANOMALY_MARKER = "Unfortunately, bots use DuckDuckGo too";
 const CAPTCHA_MARKER = "Please complete the following challenge";
 const WEAK_BLOCK_MARKER = "unusual traffic";
 const ANOMALY_PATH_RE = /(?:^|\/)anomaly(?:\/|$)/i;
+
+/**
+ * The strong text markers `detectSerpWall` reacts to. `settle` needs them too:
+ * a challenge page carries the brand word but no result anchors, so waiting for
+ * anchors alone would burn the full deadline and the tool would report
+ * `E_TIMEOUT` instead of reaching `detectWall`. The weak "unusual traffic"
+ * marker is handled separately because it also occurs in ordinary results.
+ */
+const WALL_TEXT_MARKERS: readonly string[] = [ANOMALY_MARKER, CAPTCHA_MARKER];
+
+/** SPEC §5.4: ±25% on the settle poll, mirroring `waitForMarker`. */
+const SETTLE_JITTER_RATIO = 0.25;
+const SETTLE_MIN_POLL_MS = 1;
+/** Keeps `[0, 1)` semantics for an rng that returns exactly 1. */
+const SETTLE_RNG_CEILING = 0.999_999;
 
 export const DUCKDUCKGO_INTERACTION: EngineInteraction = Object.freeze({
   homeUrl: HOME_URL,
@@ -131,6 +147,18 @@ export function extractFromDocument(doc: Document, arg: ExtractFromDocumentArg):
   const normalize = (value: string | null | undefined): string =>
     (value ?? "").replace(/\s+/g, " ").trim();
 
+  /**
+   * An answer is prose, not chrome. A container that survived cleaning with only
+   * a label ("Search Assist", a button caption) is not a summary: require the
+   * 12-char floor AND at least two letter-bearing words. Inlined on purpose —
+   * this function is stringified into the page and cannot see module scope.
+   */
+  const isProse = (value: string): boolean => {
+    if (value.length < 12) return false;
+    const words = value.split(/\s+/).filter((word) => /[A-Za-z\u0400-\u04FF]/.test(word));
+    return words.length >= 2;
+  };
+
   const limit = Number.isFinite(arg.n) && arg.n >= 0 ? Math.floor(arg.n) : 10;
 
   const resolve = (raw: string): { href: string; ad: boolean } | null => {
@@ -181,6 +209,9 @@ export function extractFromDocument(doc: Document, arg: ExtractFromDocumentArg):
 
     const container = anchor.closest("article") ?? anchor.parentElement;
     let ad = parsed.ad;
+    // The ad wrapper can BE the result container (`<div data-result="ad">` around
+    // the title anchor), which a descendant-only query on the container misses.
+    if (!ad && anchor.closest('[data-result="ad"]') !== null) ad = true;
     if (!ad && container !== null) {
       if (container.querySelector('[data-result="ad"]') !== null) ad = true;
       const badge = container.querySelector('[data-testid="result-badge"]');
@@ -233,6 +264,26 @@ export function extractFromDocument(doc: Document, arg: ExtractFromDocumentArg):
         if (node.parentNode !== null) node.parentNode.removeChild(node);
       }
 
+      // A sponsored card can be nested inside the assist block; its copy is not
+      // part of the answer.
+      const cloneAds = clone.querySelectorAll('[data-result="ad"]');
+      for (let index = 0; index < cloneAds.length; index += 1) {
+        const node = cloneAds[index];
+        if (node.parentNode !== null) node.parentNode.removeChild(node);
+      }
+
+      // Some builds render the expand/stop controls inside the same container.
+      // The comparison is on a whole element's own text, so a paragraph that
+      // merely mentions "more" survives while a button labelled "More" does not.
+      const controlLabels = ["больше", "остановить", "продолжить", "stop", "more", "continue"];
+      const cloneNodes = clone.querySelectorAll("*");
+      for (let index = 0; index < cloneNodes.length; index += 1) {
+        const node = cloneNodes[index];
+        const label = normalize(node.textContent).toLowerCase();
+        if (!controlLabels.includes(label)) continue;
+        if (node.parentNode !== null) node.parentNode.removeChild(node);
+      }
+
       let text = normalize(clone.textContent);
       const endings = [
         "Ответ составлен автоматически",
@@ -246,8 +297,16 @@ export function extractFromDocument(doc: Document, arg: ExtractFromDocumentArg):
       }
       // A toggle-only block carries the label and nothing else: not a summary.
       if (text.indexOf("Search Assist") === 0) text = text.slice("Search Assist".length).trim();
-      // 12 is inlined instead of the module constant for the same reason.
-      if (text.length >= 12) ai = { text, sources };
+      // Belt and braces: a label left as a bare text node has no element to
+      // remove, so the prose *check* also drops label tokens. The emitted answer
+      // keeps its own wording — this filter never rewrites what the user reads.
+      const proseCandidate = normalize(
+        text
+          .split(" ")
+          .filter((word) => !controlLabels.includes(word.toLowerCase().replace(/[.,;:!?«»"'()]/g, "")))
+          .join(" "),
+      );
+      if (isProse(proseCandidate)) ai = { text, sources };
     }
   }
 
@@ -333,14 +392,20 @@ function normalized(value: string | undefined): string {
 }
 
 /**
- * `kl` is DDG's `<region>-<lang>` pair. DDG has no language-only value, so a
- * lang without a region falls back to `wt-wt` (no region preference) instead of
- * guessing a country. A region without a lang is self-paired (`de-de`), which
- * is the form DDG itself uses for most markets.
+ * `kl` is DDG's `<region>-<lang>` pair. The tool layer puts config
+ * `engines.duckduckgo.kl` (already a complete pair such as `ru-ru`) into
+ * `Query.region`, so a pair must pass through verbatim instead of being
+ * self-paired into `ru-ru-ru-ru`. DDG has no language-only value, so a lang
+ * without a region falls back to `wt-wt` (no region preference) instead of
+ * guessing a country. A bare region without a lang is self-paired (`de-de`),
+ * which is the form DDG itself uses for most markets.
  */
+const REGION_LANG_PAIR_RE = /^[a-z]{2}-[a-z]{2}$/i;
+
 function klFor(q: Query): string {
   const region = normalized(q.region);
   const lang = normalized(q.lang);
+  if (REGION_LANG_PAIR_RE.test(region)) return region;
   if (region !== "" && lang !== "") return `${region}-${lang}`;
   if (region !== "") return `${region}-${region}`;
   return "wt-wt";
@@ -363,22 +428,95 @@ export interface DuckDuckGoEngineOptions {
   deadlineMs?: number;
   /** Base poll interval before jitter; default 150 ms. */
   pollMs?: number;
+  /** Jitter source for the settle poll; default `Math.random`. */
+  rng?: () => number;
 }
 
+type SettleState = "ready" | "wall" | "waiting";
+
+function normalizeDeadline(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return SETTLE_DEADLINE_MS;
+  return Math.max(0, Math.floor(value));
+}
+
+function normalizePoll(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return SETTLE_POLL_MS;
+  return Math.max(SETTLE_MIN_POLL_MS, Math.floor(value));
+}
+
+function pollDelay(pollMs: number, rng: () => number): number {
+  const raw = rng();
+  const unit = Number.isFinite(raw) ? Math.min(SETTLE_RNG_CEILING, Math.max(0, raw)) : 0.5;
+  const jittered = Math.round(pollMs * (1 + (unit * 2 - 1) * SETTLE_JITTER_RATIO));
+  const low = Math.max(SETTLE_MIN_POLL_MS, Math.floor(pollMs * (1 - SETTLE_JITTER_RATIO)));
+  const high = Math.max(low, Math.ceil(pollMs * (1 + SETTLE_JITTER_RATIO)));
+  return Math.min(high, Math.max(low, jittered));
+}
+
+/**
+ * One settle probe. `ready` keeps the marker+selector AND from
+ * `DUCKDUCKGO_INTERACTION`: the brand word also sits on the DDG home page, so
+ * only an actual result anchor proves a SERP. `wall` uses the same markers as
+ * `detectSerpWall`; "unusual traffic" is weak and counts only with zero
+ * anchors, exactly as `detectSerpWall` decides it.
+ */
+async function settleState(page: CdpPage): Promise<SettleState> {
+  const text = await page.innerText();
+  if (WALL_TEXT_MARKERS.some((marker) => text.includes(marker))) return "wall";
+  if (ANOMALY_PATH_RE.test(pathOf(page.url()))) return "wall";
+
+  const anchors = countOf(await page.evaluate<unknown>(countExpression(RESULT_TITLE_SELECTOR)));
+  if (anchors >= SETTLE_MIN_RESULTS) {
+    return text.includes(SETTLE_MARKER) ? "ready" : "waiting";
+  }
+  if (text.includes(WEAK_BLOCK_MARKER)) return "wall";
+  return "waiting";
+}
+
+/**
+ * Wait (bounded) for a DDG SERP or for the page to prove it is a wall.
+ *
+ * This deliberately does not call `waitForMarker`: that helper can only express
+ * "marker AND selector", and a challenge page satisfies neither even though it
+ * is a terminal state. Returning on a wall marker lets the orchestrator reach
+ * `detectWall` and answer `E_WALL` instead of spending the whole deadline and
+ * reporting `E_TIMEOUT`. Poll jitter is local because the helper's is private.
+ */
 async function settleSerp(
   page: CdpPage,
   options: DuckDuckGoEngineOptions,
   signal: AbortSignal | undefined,
 ): Promise<void> {
-  await waitForMarker(page, {
-    marker: SETTLE_MARKER,
-    selector: RESULT_TITLE_SELECTOR,
-    minCount: SETTLE_MIN_RESULTS,
-    deadlineMs: options.deadlineMs ?? SETTLE_DEADLINE_MS,
-    pollMs: options.pollMs ?? SETTLE_POLL_MS,
-    ...(options.clock === undefined ? {} : { clock: options.clock }),
-    ...(signal === undefined ? {} : { signal }),
-  });
+  const clock = options.clock ?? systemClock;
+  const deadlineMs = normalizeDeadline(options.deadlineMs);
+  const pollMs = normalizePoll(options.pollMs);
+  const rng = options.rng ?? Math.random;
+  const start = clock.now();
+
+  try {
+    for (;;) {
+      if (signal?.aborted === true) {
+        throw fail("E_CANCELLED", "settle", { engine: ENGINE_ID, message: "aborted by the caller" });
+      }
+      const state = await settleState(page);
+      if (state === "ready" || state === "wall") return;
+
+      const elapsed = clock.now() - start;
+      if (elapsed >= deadlineMs) {
+        throw fail("E_TIMEOUT", "settle", {
+          engine: ENGINE_ID,
+          hint: "the engine layout may have changed; run /web-doctor",
+          message:
+            `marker "${SETTLE_MARKER}" not found after ${elapsed} ms; ` +
+            `selector ${RESULT_TITLE_SELECTOR} matched fewer than ${SETTLE_MIN_RESULTS} element(s) ` +
+            "and no wall marker was present",
+        });
+      }
+      await clock.sleep(pollDelay(pollMs, rng), signal);
+    }
+  } catch (error) {
+    throw new WebSearchError(toFailure(error, { code: "E_CDP_DISCONNECTED", stage: "settle" }));
+  }
 }
 
 async function detectSerpWall(page: CdpPage): Promise<Wall | null> {
