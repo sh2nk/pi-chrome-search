@@ -22,6 +22,7 @@ import {
   READ_MAX_CHARS_CEILING,
   type ReadableDocument,
 } from "../../src/extract/read.ts";
+import type { PageSubject, PageVerdict, Reflex } from "../../src/reflex/types.ts";
 import { createCache } from "../../src/runtime/cache.ts";
 import type { ResolveHost } from "../../src/runtime/ssrf.ts";
 import type { ArtifactInput, Artifacts, Cache, Limiter, LimiterStats, Logger } from "../../src/runtime/types.ts";
@@ -957,3 +958,96 @@ test("a PDF viewer with an HTML response is E_PDF_UNSUPPORTED", async () => {
 });
 
 let harnessArtifact: ArtifactInput | undefined;
+
+
+// ---------------------------------------------------------------------------
+// P14 — the page gate composes with the P5 read gate
+// ---------------------------------------------------------------------------
+
+interface PageGateSpy extends Reflex {
+  pageCalls: PageSubject[][];
+  readGateCalls: number;
+}
+
+function pageGateSpy(options: {
+  verdict?: PageVerdict | null;
+  allows?: boolean;
+} = {}): PageGateSpy {
+  const spy: PageGateSpy = {
+    pageCalls: [],
+    readGateCalls: 0,
+    async triage(_query, items) {
+      return { keep: items.map((_, index) => index), scores: items.map(() => 1), flags: [] };
+    },
+    async gateRead() {
+      spy.readGateCalls += 1;
+      return options.allows ?? true;
+    },
+    async judgePages(_query, subjects) {
+      spy.pageCalls.push([...subjects]);
+      const verdict = options.verdict;
+      return verdict === undefined ? null : verdict === null ? null : [verdict];
+    },
+    async coverage() {
+      return { enough: true, next: "stop" };
+    },
+    async route() {
+      return { engines: ["google"] };
+    },
+  };
+  return spy;
+}
+
+test("P14 page gate: a slop verdict refuses the URL before a tab is acquired", async () => {
+  const reflex = pageGateSpy({
+    verdict: { worth: false, trust: 0.15, kind: "slop", reasons: ["host:farm"] },
+  });
+  const harness = makeHarness({ config: (config) => { config.reflex.enabled = true; } });
+  harness.deps.reflex = reflex;
+
+  const result = failure(await run(harness, { url: "https://sonnik.ru/kot/" }));
+
+  assert.equal(result.details.code, "E_UNSUPPORTED");
+  assert.match(result.details.message ?? "", /page gate declined/);
+  assert.match(result.details.message ?? "", /slop/);
+  assert.match(result.details.message ?? "", /host:farm/);
+  assert.equal(harness.pagesRequested, 0, "a refused URL must not navigate");
+  assert.deepEqual(reflex.pageCalls, [[{ url: "https://sonnik.ru/kot/" }]]);
+  assert.equal(reflex.readGateCalls, 0, "the P14 gate replaced the P5 gate, not doubled it");
+});
+
+test("P14 page gate: an abstaining gate falls back to the P5 read gate", async () => {
+  const reflex = pageGateSpy({ verdict: null, allows: false });
+  const harness = makeHarness({ config: (config) => { config.reflex.enabled = true; } });
+  harness.deps.reflex = reflex;
+
+  const result = failure(await run(harness, { url: "https://example.test/page" }));
+
+  assert.equal(result.details.code, "E_UNSUPPORTED");
+  assert.match(result.details.message ?? "", /reflex read gate declined/);
+  assert.equal(harness.pagesRequested, 0);
+  assert.equal(reflex.readGateCalls, 1);
+});
+
+test("P14 page gate: an allowed page reads normally and is not gated twice", async () => {
+  const reflex = pageGateSpy({ verdict: { worth: true, trust: 0.9, kind: "original", reasons: ["host:trusted"] } });
+  const harness = makeHarness({ config: (config) => { config.reflex.enabled = true; } });
+  harness.deps.reflex = reflex;
+
+  const result = success(await run(harness, { url: "https://example.test/page" }));
+
+  assert.ok(result.details.chars > 0);
+  assert.equal(reflex.pageCalls.length, 1);
+  assert.equal(reflex.readGateCalls, 0);
+});
+
+test("P14 page gate: a disabled reflex is never consulted", async () => {
+  const reflex = pageGateSpy({ verdict: { worth: false, trust: 0, kind: "unsafe", reasons: ["url:punycode"] } });
+  const harness = makeHarness({ config: (config) => { config.reflex.enabled = false; } });
+  harness.deps.reflex = reflex;
+
+  success(await run(harness, { url: "https://example.test/page" }));
+
+  assert.equal(reflex.pageCalls.length, 0);
+  assert.equal(reflex.readGateCalls, 0);
+});

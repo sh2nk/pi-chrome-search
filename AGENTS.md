@@ -132,6 +132,7 @@ npm test                          # node --test tests/**/*.test.ts (offline)
 npm run audit                     # hard rules, secrets, personal fixtures, tool budget
 node src/cli/doctor.ts --json     # headless doctor; the canonical gate output
 npm run bench                     # offline replay; --live is opt-in (P5)
+node bench/run.ts --gate          # P14 page-gate bench (slop corpus, offline; exit 1 = gate failed)
 PI_CHROME_LIVE=1 npm run test:live   # one query per engine, n=2; SKIP on wall, never loop
 pi -e ./src/index.ts              # load the extension in a throwaway session
 pi -e ./src/index.ts --model …    # if the current model misbehaves
@@ -158,6 +159,7 @@ because of a wall, fix the test to skip, not to hammer.
 | a gate fails twice | repair #1 same worker, #2 fresh worker, then escalate to the user with `evidence/P<N>-blocker.md`; never waive silently |
 | two agents need Chrome at once | forbidden: live work is orchestrator-only and serialized; workers are offline |
 | AI summary missing | check `ai:no` is a normal A/B outcome; verify text markers on the live page; do not fabricate |
+| `web_read` refused by the page gate | the message names the kind/reasons; read another URL or set `reflex.enabled:false`. Never widen a host list to make one read pass |
 | Tool name collision | another extension already registers `web_search`; fail early with `E_CONFIG` naming the conflict (do not silently rename) |
 | Slow searches | cache hit? pacing sleeps? classifier latency? `web_doctor --json` has timings |
 
@@ -221,6 +223,13 @@ Respect `maxCallsPerSearch`, `maxCallsPerSession`, `maxUsdPerSession`; log `usag
 
 The decision points (triage, read gate, coverage, routing), fallbacks, abstain thresholds, batching
 experiment and benchmark gate are in SPEC §9. Do not put a classifier on the critical path before that.
+
+**P14 page gate (`judgePages`).** A second, additive decision: *is this page worth a read, and can this
+source be trusted?* One batched classifier call covers up to 10 pages (`PAGE_BATCH_MAX`), and the rules
+layer in `src/reflex/rules.ts` is the floor: it answers offline, and `mergePageVerdicts` lets a model
+add a skip but never rescue an `unsafe` rules verdict. Wired into `web_read` (before a tab is spent) and
+`web_research` (rank/drop sources). Corpus + rubric: `bench/slop.jsonl`, `bench/SLOP-RUBRIC.md`; verdict:
+`bench/RESULTS-P14.md` (V14.3 fails, so `reflex.enabled` stays `false`).
 
 ### Codemode: optional, per research session
 

@@ -218,7 +218,11 @@ interface Comparison {
 }
 
 interface CliOptions {
-  mode: "offline" | "live" | "compare" | "self-test";
+  mode: "offline" | "live" | "compare" | "self-test" | "gate";
+  /** P14: run the slop-gate bench instead of the replay corpus. */
+  gate: boolean;
+  /** P14: corpus override for `--gate`; `null` uses bench/slop.jsonl. */
+  corpusPath: string | null;
   queriesPath: string;
   serpSource: string;
   out: string | null;
@@ -248,10 +252,13 @@ function usage(): string {
     "  PI_CHROME_LIVE=1 node bench/run.ts --live --limit <1..30> [--allow-more]",
     "                    [--engine google|duckduckgo|yandex] [--n 5] [--out <file>]",
     "  node bench/run.ts --compare <baseline.json> <reflex.json>",
+    "  node bench/run.ts --gate [--corpus <file>] [--out <file>] [--no-write]",
     "",
     "offline replay is the default and never touches the network or Chrome.",
     "--reflex rules applies the deterministic rules triage before compaction,",
     "so the token delta for SPEC 9.4 is measured offline, not by a live run.",
+    "--gate measures the P14 page gate on bench/slop.jsonl (recall, false skips,",
+    "reads saved); it is the same as node bench/gate.ts.",
   ].join("\n");
 }
 
@@ -270,6 +277,8 @@ function parseArgs(argv: readonly string[]): CliOptions {
     reflex: "off",
     reflexKeep: null,
     compare: null,
+    gate: false,
+    corpusPath: null,
   };
 
   let live = false;
@@ -295,6 +304,13 @@ function parseArgs(argv: readonly string[]): CliOptions {
         break;
       case "--self-test":
         selfTest = true;
+        break;
+      case "--gate":
+        options.gate = true;
+        break;
+      case "--corpus":
+        options.corpusPath = resolve(valueAfter(arg, index));
+        index += 1;
         break;
       case "--live":
         live = true;
@@ -406,7 +422,11 @@ function parseArgs(argv: readonly string[]): CliOptions {
   if (selfTest && live) {
     throw fail("E_CONFIG", "config", { hint: "--self-test and --live are mutually exclusive" });
   }
+  if (live && options.gate) {
+    throw fail("E_CONFIG", "config", { hint: "--gate is offline-only; it never touches Chrome" });
+  }
   if (selfTest) options.mode = "self-test";
+  else if (options.gate) options.mode = "gate";
   else if (options.compare !== null) options.mode = "compare";
   else if (live) options.mode = "live";
 
@@ -424,6 +444,14 @@ function parseArgs(argv: readonly string[]): CliOptions {
   }
   if (options.reflexKeep !== null && options.reflex !== "rules") {
     throw fail("E_CONFIG", "config", { hint: "--reflex-keep needs --reflex rules" });
+  }
+  if (options.corpusPath !== null && options.mode !== "gate") {
+    throw fail("E_CONFIG", "config", { hint: "--corpus only applies to --gate" });
+  }
+  if (options.mode === "gate" && (options.reflex !== "off" || options.reflexKeep !== null)) {
+    throw fail("E_CONFIG", "config", {
+      hint: "--gate measures the page gate with the rules backend; triage flags do not apply",
+    });
   }
   if (options.mode === "live" && (options.reflex !== "off" || options.reflexKeep !== null)) {
     throw fail("E_CONFIG", "config", {
@@ -1939,6 +1967,15 @@ async function main(): Promise<number> {
       return runSelfTest(options);
     case "compare":
       return runCompare(options);
+    case "gate": {
+      // Loaded lazily so the replay corpus does not pay for the gate module.
+      const { runGate } = await import("./gate.ts");
+      return runGate({
+        ...(options.corpusPath === null ? {} : { corpusPath: options.corpusPath }),
+        out: options.out,
+        write: options.write,
+      });
+    }
     case "live":
       return runLive(options);
     case "offline":

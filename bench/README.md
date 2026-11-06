@@ -283,3 +283,22 @@ Numbers, the read-head sensitivity that decides the verdict, and the recommendat
 [`RESULTS-CODEMODE.md`](./RESULTS-CODEMODE.md). The headline: codemode's saving is the 90 % of every
 page the script throws away *before any model sees it*; `web_research` is the cheaper one-call path for
 evidence-shaped questions; plain `web_search` stays the default. `codemode` is never required.
+
+## 9. Slop gate (P14, `--gate` / `bench/gate.ts`)
+
+The page-quality gate answers a different question from the P5 triage: *should this page be read at
+all, and can this source be trusted?* It is measured on a separate labelled corpus
+([`slop.jsonl`](./slop.jsonl), rubric in [`SLOP-RUBRIC.md`](./SLOP-RUBRIC.md)), not on the token
+corpus — returning fewer results always lowers tokens, so the token metric cannot judge a gate.
+
+```bash
+node bench/run.ts --gate              # same as node bench/gate.ts; prints the report
+node bench/gate.ts --no-write         # print only (bench/results/ is git-ignored)
+node bench/gate.ts --self-test        # corpus shape, metric arithmetic, verdict logic
+```
+
+The report, the V14.1–V14.5 table and the decision live in
+[`RESULTS-P14.md`](./RESULTS-P14.md). The rules backend is measured offline; the classifier backend's
+accuracy and price are marked **unmeasured** because they need a live `pi` session with the user's
+classifier provider. `--gate` exits `1` when a measured gate fails, so a script cannot mistake a
+"KEEP OFF" verdict for success.

@@ -20,6 +20,9 @@ import type {
   CoverageNext,
   CoverageVerdict,
   Evidence,
+  PageKind,
+  PageSubject,
+  PageVerdict,
   Reflex,
   Route,
   TriageResult,
@@ -110,6 +113,192 @@ const SPAM_HOST_SUFFIXES: readonly string[] = [
   "cutt.ly",
   "tinyurl.com",
 ];
+
+/**
+ * Established publishers, standards bodies and vendor documentation. The page
+ * gate needs this list for the same reason it needs a farm list: "unknown host"
+ * cannot mean "slop", and a laptop review from a recognised outlet must never
+ * be skipped just because its URL has `/news/` in the path (P14-A rubric).
+ */
+const TRUSTED_HOST_SUFFIXES: readonly string[] = [
+  "britannica.com",
+  "space.com",
+  "howstuffworks.com",
+  "gutenberg.org",
+  "history.com",
+  "bigenc.ru",
+  "nytimes.com",
+  "theguardian.com",
+  "bbc.co.uk",
+  "bbc.com",
+  "reuters.com",
+  "ft.com",
+  "bloomberg.com",
+  "nature.com",
+  "hbr.org",
+  "mckinsey.com",
+  "ycombinator.com",
+  "stripe.com",
+  "seriouseats.com",
+  "duolingo.com",
+  "theverge.com",
+  "cnet.com",
+  "pcmag.com",
+  "pcworld.com",
+  "rtings.com",
+  "tomsguide.com",
+  "techradar.com",
+  "whathifi.com",
+  "ixbt.com",
+  "rbc.ru",
+  "tass.ru",
+  "ria.ru",
+  "cbr.ru",
+  "roscosmos.ru",
+  "nplus1.ru",
+  "mts.ru",
+  "beeline.ru",
+  "t2.ru",
+  "remontka.pro",
+  "microsoft.com",
+  "web.dev",
+  "typescriptlang.org",
+  "css-tricks.com",
+  "pganalyze.com",
+  "digitalocean.com",
+  "ubuntu.com",
+  "man7.org",
+];
+
+/** Discussion sites. Worth reading, but never "original" and never a citation of record. */
+const FORUM_HOST_SUFFIXES: readonly string[] = [
+  "reddit.com",
+  "quora.com",
+  "habr.com",
+  "pikabu.ru",
+  "otvet.mail.ru",
+  "thequestion.ru",
+  "bolshoyvopros.ru",
+];
+
+/**
+ * Marketplaces, flight meta-search, video hosting. Worth reading for a price or
+ * a first-hand list, but they aggregate someone else's answer: low trust, no skip.
+ */
+const AGGREGATOR_HOST_SUFFIXES: readonly string[] = [
+  "market.yandex.ru",
+  "kayak.com",
+  "skyscanner.net",
+  "youtube.com",
+  "pinterest.com",
+  "avito.ru",
+  "ozon.ru",
+  "wildberries.ru",
+  "aliexpress.com",
+  "ebay.com",
+  "amazon.com",
+  "irecommend.ru",
+  "otzovik.com",
+  "tripadvisor.com",
+  "booking.com",
+  "airbnb.com",
+];
+
+/**
+ * Content farms and republishers: the page exists to occupy a query, not to
+ * answer it. Kept short and conservative — every entry here is a skip, so an
+ * over-broad host would cost the user a source they asked for.
+ */
+const SLOP_HOST_SUFFIXES: readonly string[] = [
+  "fb.ru",
+  "syl.ru",
+  "heaclub.ru",
+  "novostivsem.ru",
+  "dailyhoro.ru",
+  "goroskop.ru",
+  "sonnik.ru",
+  "sonnik-online.net",
+  "astrostar.ru",
+  "womanadvice.ru",
+  "1000sovetov.ru",
+  "ehow.com",
+  "livestrong.com",
+  "techwalla.com",
+  "answers.com",
+  "wisegeek.com",
+  "ru.wikihow.com",
+];
+
+/** Host labels that only exist for horoscope/dream traffic (`horo.mail.ru`). */
+const SLOP_HOST_LABEL = /(?:^|\.)(?:horo|goroskop|sonnik|astrolog|astrostar)(?:\.|$)/i;
+
+/** Query-independent farm topics: a dream book is not a source for anything. */
+const OFFTOPIC_PATH =
+  /\/(?:sonnik|sonniki|goroskop|horoscope|zodiac|zodiak|tolkovanie|dream-?interpret|gadanie|privorot)(?:[/_-]|$)/i;
+
+/**
+ * Informational sub-sections of a host we do not recognise. A shop's `/blog/`
+ * about dream meanings and a vendor's `/articles/` fix-it page are the two most
+ * common SERP-slop shapes; a recognised publisher is checked before this rule.
+ */
+const INFORMATIONAL_PATH =
+  /\/(?:blog|blogs|articles?|news|office-solutions|sovety|sovet|wiki|guides?)(?:\/|$)/i;
+
+/** Titles that announce a republished/SEO page rather than an answer. */
+const SLOP_TITLE: readonly RegExp[] = [
+  /толковани[ея] сн/i,
+  /сонник/i,
+  /примет(?:а|ы|ах)/i,
+  /сновидени/i,
+  /гороскоп/i,
+  /что значит/i,
+  /по \d+ сонникам/i,
+  /мнение психолог/i,
+  /польза и вред/i,
+  /всё, что нужно знать/i,
+  /(?:the )?(?:complete|ultimate|definitive) guide\b/i,
+  /things you (?:never|didn't) know\b/i,
+];
+
+/** Machine-translation artefacts are the signature of a translated content farm. */
+const TRANSLATED_TEXT =
+  /(?:автоматическ\p{L}* перевод|машинн\p{L}* перевод|переведено с|translated (?:automatically|from)|auto-?translated|this (?:article|page) was translated)/iu;
+
+/** Deception markers: a page that claims a prize, a virus or an official hotline. */
+const SCAM_TEXT =
+  /(?:гарантированн\p{L}* (?:доход|прибыль|выигрыш)|выиграл\p{L}* (?:iphone|телефон|приз|автомобиль)|ваш (?:компьютер|браузер) (?:заражен|инфицирован)|ваш аккаунт будет (?:заблокирован|удал[её]н)|служба поддержки (?:windows|microsoft)|позвоните (?:нам|по номеру)|you(?:'| a)?re? (?:today'?s )?winner|your (?:computer|browser) is infected)/iu;
+
+/** Hosts that exist to sell pills, bets or adult traffic. */
+const UNSAFE_HOST =
+  /(?:^|[.-])(?:casino|porn|xxx|adult|viagra|cialis|pharm|pharmacy|betting|bookmaker|lottery|giveaway|prize)(?:[.-]|$)/i;
+
+/** Cheap/abused TLDs where a "support" or "giveaway" page is almost never real. */
+const UNSAFE_TLDS: readonly string[] = [
+  ".tk",
+  ".ml",
+  ".ga",
+  ".cf",
+  ".gq",
+  ".zip",
+  ".mov",
+  ".click",
+  ".download",
+  ".loan",
+  ".win",
+  ".bid",
+  ".racing",
+  ".stream",
+];
+
+/** Trust values reported by the rules layer; the model is free to score differently. */
+const TRUST = {
+  original: 0.9,
+  forum: 0.45,
+  aggregator: 0.35,
+  unknown: 0.5,
+  slop: 0.15,
+  unsafe: 0,
+} as const;
 
 /** Title markers of clickbait/affiliate bait. Advisory only. */
 const CLICKBAIT_TITLE: readonly RegExp[] = [
@@ -290,6 +479,144 @@ function isBlockedReadUrl(raw: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Page quality gate (PLAN-v2 P14-A)
+// ---------------------------------------------------------------------------
+
+function verdict(kind: PageKind, worth: boolean, trust: number, reasons: string[]): PageVerdict {
+  return { worth, trust, kind, reasons };
+}
+
+function hasHostSuffix(host: string, suffixes: readonly string[]): boolean {
+  return suffixes.some((suffix) => hostMatches(host, suffix));
+}
+
+function unsafeTld(host: string): boolean {
+  return UNSAFE_TLDS.some((tld) => host.endsWith(tld));
+}
+
+/**
+ * Thin-content signal, only from a real read window: a 20-word excerpt cannot
+ * be judged, and a SERP snippet is written by the engine, not the page.
+ * `null` means "no opinion", never "thin".
+ */
+function thinExcerpt(excerpt: string): string | null {
+  if (excerpt.length < 400) return null;
+  const sentences = excerpt.split(/[.!?…]+/u).filter((sentence) => sentence.trim().length > 0);
+  const average = excerpt.length / Math.max(1, sentences.length);
+  const hasDate = /\b(?:19|20)\d{2}\b/u.test(excerpt) || /\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b/u.test(excerpt);
+  const hasAuthor = /(?:^|\n)\s*(?:автор|author|by)\b[:\s]/iu.test(excerpt) || /(?:обновлено|опубликовано|updated|published)\b/iu.test(excerpt);
+  const boilerplate =
+    /(?:cookie|куки|подпиш|поделит|читайте также|read more|share this|all rights reserved)/giu;
+  const boilerplateChars = (excerpt.match(boilerplate) ?? []).reduce((sum, hit) => sum + hit.length, 0);
+  if (boilerplateChars / excerpt.length > 0.3) return "excerpt:boilerplate";
+  if (!hasDate && !hasAuthor && average < 60) return "excerpt:thin";
+  return null;
+}
+
+/** Share of the query's content terms the title repeats; 0 when the query has none. */
+export function queryEcho(query: string, title: string): number {
+  const terms = queryTerms(query);
+  if (terms.length === 0) return 0;
+  const haystack = new Set(tokenize(title));
+  return terms.filter((term) => haystack.has(term)).length / terms.length;
+}
+
+/**
+ * One deterministic page verdict. The order of the checks is the policy:
+ *
+ *   1. unsafe — deception, punycode, abused TLD, adult/pharma/casino host. A
+ *      model is never allowed to override this (P14 policy floor).
+ *   2. trusted / allow-listed — an established source keeps its trust even with
+ *      a clickbait title or a `/news/` path.
+ *   3. forum / aggregator — worth reading, low trust, never skipped.
+ *   4. farm host, farm path, off-topic section, translated or stuffed text,
+ *      informational sub-page on an unrecognised host, thin excerpt.
+ *   5. unknown — read it; the gate defaults to not harming recall.
+ */
+export function judgePage(query: string, subject: PageSubject): PageVerdict {
+  const title = typeof subject.title === "string" ? subject.title.trim() : "";
+  const snippet = typeof subject.snippet === "string" ? subject.snippet.trim() : "";
+  const excerpt = typeof subject.excerpt === "string" ? subject.excerpt.trim() : "";
+  const raw = typeof subject.url === "string" ? subject.url.trim() : "";
+  const text = `${title} ${snippet}`.trim();
+
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return verdict("unsafe", false, TRUST.unsafe, ["url:unparseable"]);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return verdict("unsafe", false, TRUST.unsafe, ["url:not-http"]);
+  }
+
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  const path = parsed.pathname === "" ? "/" : parsed.pathname;
+
+  if (parsed.username !== "" || parsed.password !== "") {
+    return verdict("unsafe", false, TRUST.unsafe, ["url:credentials"]);
+  }
+  if (host.includes("xn--")) return verdict("unsafe", false, TRUST.unsafe, ["url:punycode"]);
+  if (unsafeTld(host)) return verdict("unsafe", false, TRUST.unsafe, ["url:unsafe-tld"]);
+  if (UNSAFE_HOST.test(host)) return verdict("unsafe", false, TRUST.unsafe, ["host:unsafe-token"]);
+  if (SCAM_TEXT.test(text)) return verdict("unsafe", false, TRUST.unsafe, ["text:scam"]);
+
+  // Login/cart/account paths are not content, even on a trusted host. Binary
+  // payloads are deliberately NOT refused here: `web_read` has a PDF branch
+  // (P12), and the page gate must not turn a supported read into a skip.
+  if (BLOCKED_READ_PATH.test(path)) {
+    return verdict("unknown", false, 0.1, ["url:not-content"]);
+  }
+
+  if (isAllowHost(host)) return verdict("original", true, TRUST.original, ["host:allow"]);
+  if (hasHostSuffix(host, TRUSTED_HOST_SUFFIXES)) {
+    return verdict("original", true, TRUST.original, ["host:trusted"]);
+  }
+  if (isSpamHost(host)) return verdict("slop", false, 0.05, ["host:ad"]);
+
+  if (hasHostSuffix(host, FORUM_HOST_SUFFIXES) || /^(?:forum|community|discuss)\./i.test(host)) {
+    return verdict("forum", true, TRUST.forum, ["host:forum"]);
+  }
+  if (
+    hasHostSuffix(host, AGGREGATOR_HOST_SUFFIXES) ||
+    /^(?:market|shop|store)\./i.test(host)
+  ) {
+    return verdict("aggregator", true, TRUST.aggregator, ["host:aggregator"]);
+  }
+  if (hasHostSuffix(host, SLOP_HOST_SUFFIXES)) {
+    return verdict("slop", false, TRUST.slop, ["host:farm"]);
+  }
+  if (SLOP_HOST_LABEL.test(host)) return verdict("slop", false, TRUST.slop, ["host:topic-farm"]);
+  if (OFFTOPIC_PATH.test(path)) return verdict("slop", false, TRUST.slop, ["path:offtopic"]);
+
+  const reasons: string[] = [];
+  if (SLOP_TITLE.some((pattern) => pattern.test(title))) reasons.push("title:slop");
+  if (TRANSLATED_TEXT.test(`${text} ${excerpt}`)) reasons.push("text:translated");
+  if (isClickbaitTitle(title)) reasons.push("title:clickbait");
+  const thin = thinExcerpt(excerpt);
+  if (thin !== null) reasons.push(thin);
+  if (reasons.length > 0) return verdict("slop", false, TRUST.slop, reasons);
+
+  // A blog/article sub-page on a host nobody recognises: the shape of an SEO
+  // landing page. Trusted publishers, forums and allow-listed docs never reach
+  // this branch, which is what keeps the false-skip rate low.
+  if (INFORMATIONAL_PATH.test(path)) {
+    const echo = queryEcho(query, title);
+    return verdict("slop", false, TRUST.slop, [
+      "path:informational",
+      ...(echo >= 0.5 ? ["title:query-echo"] : []),
+    ]);
+  }
+
+  return verdict("unknown", true, TRUST.unknown, ["host:unknown"]);
+}
+
+/** Rules page gate: one verdict per subject, in input order, never abstains. */
+export function judgePagesSync(query: string, subjects: readonly PageSubject[]): PageVerdict[] {
+  return subjects.map((subject) => judgePage(query, subject));
+}
+
+// ---------------------------------------------------------------------------
 // Script and freshness detection (route)
 // ---------------------------------------------------------------------------
 
@@ -450,5 +777,6 @@ export function createRules(options: RulesOptions = {}): Reflex {
     gateRead: async (query, item) => gateReadSync(query, item),
     coverage: async (query, evidence) => coverageSync(query, evidence),
     route: async (query) => routeSync(query),
+    judgePages: async (query, subjects) => judgePagesSync(query, subjects),
   };
 }

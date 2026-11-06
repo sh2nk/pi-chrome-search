@@ -10,8 +10,9 @@
  * - the guard runs before `acquirePage`, so a private URL causes no navigation;
  * - it runs again on `page.url()`, because the first check cannot see redirects.
  *
- * When `config.reflex.enabled` is true, an optional read gate (P5-D) may decline
- * the page before a tab is spent; a disabled reflex is not consulted at all.
+ * When `config.reflex.enabled` is true, the P14 page gate (and, for a pre-P14
+ * reflex, the P5 read gate) may decline the page before a tab is spent; a
+ * disabled reflex is not consulted at all.
  *
  * Output is Markdown (or plain text) produced by `extract/read.ts`; raw HTML is
  * never returned. The audit log records `host + path` only — a read URL may
@@ -38,7 +39,7 @@ import {
   type ReadInline,
   type ReadableDocument,
 } from "../extract/read.ts";
-import type { Reflex } from "../reflex/types.ts";
+import type { PageVerdict, Reflex } from "../reflex/types.ts";
 import { saveFailureArtifact } from "../runtime/artifacts.ts";
 import type { FailureDetails, Stage, WebSearchError } from "../runtime/error-codes.ts";
 import { isWebSearchError } from "../runtime/error-codes.ts";
@@ -152,6 +153,21 @@ const UNSUPPORTED_HINT = "the page produced no readable text; try a different UR
 const READ_GATE_HINT =
   "the reflex read gate declined this page (spam/ad host, login or checkout, or unlikely to answer); " +
   "read another URL or set reflex.enabled=false to turn the gate off";
+
+/**
+ * P14 hint. A quality skip is not a transport failure: the URL is fine, the
+ * judge does not expect it to answer. Naming the escape hatch keeps a wrong
+ * verdict actionable without inviting the caller to retry in a loop.
+ */
+const PAGE_GATE_HINT =
+  "the reflex page gate judged this page not worth a read (farm/aggregator host, off-topic section, " +
+  "deceptive URL or thin content); read another URL or set reflex.enabled=false to turn the gate off";
+
+/** One printable line: kind plus the rules/model reasons that decided it. */
+function pageGateMessage(verdict: PageVerdict): string {
+  const reasons = verdict.reasons.slice(0, 3).join(", ");
+  return `page gate declined this URL: ${verdict.kind}${reasons === "" ? "" : ` (${reasons})`}`;
+}
 
 /**
  * Reads get their own work tabs (`PageKey` in `src/cdp/types.ts`): a long article
@@ -357,13 +373,28 @@ function auditDomain(finalUrl: URL): string {
 }
 
 /**
- * The read gate (P5-D). `web_read` has no query, so the URL itself is the only
- * honest subject: a rules gate screens spam/ad hosts, login and binary paths,
- * and a classifier judges the URL/title pair (SPEC §9.3 gateRead).
+ * The read gate (P5-D + P14). `web_read` has no query and no SERP metadata, so
+ * the URL itself is the only honest subject.
+ *
+ * P14 runs first: `judgePages` screens farm/aggregator hosts, off-topic
+ * sections, deceptive URLs and (with an excerpt, which a read does not have yet)
+ * thin content, and the classifier may add a skip. When the gate is absent
+ * (pre-P14 reflex) or abstains, the older `gateRead` still answers, so the two
+ * generations compose instead of duplicating a model call.
  *
  * Fail-open: a reflex that throws is a reflex problem, never a reason to refuse
  * a page the caller explicitly asked for.
  */
+async function pageGateVerdict(reflex: Reflex, url: string): Promise<PageVerdict | null> {
+  if (typeof reflex.judgePages !== "function") return null;
+  try {
+    const verdicts = await reflex.judgePages(url, [{ url }]);
+    return verdicts === null ? null : (verdicts[0] ?? null);
+  } catch {
+    return null;
+  }
+}
+
 async function readGateAllows(reflex: Reflex, url: string): Promise<boolean> {
   try {
     return await reflex.gateRead(url, { title: url, url, snippet: "", engine: "read" });
@@ -510,15 +541,25 @@ export function createWebReadTool(
       options.resolve === undefined ? {} : { resolve: options.resolve },
     );
 
-    // Reflex read gate (P5-D): after the SSRF guard, before a tab is acquired, so
-    // a refused page costs nothing and a private URL still reports E_BLOCKED_URL.
+    // Reflex page gate (P14): after the SSRF guard, before a tab is acquired, so
+    // a refused page costs no navigation at all. A pre-P14 reflex has no
+    // `judgePages`; the older `gateRead` then answers instead (P5-D).
     if (deps.config.reflex.enabled && deps.reflex !== undefined) {
-      const allowed = await readGateAllows(deps.reflex, requested.href);
-      if (!allowed) {
+      const verdict = await pageGateVerdict(deps.reflex, requested.href);
+      if (verdict !== null && !verdict.worth) {
         throw fail("E_UNSUPPORTED", "read", {
-          hint: READ_GATE_HINT,
-          message: "the reflex read gate declined this URL",
+          hint: PAGE_GATE_HINT,
+          message: pageGateMessage(verdict),
         });
+      }
+      if (verdict === null) {
+        const allowed = await readGateAllows(deps.reflex, requested.href);
+        if (!allowed) {
+          throw fail("E_UNSUPPORTED", "read", {
+            hint: READ_GATE_HINT,
+            message: "the reflex read gate declined this URL",
+          });
+        }
       }
     }
 

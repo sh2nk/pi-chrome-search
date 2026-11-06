@@ -29,7 +29,15 @@ import { createEngineRegistry } from "../../src/engines/index.ts";
 import type { Engine } from "../../src/engines/types.ts";
 import type { ReadableDocument } from "../../src/extract/read.ts";
 import { normalizeUrl } from "../../src/extract/urls.ts";
-import type { Candidate, CoverageVerdict, Evidence, Reflex, Route } from "../../src/reflex/types.ts";
+import type {
+  Candidate,
+  CoverageVerdict,
+  Evidence,
+  PageSubject,
+  PageVerdict,
+  Reflex,
+  Route,
+} from "../../src/reflex/types.ts";
 import { createCache } from "../../src/runtime/cache.ts";
 import { fail } from "../../src/runtime/errors.ts";
 import type { Artifacts, Cache, Limiter, LimiterStats, Logger } from "../../src/runtime/types.ts";
@@ -278,6 +286,7 @@ function spyReflex(overrides: Partial<Reflex> = {}): ReflexSpy {
     beginSearch() {
       spy.beginSearchCalls += 1;
     },
+    ...(overrides.judgePages === undefined ? {} : { judgePages: overrides.judgePages }),
   };
   return spy;
 }
@@ -897,4 +906,62 @@ test("V13.2: two URLs that differ only in the query string are one source", asyn
   const result = success(await run(harness, { q: "freight report", budget: "quick" }));
   assert.equal(result.details.results, 1, "canonical host+path de-duplication");
   assert.equal(harness.calls.read.length, 1);
+});
+
+
+// ---------------------------------------------------------------------------
+// P14 — the page gate ranks research sources and never starves a round
+// ---------------------------------------------------------------------------
+
+test("P14 page gate skips a refused source and ranks the rest", async () => {
+  const reflex = spyReflex({
+    judgePages: async (_query: string, subjects: readonly PageSubject[]): Promise<PageVerdict[]> =>
+      subjects.map((subject) => ({
+        worth: !subject.url.includes("docs.example.test"),
+        trust: subject.url.includes("reference.example.test") ? 0.4 : 0.9,
+        kind: "unknown",
+        reasons: ["test"],
+      })),
+    coverage: async () => ({ enough: false, next: "read_more" }),
+  });
+  const harness = makeHarness({
+    fixture: BASIC,
+    reflex,
+    config: (config) => {
+      config.reflex.enabled = true;
+    },
+  });
+
+  const result = success(await run(harness, { q: BASIC.query, budget: "normal" }));
+
+  assert.match(harness.calls.read[0]?.url ?? "", /blog\.example\.test/, "the refused docs page is not first");
+  assert.ok(
+    harness.calls.read.every((call) => !call.url.includes("docs.example.test")),
+    "a refused source is never read",
+  );
+  assert.ok(result.details.gate !== undefined, "the gate telemetry must be reported");
+  assert.ok((result.details.gate?.judged ?? 0) >= 1);
+  assert.ok((result.details.gate?.skipped ?? 0) >= 1);
+});
+
+test("P14 page gate never reads a refused source twice: all-refused spends no read", async () => {
+  const reflex = spyReflex({
+    judgePages: async (_query: string, subjects: readonly PageSubject[]): Promise<PageVerdict[]> =>
+      subjects.map(() => ({ worth: false, trust: 0.1, kind: "slop", reasons: ["test:all-slop"] })),
+    coverage: async () => ({ enough: false, next: "read_more" }),
+  });
+  const harness = makeHarness({
+    fixture: BASIC,
+    reflex,
+    config: (config) => {
+      config.reflex.enabled = true;
+    },
+  });
+
+  const result = success(await run(harness, { q: BASIC.query, budget: "normal" }));
+
+  assert.equal(harness.calls.read.length, 0, "slop is not read just to fill a slot");
+  assert.equal(result.details.reads, 0);
+  assert.ok((result.details.gate?.skipped ?? 0) >= 1, "the refusal is reported");
+  assert.match(textOf(result), /cdp|browser/i, "the SERP snippets still answer");
 });

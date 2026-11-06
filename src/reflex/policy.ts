@@ -33,8 +33,19 @@ import type { Config } from "../config.ts";
 import { ENGINE_IDS, type EngineId, type Freshness } from "../engines/types.ts";
 import { MIN_CLAIM_COVERAGE, claimsCoverage } from "../extract/claims.ts";
 import type { Cache, Clock, Logger } from "../runtime/types.ts";
-import { RULES_MODEL } from "./rules.ts";
-import type { Candidate, CoverageVerdict, Evidence, Reflex, Route, TriageResult } from "./types.ts";
+import { RULES_MODEL, judgePagesSync } from "./rules.ts";
+import type {
+  Candidate,
+  CoverageVerdict,
+  Evidence,
+  PageKind,
+  PageSubject,
+  PageVerdict,
+  Reflex,
+  Route,
+  TriageResult,
+} from "./types.ts";
+import { PAGE_BATCH_MAX } from "./types.ts";
 
 /** 24 h verdict cache (SPEC §9.3). */
 export const VERDICT_TTL_MS = 86_400_000;
@@ -45,7 +56,7 @@ export const BUDGET_LOG_KIND = "budget";
 /** Placeholder model for a backend that does not report one. */
 export const UNKNOWN_MODEL = "unknown";
 
-export type Decision = "triage" | "gate_read" | "coverage" | "route";
+export type Decision = "triage" | "gate_read" | "page_gate" | "coverage" | "route";
 
 export interface Usage {
   inputTokens?: number;
@@ -77,6 +88,12 @@ export interface BackendResult<T> {
 export interface ReflexBackend {
   triage(query: string, items: Candidate[]): Promise<BackendResult<TriageResult>>;
   gateRead(query: string, item: Candidate): Promise<BackendResult<boolean>>;
+  /**
+   * P14 (additive, optional): one batch page-quality verdict. A backend written
+   * before P14 simply omits it; the policy then answers the page gate from rules
+   * and logs it, exactly as it does for a disabled reflex.
+   */
+  judgePages?(query: string, subjects: readonly PageSubject[]): Promise<BackendResult<PageVerdict[]>>;
   coverage(query: string, evidence: Evidence[]): Promise<BackendResult<CoverageVerdict>>;
   route(query: string): Promise<BackendResult<Route>>;
 }
@@ -113,11 +130,12 @@ export interface PolicyDeps {
 }
 
 export interface ReflexPolicy extends Reflex {
+  /** P14: required on the policy; the frozen `Reflex` keeps it optional. */
+  judgePages(query: string, subjects: readonly PageSubject[]): Promise<PageVerdict[]>;
   /** Reset the per-search budget. A query change resets it automatically. */
   beginSearch(): void;
   stats(): PolicyStats;
 }
-
 // ---------------------------------------------------------------------------
 // Small guards (no `any`)
 // ---------------------------------------------------------------------------
@@ -187,6 +205,29 @@ function isValidRoute(value: unknown): value is Route {
   );
 }
 
+const PAGE_KINDS: readonly PageKind[] = [
+  "original",
+  "aggregator",
+  "forum",
+  "slop",
+  "unsafe",
+  "unknown",
+];
+
+function isPageVerdict(value: unknown): value is PageVerdict {
+  if (!isRecord(value) || typeof value.worth !== "boolean") return false;
+  if (value.trust !== null && !(typeof value.trust === "number" && Number.isFinite(value.trust))) {
+    return false;
+  }
+  if (typeof value.trust === "number" && (value.trust < 0 || value.trust > 1)) return false;
+  if (!PAGE_KINDS.includes(value.kind as PageKind)) return false;
+  return Array.isArray(value.reasons) && value.reasons.every((reason) => typeof reason === "string");
+}
+
+function isValidPageVerdicts(value: unknown, count: number): value is PageVerdict[] {
+  return Array.isArray(value) && value.length === count && value.every(isPageVerdict);
+}
+
 // ---------------------------------------------------------------------------
 // Backend normalization: accept `Reflex` or `ReflexBackend`
 // ---------------------------------------------------------------------------
@@ -194,6 +235,7 @@ function isValidRoute(value: unknown): value is Route {
 interface NormalizedBackend {
   triage(query: string, items: Candidate[]): Promise<BackendResult<unknown>>;
   gateRead(query: string, item: Candidate): Promise<BackendResult<unknown>>;
+  judgePages(query: string, subjects: readonly PageSubject[]): Promise<BackendResult<unknown>>;
   coverage(query: string, evidence: Evidence[]): Promise<BackendResult<unknown>>;
   route(query: string): Promise<BackendResult<unknown>>;
 }
@@ -237,6 +279,14 @@ function normalizeBackend(backend: Reflex | ReflexBackend): NormalizedBackend {
   return {
     triage: async (query, items) => unwrap(await plain.triage(query, items)),
     gateRead: async (query, item) => unwrap(await plain.gateRead(query, item)),
+    judgePages: async (query, subjects) => {
+      // A plain `Reflex` (or a pre-P14 backend) may lack the method; that is the
+      // old contract, and the policy must treat it as "no verdict", not an error.
+      if (typeof plain.judgePages !== "function") {
+        return { value: null, meta: { confidence: 0, stopReason: "error" } };
+      }
+      return unwrap(await plain.judgePages(query, subjects));
+    },
     coverage: async (query, evidence) => unwrap(await plain.coverage(query, evidence)),
     route: async (query) => unwrap(await plain.route(query)),
   };
@@ -293,6 +343,44 @@ interface CachedVerdict {
   confidence: number;
   usage: Usage;
   fallback: boolean;
+}
+
+/**
+ * Merge one rules batch with one model batch (V14 floor).
+ *
+ * The rules layer owns safety: an `unsafe` verdict is returned untouched, and a
+ * model may *add* a skip but never rescue a page the rules judged worthless.
+ * That is deliberate — a rescue spends a browser read on a page two independent
+ * judges disagree about, and the gate's measured contract is "fewer wasted
+ * reads", not "fewer rules". The model's value is the pages the rules cannot
+ * judge (unknown host, no excerpt), where it can still add skips, and its
+ * `kind`/`trust` refine the reasons a tool shows.
+ *
+ * The merge is idempotent (`merge(v, v)` returns `v`), which is what lets the
+ * policy pass a rules fallback through the same `settle` step as a model batch.
+ */
+export function mergePageVerdicts(
+  baseline: readonly PageVerdict[],
+  model: readonly PageVerdict[],
+): PageVerdict[] {
+  return baseline.map((base, index) => {
+    const judged = model[index];
+    if (judged === undefined) return base;
+    if (base.kind === "unsafe") return base;
+
+    const modelUnsafe = judged.kind === "unsafe";
+    const modelSlop = judged.kind === "slop";
+    const worth = !modelUnsafe && !modelSlop && base.worth && judged.worth;
+    // When the merge turns a readable page into a skip, the honest kind is
+    // "slop"; a page the baseline already refused keeps its own kind (a login
+    // URL is not slop), which is also what makes the merge idempotent.
+    const kind: PageKind = modelUnsafe ? "unsafe" : worth ? judged.kind : base.worth ? "slop" : base.kind;
+    const trust = Math.min(base.trust ?? 1, judged.trust ?? 1);
+    const reasons = [...base.reasons];
+    if (!judged.worth && base.worth) reasons.push("model:skip");
+    if (judged.kind !== base.kind) reasons.push(`model:${judged.kind}`);
+    return { worth, trust, kind, reasons: reasons.slice(0, 8) };
+  });
 }
 
 function isCachedVerdict(value: unknown): value is CachedVerdict {
@@ -595,6 +683,24 @@ export function createPolicy(deps: PolicyDeps): ReflexPolicy {
         backend: backend === null ? null : () => backend.gateRead(query, item),
         validate: (value): value is boolean => typeof value === "boolean",
         verdict: (value) => (value ? "read" : "skip"),
+      });
+    },
+
+    judgePages(query, subjects) {
+      // The contract caps a batch at `PAGE_BATCH_MAX`; the caller may pass more
+      // (a SERP is 10+ results) and gets verdicts for the prefix only.
+      const items = subjects.slice(0, PAGE_BATCH_MAX);
+      if (items.length === 0) return Promise.resolve<PageVerdict[]>([]);
+      const baseline = judgePagesSync(query, items);
+      return decide<PageVerdict[]>({
+        decision: "page_gate",
+        query,
+        cacheMaterial: items.map((item) => urlCacheKey(item.url)).join("\n"),
+        rules: () => Promise.resolve(baseline),
+        backend: backend === null ? null : () => backend.judgePages(query, items),
+        validate: (value) => isValidPageVerdicts(value, items.length),
+        verdict: (value) => `keep=${value.filter((item) => item.worth).length}/${value.length}`,
+        settle: (value) => mergePageVerdicts(baseline, value),
       });
     },
 

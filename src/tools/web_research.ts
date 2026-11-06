@@ -47,7 +47,8 @@ import {
 } from "../extract/claims.ts";
 import { domainOf, normalizeUrl, sourceKey, stripTrackingFromText } from "../extract/urls.ts";
 import { queryTerms, tokenize } from "../reflex/rules.ts";
-import type { Candidate, CoverageNext, CoverageVerdict, Evidence } from "../reflex/types.ts";
+import type { Candidate, CoverageNext, CoverageVerdict, Evidence, PageVerdict } from "../reflex/types.ts";
+import { PAGE_BATCH_MAX } from "../reflex/types.ts";
 import type { ErrorCode, FailureDetails, Stage } from "../runtime/error-codes.ts";
 import { isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, renderToolFailure, toFailure } from "../runtime/errors.ts";
@@ -143,6 +144,13 @@ export interface ResearchDetails {
   evidence: ResearchEvidence;
   /** Set when a later search/read failed but earlier evidence was still returned. */
   error?: { code: ErrorCode; stage: Stage };
+  /**
+   * P14 gate telemetry: how many candidates the page gate judged and how many it
+   * refused. `skipped` is the honest "reads not spent on junk" number; it is not
+   * a promise that fewer reads were *used*, because a refused candidate frees a
+   * slot for the next one.
+   */
+  gate?: { judged: number; skipped: number };
 }
 
 export interface WebResearchSuccess {
@@ -494,6 +502,11 @@ interface LoopState {
   reads: ReadRecord[];
   searches: number;
   readCount: number;
+  /** P14: candidates the page gate judged / refused across rounds. */
+  gateJudged: number;
+  gateSkipped: number;
+  /** URLs the page gate refused: they never get a read and are never re-picked. */
+  refused: Set<string>;
   lastError?: { code: ErrorCode; stage: Stage };
 }
 
@@ -578,13 +591,73 @@ function sanitizeKeep(keep: unknown, length: number): number[] {
 }
 
 /**
+ * P14 page gate for a research round.
+ *
+ * One call ranks up to `PAGE_BATCH_MAX` candidates: refused (`worth:false`)
+ * sources are dropped, survivors are ordered by trust (a forum thread after the
+ * docs page it cites) while keeping the SERP order as the tie-break.
+ *
+ * Returns `null` when there is no gate or it abstains — the caller then keeps
+ * the fixed order. A gate that refuses *everything* is not a failure: it returns
+ * an empty keep list, the round spends no read, and the refused URLs are marked
+ * in `state.refused` so the loop cannot pick them again (that would be a wall of
+ * slop read one page at a time). The bundle still cites the SERP snippets.
+ */
+async function pageGateOrder(
+  query: string,
+  batch: readonly Candidate[],
+  reflexOn: boolean,
+  deps: ToolDeps,
+): Promise<{ keep: number[]; judged: number; skipped: number; refused: string[] } | null> {
+  if (!reflexOn || deps.reflex === undefined || typeof deps.reflex.judgePages !== "function") {
+    return null;
+  }
+  const subjects = batch.slice(0, PAGE_BATCH_MAX).map((item) => ({
+    url: item.url,
+    title: item.title,
+    snippet: item.snippet,
+  }));
+  let verdicts: PageVerdict[] | null;
+  try {
+    verdicts = await deps.reflex.judgePages(query, subjects);
+  } catch {
+    return null;
+  }
+  if (verdicts === null || verdicts.length === 0) return null;
+
+  const judged = verdicts.length;
+  const survivors: Array<{ index: number; trust: number }> = [];
+  const refused: string[] = [];
+  let skipped = 0;
+  for (let index = 0; index < judged; index += 1) {
+    const verdict = verdicts[index];
+    if (verdict === undefined) {
+      // No verdict for this slot: keep it, the gate only removes what it judged.
+      survivors.push({ index, trust: 0.5 });
+      continue;
+    }
+    if (!verdict.worth) {
+      skipped += 1;
+      const refusedUrl = batch[index]?.url;
+      if (refusedUrl !== undefined) refused.push(refusedUrl);
+      continue;
+    }
+    survivors.push({ index, trust: verdict.trust ?? 0.5 });
+  }
+  survivors.sort((a, b) => b.trust - a.trust || a.index - b.index);
+  return { keep: survivors.map((entry) => entry.index), judged, skipped, refused };
+}
+
+/**
  * The candidates to read this round, best first. Current-round results come
  * before leftovers from earlier queries, because the rewritten query is the tool's
  * best guess at what is still missing.
  *
  * Triage is advisory: an exception, an empty keep list or a malformed verdict
  * falls back to the fixed order (`first k`), so a broken reflex can never turn a
- * working search into zero reads.
+ * working search into zero reads. The P14 page gate then removes sources that
+ * are not worth a browser trip and ranks the rest by trust, inside the already
+ * triaged set so the two decisions compose instead of fighting.
  */
 async function pickCandidates(
   query: string,
@@ -594,7 +667,7 @@ async function pickCandidates(
   deps: ToolDeps,
 ): Promise<Candidate[]> {
   if (k <= 0) return [];
-  const unread = [...state.seen.values()].filter((item) => !state.read.has(item.url));
+  const unread = [...state.seen.values()].filter((item) => !state.read.has(item.url) && !state.refused.has(item.url));
   const fresh = unread.filter((item) => state.roundUrls.has(item.url));
   const stale = unread.filter((item) => !state.roundUrls.has(item.url));
   const ordered = [...fresh, ...stale];
@@ -611,6 +684,15 @@ async function pickCandidates(
       // Fail-open: the fixed order is the budget, not a guess.
     }
   }
+
+  const gated = await pageGateOrder(query, keep.map((index) => candidates[index]!), reflexOn, deps);
+  if (gated !== null) {
+    state.gateJudged += gated.judged;
+    state.gateSkipped += gated.skipped;
+    for (const url of gated.refused) state.refused.add(url);
+    keep = gated.keep.map((index) => keep[index]!);
+  }
+
   return keep.map((index) => candidates[index]!);
 }
 
@@ -1004,6 +1086,9 @@ export function createWebResearchTool(
       reads: [],
       searches: 0,
       readCount: 0,
+      gateJudged: 0,
+      gateSkipped: 0,
+      refused: new Set(),
     };
 
     const tried = new Set<string>([queryKey(input.q)]);
@@ -1015,7 +1100,7 @@ export function createWebResearchTool(
     let verdict: CoverageVerdict = { enough: false, next: "read_more" };
 
     const unreadLeft = (): boolean =>
-      [...state.seen.keys()].some((url) => !state.read.has(url));
+      [...state.seen.keys()].some((url) => !state.read.has(url) && !state.refused.has(url));
 
     for (;;) {
       if (aborted()) throw cancelled("navigate");
@@ -1145,6 +1230,9 @@ export function createWebResearchTool(
       truncated: fitted.truncated || capCutReads,
       coverage: { enough: verdict.enough, next: verdict.next },
       evidence: fitted.evidence,
+      ...(state.gateJudged > 0
+        ? { gate: { judged: state.gateJudged, skipped: state.gateSkipped } }
+        : {}),
       ...(state.lastError === undefined ? {} : { error: state.lastError }),
     };
 
@@ -1161,6 +1249,7 @@ export function createWebResearchTool(
         chars: details.chars,
         truncated: details.truncated,
         enough: details.coverage.enough,
+        ...(details.gate === undefined ? {} : { gateJudged: details.gate.judged, gateSkipped: details.gate.skipped }),
       })
       .catch(() => undefined);
 

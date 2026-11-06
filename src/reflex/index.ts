@@ -115,6 +115,7 @@ function adapt(classifier: ClassifierReflex): ReflexBackend {
   return {
     triage: (query, items) => judged(() => classifier.triage(query, items), last),
     gateRead: (query, item) => judged(() => classifier.gateRead(query, item), last),
+    judgePages: (query, subjects) => judged(() => classifier.judgePages(query, subjects), last),
     coverage: (query, evidence) => judged(() => classifier.coverage(query, evidence), last),
     route: (query) => judged(() => classifier.route(query), last),
   };
