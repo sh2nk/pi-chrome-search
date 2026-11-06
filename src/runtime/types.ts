@@ -48,6 +48,8 @@ export interface ArtifactInput {
   serp?: RawSerp;
   page?: CdpPage;
   extra?: Record<string, unknown>;
+  /** Extra files written into the artifact directory (`doc.pdf` for P12-A). */
+  files?: Record<string, Uint8Array>;
 }
 
 export interface PruneResult {

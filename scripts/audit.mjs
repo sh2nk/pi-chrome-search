@@ -698,7 +698,7 @@ const R2_PATTERNS = [
  * extractor fallback (P12). Nowhere else may spawn, so Chrome can never be
  * launched/restarted/killed by accident.
  */
-const SPAWN_ALLOWED_FILES = ["src/runtime/notify.ts", "src/cdp/raise.ts"];
+const SPAWN_ALLOWED_FILES = ["src/runtime/notify.ts", "src/cdp/raise.ts", "src/extract/pdf.ts"];
 
 const R3_PATTERNS = [
   // `kill(pid, 0)` is the portable liveness probe (PO4), and it lives only in
@@ -734,7 +734,10 @@ const R3_PATTERNS = [
 /**
  * R13 — host confinement (PLAN v2 §2.1, PO1–PO4).
  *
- * The only allowed module is src/runtime/host.ts. Everything else is a leak:
+ * The only allowed module for host facts is src/runtime/host.ts. Spawning is
+ * limited to the three declared adapters (notify.ts, raise.ts, and P12's
+ * extract/pdf.ts, which streams bytes to an already-resolved capability).
+ * Everything else is a leak:
  * importing `node:os`, reading `$HOME`/`PATH`/`LOCALAPPDATA`, naming an OS path,
  * spawning an executable, or checking a pid. Patterns run on comment-blanked
  * code, so the doctrine can be documented anywhere without tripping the rule.
@@ -1562,7 +1565,7 @@ function hostConfinementCheck(store, files) {
     notes: [
       "allowed module: src/runtime/host.ts (platform, paths, profile tables, capability(), isProcessAlive)",
       "forbidden elsewhere: node:os, $HOME/PATH/PATHEXT/LOCALAPPDATA, /proc/, /usr/bin|/bin|/etc, .config/, ~/ string surgery, process.kill",
-      "PO1: a capability is probed with access(X_OK); only notify.ts/raise.ts may spawn, through capability()",
+      "PO1: a capability is probed with access(X_OK); only notify.ts/raise.ts/pdf.ts may spawn, through capability()",
     ],
   };
 }

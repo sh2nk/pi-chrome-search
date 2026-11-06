@@ -25,7 +25,9 @@ export type ErrorCode =
   | "E_CANCELLED"
   | "E_NAVIGATION_MISMATCH"
   | "E_OFFSET_RANGE"
-  | "E_CDP_AWAITING_ALLOW";
+  | "E_CDP_AWAITING_ALLOW"
+  | "E_PDF_SCANNED"
+  | "E_PDF_UNSUPPORTED";
 
 export const ERROR_CODES = [
   "E_CONFIG",
@@ -44,6 +46,8 @@ export const ERROR_CODES = [
   "E_NAVIGATION_MISMATCH",
   "E_OFFSET_RANGE",
   "E_CDP_AWAITING_ALLOW",
+  "E_PDF_SCANNED",
+  "E_PDF_UNSUPPORTED",
 ] as const satisfies readonly ErrorCode[];
 
 export type Stage =
@@ -116,6 +120,12 @@ export const ERROR_HINTS: Record<ErrorCode, string> = {
     "the browser is waiting for the DevTools Allow: open the remote-debugging page " +
     "(chrome://inspect/#remote-debugging for Chrome; edge://, brave:// or chromium:// for the other " +
     "Chromium-family browsers), tick \"Discover network targets\" and click Allow — the call resumes by itself",
+  E_PDF_SCANNED:
+    "the PDF is a scan with no text layer; OCR is out of scope and silently inventing text is forbidden — " +
+    "open it in the browser or find an HTML/text version with the same content",
+  E_PDF_UNSUPPORTED:
+    "the PDF could not be decoded; the in-tree extractor found no readable text and no installed " +
+    "pdftotext/mutool fallback succeeded — try the HTML version of the document or open the artifact",
 };
 
 export const RETRYABLE: Record<ErrorCode, boolean> = {
@@ -135,6 +145,8 @@ export const RETRYABLE: Record<ErrorCode, boolean> = {
   E_NAVIGATION_MISMATCH: true,
   E_OFFSET_RANGE: false,
   E_CDP_AWAITING_ALLOW: true,
+  E_PDF_SCANNED: false,
+  E_PDF_UNSUPPORTED: false,
 };
 
 export class WebSearchError extends Error {

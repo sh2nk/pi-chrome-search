@@ -20,6 +20,24 @@ export interface TypeOptions {
   maxMs?: number;
 }
 
+export interface FetchBytesOptions {
+  /** Hard ceiling; an oversized response is refused before its body is read when possible. */
+  maxBytes?: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  /** Config key named in the ceiling error (default `read.pdfMaxBytes`). */
+  ceilingKey?: string;
+}
+
+export interface FetchedBytes {
+  /** Final URL after redirects (the caller must re-run the SSRF guard on it). */
+  url: string;
+  status: number;
+  /** Lowercase MIME type without parameters, e.g. `application/pdf`. */
+  contentType: string;
+  bytes: Buffer;
+}
+
 export interface CookieInfo {
   name: string;
   value: string;
@@ -110,6 +128,19 @@ export interface CdpConnector {
   releaseAll(): Promise<void>;
   isConnected(): boolean;
   endpoint(): CdpEndpoint | null;
+  /**
+   * P12: fetch a response body through Chrome (see src/cdp/bytes.ts). Optional so
+   * offline fakes need not implement it; a tool that needs bytes reports
+   * E_UNSUPPORTED when the connector cannot fetch rather than pretending.
+   */
+  fetchBytes?(url: string, o?: FetchBytesOptions): Promise<FetchedBytes>;
+  /**
+   * P12-A: forget a cached work tab (close it when we opened it). Chrome swaps
+   * a PDF tab's document into an out-of-process viewer, which can leave the
+   * flattened session detached; the next read must start from a fresh tab
+   * instead of inheriting that half-dead one.
+   */
+  releasePage?(key: PageKey): Promise<void>;
   /**
    * P10-A/B: report a stage to the owned anchor and apply `window.follow`.
    * Optional so offline fakes need nothing; a connector without it simply has no

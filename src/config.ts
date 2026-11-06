@@ -121,6 +121,17 @@ export interface ReadConfig {
    * reads cannot navigate each other's page. Never more than 3 (profile safety).
    */
   pool: number;
+  /** Hard ceiling for a fetched PDF (P12-A). A larger file fails fast, naming its size. */
+  pdfMaxBytes: number;
+  /** Keep the fetched PDF bytes next to the text artifact (P12-A); default off. */
+  keepPdf: boolean;
+  /** Per-page text cap before the next `--- p.N ---` marker (P12-B). */
+  pdfPageMaxChars: number;
+}
+
+export interface ImageConfig {
+  /** Per-thumbnail byte ceiling for `attach:"bytes"` (P12-C); default 8 MB. */
+  attachMaxBytes: number;
 }
 
 export interface CacheConfig {
@@ -177,6 +188,7 @@ export interface Config {
   pacing: PacingConfig;
   search: SearchConfig;
   read: ReadConfig;
+  image: ImageConfig;
   cache: CacheConfig;
   captcha: CaptchaConfig;
   artifacts: ArtifactsConfig;
@@ -204,7 +216,15 @@ export const DEFAULT_CONFIG: Config = {
     aiWaitMs: 6000,
     aiExpand: false,
   },
-  read: { defaultMaxChars: 6000, maxCharsCeiling: 20000, pool: 1 },
+  read: {
+    defaultMaxChars: 6000,
+    maxCharsCeiling: 20000,
+    pool: 1,
+    pdfMaxBytes: 20 * 1024 * 1024,
+    keepPdf: false,
+    pdfPageMaxChars: 4000,
+  },
+  image: { attachMaxBytes: 8 * 1024 * 1024 },
   cache: { serpTtlMs: 600000, gotoTtlMs: 86400000, maxEntries: 200 },
   captcha: { waitMs: 0, retryYandexOnce: true },
   artifacts: { enabled: true, keep: 30, maxBytes: 52428800 },
@@ -320,7 +340,18 @@ const CONFIG_SPEC: Spec = {
     },
     read: {
       kind: "object",
-      fields: { defaultMaxChars: NUM(1), maxCharsCeiling: NUM(1), pool: NUM(1, true, 3) },
+      fields: {
+        defaultMaxChars: NUM(1),
+        maxCharsCeiling: NUM(1),
+        pool: NUM(1, true, 3),
+        pdfMaxBytes: NUM(1),
+        keepPdf: BOOL,
+        pdfPageMaxChars: NUM(1),
+      },
+    },
+    image: {
+      kind: "object",
+      fields: { attachMaxBytes: NUM(1) },
     },
     cache: {
       kind: "object",

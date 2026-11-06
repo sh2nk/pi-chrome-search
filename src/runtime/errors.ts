@@ -229,6 +229,18 @@ export interface ToolTextBlock {
   text: string;
 }
 
+/**
+ * P12-C: an image block. Shape mirrors pi's `ImageContent` (base64 `data` +
+ * `mimeType`) without importing pi, so the result still serializes for codemode.
+ */
+export interface ToolImageBlock {
+  type: "image";
+  data: string;
+  mimeType: string;
+}
+
+export type ToolContentBlock = ToolTextBlock | ToolImageBlock;
+
 export interface ToolFailureResult {
   content: ToolTextBlock[];
   details: FailureJson;
