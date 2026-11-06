@@ -3,24 +3,33 @@
  * pi-chrome-search — hard-rule audit.
  *
  * Zero dependencies, read-only, no side effects. Run with `node scripts/audit.mjs` or
- * `npm run audit`; add `--json` for machine output. Exit codes: 0 clean, 1 violation, 2 usage error.
+ * `npm run audit`; add `--json` for machine output; add `--self-test` to prove the newest rules fire
+ * (it writes throwaway fixtures under /tmp/opencode and never touches the repo).
+ * Exit codes: 0 clean, 1 violation, 2 usage error.
  *
  * The checks mirror AGENTS.md §2 and PLAN.md §4.1:
  *
  *   R1  attach only: no automation/browser launch in src/ or tests/ (any Playwright, Puppeteer,
- *       WebdriverIO or generic `.launch(`, plus headless/automation flags)
+ *       WebdriverIO or generic `.launch(`, plus headless/automation flags — also when the name is
+ *       reached through a bracket/template key or a destructured alias)
  *   R2  no fingerprint spoofing (UA, Emulation, init scripts, navigator.webdriver assignment)
- *   R3  never kill/restart the user's Chrome
+ *   R3  never kill/restart the user's Chrome (including child_process in src/)
  *   R4  no captcha solving (surface the window instead — E_WALL)
  *   R5  no paid search APIs or keys (ctx.modelRegistry classifiers are not matched)
  *   R6  no secrets in tracked files (values redacted in the report)
  *   R7  no personal data in tests/fixtures/** (values redacted in the report)
  *   R8  repo hygiene: tracked build/output dirs, .env files, tracked screenshots, .gitignore
  *   R9  tool-description budget hook (approximate; authoritative gate is the P2 unit test)
+ *   R10 docs consistency: SPEC ↔ PLAN ↔ AGENTS agree on commands, config paths and tool exposures
+ *   R11 evidence completeness: every phase the status table claims has an evidence file with a
+ *       recorded command and a verdict
+ *   R12 packaging sanity: package.json metadata, no install hooks, `files` limited to shipped paths
  *
  * Scope (also printed with the report, so the deliberate exclusions are never a mystery):
  *   R1 = src/ + tests/   R2–R5 = src/   R6 = everything except node_modules/, .git/, research/
  *   R7 = tests/fixtures/**   R8 = repo hygiene   R9 = approximate
+ *   R10 = SPEC.md, PLAN.md, AGENTS.md (+ package.json scripts)   R11 = PLAN.md §5 + evidence/
+ *   R12 = package.json
  * `playwright-core` is allowed in research/ and bench/ for comparison (SPEC §4), so those trees are
  * intentionally outside R1; bench/ does not exist yet and is not scanned until it does.
  *
@@ -36,7 +45,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import {
+  lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
@@ -64,9 +75,12 @@ if (argv.includes("--help") || argv.includes("-h")) {
 }
 
 let json = false;
+let selfTest = false;
 for (const arg of argv) {
   if (arg === "--json") {
     json = true;
+  } else if (arg === "--self-test") {
+    selfTest = true;
   } else {
     process.stderr.write(`audit: unknown argument ${JSON.stringify(arg)}\n\n${usage()}\n`);
     process.exit(2);
@@ -75,10 +89,13 @@ for (const arg of argv) {
 
 function usage() {
   return [
-    "usage: node scripts/audit.mjs [--json]",
+    "usage: node scripts/audit.mjs [--json] [--self-test]",
     "",
-    "  default  readable report per rule (R1..R9)",
-    "  --json   machine-readable report on stdout",
+    "  default     readable report per rule (R1..R12)",
+    "  --json      machine-readable report on stdout",
+    "  --self-test run the R1/R2/R3 launch-detection, R10, R11 and R12 rules against",
+    "              throwaway fixtures in /tmp/opencode and assert that each one fires",
+    "              (and stays quiet on a clean fixture); exits 1 if a rule is not live",
     "",
     "exit 0 = clean, 1 = violations, 2 = usage/internal error",
   ].join("\n");
@@ -577,6 +594,22 @@ const R1_PATTERNS = [
     family: "launch",
     hint: "no browser/process launcher in src/ or tests/; attach to the running Chrome",
   },
+  // A launcher reached through a computed key is still a launcher: the dotted patterns above only
+  // see `chromium.launch(`, so `chromium[`launch`](…)` would have slipped through. The receiver is
+  // deliberately not constrained — `c[\`launch\`]()` after an import alias is the same call. Template
+  // bodies survive `stripComments`, so the `["'`]` alternation covers a template-key spelling too.
+  {
+    re: /[A-Za-z_$][\w$]*\s*\[\s*["'`](?:launch|launchPersistentContext|launchServer)["'`]\s*\]\s*\(/,
+    family: "launch",
+    hint: "a computed launcher key is still a launch; attach over raw CDP",
+  },
+  // Destructuring hides the receiver (`const { launch } = chromium; launch()`). No code in src/ or
+  // tests/ may call a bare launch*(), so the shape itself is forbidden rather than resolved.
+  {
+    re: /\b(?:launch|launchPersistentContext|launchServer)\s*\(/,
+    family: "launch",
+    hint: "no bare launch*() call (aliased or destructured launcher); attach over raw CDP",
+  },
   {
     re: /\bheadless\s*:\s*true\b/i,
     family: "headless",
@@ -584,21 +617,56 @@ const R1_PATTERNS = [
   },
   { re: /--enable-automation/, hint: "an automation flag makes the session detectable; attach instead" },
   { re: /--headless/, family: "headless", hint: "the browser must be real and headed (AGENTS §2.4)" },
+  // A flag split across a concatenation (`"--head" + "less"`) renders the same argv entry.
+  {
+    re: /["'`]--head["'`]\s*\+/,
+    family: "headless",
+    hint: "a split --headless flag is still headless; keep the browser headed (AGENTS §2.4)",
+  },
+  {
+    re: /["'`]--enable-auto(?:mation)?["'`]\s*\+/,
+    hint: "a split --enable-automation flag is still an automation flag",
+  },
 ];
 
 const R2_PATTERNS = [
   { re: /addScriptToEvaluateOnNewDocument/, hint: "no init-script injection; extract with one-off Runtime.evaluate" },
+  {
+    re: /addScriptToEvaluate["'`]\s*\+/,
+    hint: "a split addScriptToEvaluateOnNewDocument is still an init-script injection",
+  },
   { re: /Emulation\.set/, hint: "never override device/UA/locale/timezone emulation" },
+  { re: /\bEmulation\s*\[\s*["'`]set/, hint: "never override device/UA/locale/timezone emulation" },
   { re: /setUserAgentOverride/, hint: "do not spoof the user agent" },
   { re: /navigator\s*\.\s*webdriver\s*=(?!=)/, hint: "never assign navigator.webdriver; reading it for the doctor is fine" },
   {
     re: /navigator\s*\[\s*["'`]webdriver["'`]\s*\]\s*=(?!=)/,
     hint: "never assign navigator.webdriver; reading it for the doctor is fine",
   },
+  // Assignment is not the only way to patch it: defineProperty/Reflect/delete all change the value
+  // the page and the doctor observe.
+  {
+    re: /Object\s*\.\s*defineProperty\s*\(\s*(?:window\s*\.\s*)?navigator\s*,/,
+    hint: "never redefine a navigator property (webdriver/platform/…) — that is fingerprint spoofing",
+  },
+  {
+    re: /\bdelete\s+navigator\s*(?:\.\s*webdriver\b|\[\s*["'`]webdriver)/,
+    hint: "never delete navigator.webdriver; the real value must stay observable",
+  },
+  {
+    re: /Reflect\s*\.\s*(?:set|defineProperty)\s*\(\s*navigator/,
+    hint: "never patch navigator through Reflect",
+  },
 ];
 
 const R3_PATTERNS = [
   { re: /\bprocess\.kill\b/, hint: "never kill the user's Chrome or its process tree; ask the user" },
+  // src/ never needs to spawn a process: CDP is a WebSocket, not a subprocess. `child_process` is
+  // therefore forbidden wholesale (this also covers `node:child_process` and require() forms).
+  {
+    re: /\bchild_process\b/,
+    hint: "no child_process in src/: never spawn, kill or restart Chrome — attach over CDP and ask the user",
+  },
   { re: /\bpkill\b/, hint: "never kill the user's Chrome; ask the user" },
   { re: /\btaskkill\b/, hint: "never kill the user's Chrome; ask the user" },
   { re: /chrome[^\n]*--restart/i, hint: "never restart Chrome; attach to the running instance" },
@@ -661,12 +729,15 @@ const ENV_TEMPLATES = new Set([".env.example", ".env.sample", ".env.template"]);
  * playwright-core in research/ and bench/), so they must be visible instead of looking like a miss.
  */
 const SCOPE_NOTES = [
-  "R1 = src/ + tests/ (browsers: playwright, puppeteer, webdriverio, launchPersistentContext, any `.launch(`, headless, --enable-automation)",
-  "R2–R5 = src/ only (production code that ships)",
+  "R1 = src/ + tests/ (browsers: playwright, puppeteer, webdriverio, launchPersistentContext, any `.launch(`, computed/aliased launchers, headless, --enable-automation)",
+  "R2–R5 = src/ only (production code that ships; R3 also forbids child_process)",
   "R6 = all files except node_modules/, .git/, research/",
   "R7 = tests/fixtures/** (excluding *.md docs)",
   "R8 = repo hygiene: every tracked path + .gitignore",
   "R9 = approximate (description/promptSnippet literals in src/tools/*.ts); authoritative gate is tests/unit/tool_budget.test.ts",
+  "R10 = SPEC.md + PLAN.md + AGENTS.md (commands, config paths, tool exposure) cross-checked with package.json scripts",
+  "R11 = PLAN.md §5 status table + the evidence files it cites (a missing file or a file with no command/verdict fails)",
+  "R12 = package.json (metadata, install hooks, `files` allowlist); the real tarball listing is gate V7.1",
   "research/ and bench/ may use playwright-core for comparison (SPEC §4) and are never scanned by R1",
   "R1–R5 match code with comments blanked; string, template and regex bodies are kept (they are code)",
 ];
@@ -787,6 +858,521 @@ function charCount(value) {
 }
 
 // ---------------------------------------------------------------------------
+// R10 — docs consistency (SPEC ↔ PLAN ↔ AGENTS)
+//
+// These are not code greps: the three documents are the contract surface, and a reader who follows
+// them must not be told two different things. The assertions are deliberately narrow and checkable:
+// the five gate commands, the two runtime paths, and the tool exposure. "Must not contradict" is
+// implemented as (a) presence in every doc, (b) no non-canonical variant of a canonical path, and
+// (c) no doc calling a non-web_search tool `direct`.
+// ---------------------------------------------------------------------------
+
+const DOC_FILES = ["SPEC.md", "PLAN.md", "AGENTS.md"];
+
+/** Commands every document must name; PLAN §3 uses them as the gates. */
+const DOC_COMMANDS = [
+  { command: "npm run typecheck", why: "the type gate" },
+  { command: "npm test", why: "the offline test gate" },
+  { command: "npm run audit", why: "the hard-rules gate" },
+  { command: "node src/cli/doctor.ts --json", why: "the canonical doctor output (PLAN V1.3)" },
+  { command: "pi -e ./src/index.ts", why: "the extension load gate" },
+];
+
+const CANONICAL_CONFIG_PATH = "~/.pi/agent/web-search.json";
+const CANONICAL_CONFIG_PATH_ENV = "$PI_CODING_AGENT_DIR/web-search.json";
+const CANONICAL_ARTIFACTS_PATH = "~/.pi/agent/web-search/artifacts";
+const CANONICAL_ARTIFACTS_PATH_ENV = "$PI_CODING_AGENT_DIR/web-search/artifacts";
+
+const DIRECT_TOOL = "web_search";
+const DEFERRED_TOOLS = ["web_read", "image_search", "web_research"];
+
+/**
+ * Strings a specific document must contain. A path that exists only in SPEC but is contradicted by
+ * AGENTS is worse than a path missing from one file, so the presence list stays short and the
+ * surrounding scan catches wrong variants everywhere.
+ */
+const DOC_REQUIRED_STRINGS = new Map([
+  [
+    "SPEC.md",
+    [
+      { text: CANONICAL_CONFIG_PATH, why: "SPEC §12 fixes the config path" },
+      { text: CANONICAL_ARTIFACTS_PATH, why: "SPEC §9/§10 fixes the artifact directory" },
+    ],
+  ],
+  ["AGENTS.md", [{ text: CANONICAL_ARTIFACTS_PATH, why: "AGENTS §7 must name the directory the code writes" }]],
+  ["PLAN.md", []],
+]);
+
+/** A tool line that says "<deferred tool> is direct" — the contradiction SPEC §7.5 forbids. */
+const DECLARES_DIRECT_RE = /^`?\s*(?:is|are)\s+`?direct\b|^`?\s*:\s*`?direct\b/i;
+
+function readRepoText(root, store, rel) {
+  // Read directly: `store.readText` records a skip entry for every missing path, and R10/R11 probe
+  // paths that are legitimately absent (evidence for a phase that has not started). A missing file
+  // here is a finding to report, not a skip in the report header.
+  try {
+    const abs = join(root, rel);
+    const st = lstatSync(abs);
+    if (!st.isFile()) return null;
+    if (st.size > MAX_FILE_BYTES) return store.readText(rel);
+    return readFileSync(abs, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function repoScripts(root, store) {
+  const text = readRepoText(root, store, "package.json");
+  if (text == null) return null;
+  try {
+    const pkg = JSON.parse(text);
+    const scripts = pkg && typeof pkg.scripts === "object" && pkg.scripts ? pkg.scripts : {};
+    return new Map(Object.entries(scripts).map(([key, value]) => [key, String(value)]));
+  } catch {
+    return null;
+  }
+}
+
+/** Start of the line containing `index`, so a finding can quote the left context of a path. */
+function linePrefix(text, index) {
+  const start = text.lastIndexOf("\n", index - 1) + 1;
+  return text.slice(start, index);
+}
+
+const PI_PATH_PREFIX_RE = /(?:~\/\.pi\/agent\/|\$PI_CODING_AGENT_DIR\/)$/;
+
+function checkDocs(root, store) {
+  const findings = [];
+  const notes = [];
+  const seen = new Set();
+  const add = (file, line, match, hint) => {
+    const key = `${file}:${line}:${match}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    findings.push({ file, line, match, hint });
+  };
+
+  const docs = new Map();
+  for (const rel of DOC_FILES) {
+    const text = readRepoText(root, store, rel);
+    if (text == null) {
+      add(rel, 0, "documentation file missing", "SPEC.md, PLAN.md and AGENTS.md are the contract surface; restore the file");
+      continue;
+    }
+    docs.set(rel, text);
+  }
+
+  // (a) the same five gate commands, verbatim, in every document.
+  for (const [rel, text] of docs) {
+    for (const { command, why } of DOC_COMMANDS) {
+      if (text.includes(command)) continue;
+      add(rel, 1, `missing documented command \`${command}\``,
+        `${why}: SPEC, PLAN and AGENTS must document the same command surface`);
+    }
+  }
+
+  // (b) a doc may only name scripts that exist; `npm run typechek` is a broken instruction.
+  const scripts = repoScripts(root, store);
+  if (!scripts) {
+    notes.push("package.json scripts unreadable — doc script references were not cross-checked");
+  } else {
+    for (const [rel, text] of docs) {
+      const re = /\bnpm (?:run ([A-Za-z0-9:_.-]+)|(test|start|stop|restart))\b/g;
+      let match;
+      while ((match = re.exec(text)) !== null) {
+        const name = match[1] ?? match[2];
+        if (scripts.has(name)) continue;
+        add(rel, lineOf(text, match.index),
+          `npm ${match[1] ? "run " : ""}${name} is not a package.json script`,
+          "docs must only name scripts that exist; fix the doc or add the script");
+      }
+    }
+  }
+
+  // (c) one canonical config path and one canonical artifact dir, everywhere.
+  for (const [rel, text] of docs) {
+    for (const match of text.matchAll(/([^\s`"'|,()[\]{}]*)web[-_]?search\.json/g)) {
+      const prefix = linePrefix(text, match.index).trimEnd();
+      const canonicalName = match[0].endsWith("/web-search.json") || match[0] === "web-search.json";
+      const canonicalPrefix = PI_PATH_PREFIX_RE.test(match[1]) || PI_PATH_PREFIX_RE.test(prefix);
+      // A bare `web-search.json` with no directory context ("the config file web-search.json") names
+      // the same file; only a spelled-out path is held to the canonical directory.
+      const bareName = match[1] === "" && !/[/\\]/.test(prefix);
+      if (canonicalName && (canonicalPrefix || bareName)) continue;
+      add(rel, lineOf(text, match.index), `non-canonical config path \`${clip(match[0], 70)}\``,
+        `use ${CANONICAL_CONFIG_PATH} (or ${CANONICAL_CONFIG_PATH_ENV}); SPEC §12 is the source of truth`);
+    }
+
+    for (const match of text.matchAll(/artifacts\b/g)) {
+      const prefix = linePrefix(text, match.index).trimEnd();
+      // Only judge paths that claim to live under the pi config dir; "artifacts/" as prose or
+      // bench/results/ is a different thing and not this assertion's business.
+      if (!/(?:~\/\.pi|\$PI_CODING_AGENT_DIR)/.test(prefix)) continue;
+      if (/(?:web-search\/)$/.test(prefix)) continue;
+      add(rel, lineOf(text, match.index), "non-canonical artifacts path",
+        `use ${CANONICAL_ARTIFACTS_PATH}/ (or ${CANONICAL_ARTIFACTS_PATH_ENV}/)`);
+    }
+  }
+
+  // (d) documented strings that must exist somewhere in a specific doc.
+  for (const [rel, text] of docs) {
+    for (const required of DOC_REQUIRED_STRINGS.get(rel) ?? []) {
+      if (text.includes(required.text)) continue;
+      add(rel, 1, `missing \`${required.text}\``, required.why);
+    }
+  }
+
+  // (e) tool exposure: web_search direct, the rest deferred — in every doc, and never inverted.
+  for (const [rel, text] of docs) {
+    const lines = text.split(/\r?\n/);
+    let directLine = 0;
+    let deferredLine = 0;
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i];
+      if (!directLine && line.includes(DIRECT_TOOL) && /\bdirect\b/.test(line)) directLine = i + 1;
+      if (!deferredLine && /\bdeferred\b/.test(line)) {
+        const named = DEFERRED_TOOLS.some((tool) => line.includes(tool));
+        const generic = /everything else|others?\b/i.test(line);
+        if (named || generic) deferredLine = i + 1;
+      }
+      for (const tool of [...DEFERRED_TOOLS, "web_doctor"]) {
+        const at = line.indexOf(tool);
+        if (at < 0) continue;
+        const tail = line.slice(at + tool.length, at + tool.length + 40);
+        if (!DECLARES_DIRECT_RE.test(tail)) continue;
+        add(rel, i + 1, `\`${tool}\` is documented as direct`,
+          `only \`${DIRECT_TOOL}\` is direct; the rest stay deferred (SPEC §7.5, AGENTS §2.10)`);
+      }
+    }
+    if (!directLine) {
+      add(rel, 1, `\`${DIRECT_TOOL}\` is not documented as the direct tool`,
+        "SPEC §7.5, PLAN V4.5 and AGENTS §2.10 must agree: web_search is the only direct tool");
+    }
+    if (!deferredLine) {
+      add(rel, 1, "no line documents the deferred tools",
+        "web_read / image_search / web_research (and web_doctor) are deferred; say so where the tool surface is described");
+    }
+  }
+
+  notes.push(
+    `checked: ${DOC_COMMANDS.length} gate command(s), npm script references against package.json, ` +
+      `canonical paths (${CANONICAL_CONFIG_PATH}, ${CANONICAL_ARTIFACTS_PATH}/), tool exposure ` +
+      `(${DIRECT_TOOL} direct; ${DEFERRED_TOOLS.join(", ")} deferred)`,
+  );
+  notes.push("exercised by `node scripts/audit.mjs --self-test` (good and broken doc fixtures)");
+
+  return { findings, files: docs.size, notes };
+}
+
+// ---------------------------------------------------------------------------
+// R11 — evidence completeness
+//
+// PLAN §5 is the claim table and evidence/ is the proof. A started phase (`[~]`, `[x]`, `[!]`, `[-]`)
+// must have its file, and the file must record at least one runnable command and one verdict. A
+// not-started `[ ]` phase is exempt (there is nothing to prove yet); when it turns green this rule
+// starts demanding its file, which is exactly the V7.6 gate.
+//
+// "Command" accepts the two forms the repo actually uses: a fenced block with command lines (P1,
+// P4, P5) and a markdown table cell with an inline `command` span (P0, P2, P3). Requiring fences
+// only would have failed three committed evidence files that do record their commands.
+// ---------------------------------------------------------------------------
+
+const EVIDENCE_COMMAND_RE =
+  /^(?:\$ )?(?:[A-Za-z_][A-Za-z0-9_]*=\S+ )*(?:npm|npx|node|pi|git|curl|jq|tsc|bash|sh|python3?)\b/;
+
+function evidenceSignals(text) {
+  let commands = 0;
+  let inFence = false;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line.startsWith("```")) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence && EVIDENCE_COMMAND_RE.test(line)) commands += 1;
+  }
+  if (commands === 0) {
+    for (const match of text.matchAll(/`([^`\n]+)`/g)) {
+      if (EVIDENCE_COMMAND_RE.test(match[1].trim())) commands += 1;
+    }
+  }
+  // A verdict token, or an explicit outcome record. Uppercase only: prose "pass"/"failed" is not a
+  // gate verdict, and a table *header* (`| # | Command | Exit | … |`) must not satisfy this either —
+  // the value has to be in the cell after the label or after the colon.
+  const verdict =
+    /\b(?:PASS|FAIL|BLOCKED|WAIVED)\b/.test(text) ||
+    /^\s*\|?\s*(?:Verdict|Status|Exit)\s*(?:\||:)\s*\S/im.test(text);
+  return { commands, verdict };
+}
+
+function checkEvidence(root, store) {
+  const findings = [];
+  const notes = [];
+  const seen = new Set();
+  const add = (file, line, match, hint) => {
+    const key = `${file}:${line}:${match}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    findings.push({ file, line, match, hint });
+  };
+
+  const plan = readRepoText(root, store, "PLAN.md");
+  if (plan == null) {
+    add("PLAN.md", 0, "PLAN.md missing", "R11 reads the §5 status table; without PLAN there is no claim set");
+    return { findings, files: 0, notes: ["PLAN.md missing — no evidence to check"] };
+  }
+
+  const rows = [];
+  // Only PLAN §5 is the claim table: the lane tables elsewhere (`| P4-D | … |`) also start with a
+  // phase id, and their third column is a file list, not a status.
+  let inStatusSection = false;
+  plan.split(/\r?\n/).forEach((line, index) => {
+    if (/^## 5\.\s/.test(line)) {
+      inStatusSection = true;
+      return;
+    }
+    if (inStatusSection && /^## (?!#)/.test(line)) {
+      inStatusSection = false;
+      return;
+    }
+    if (!inStatusSection || !/^\|\s*P\d\b/.test(line)) return;
+    const cells = line.split("|").map((cell) => cell.trim());
+    const phase = cells[1] ?? "";
+    const statusCell = cells[2] ?? "";
+    const evidenceCell = cells[3] ?? "";
+    const statusMatch = /\[([ x~!-])\]/.exec(statusCell);
+    if (!statusMatch) return;
+    rows.push({
+      line: index + 1,
+      phase: phase.split(/\s+/)[0] ?? phase,
+      status: statusMatch[1],
+      paths: [...evidenceCell.matchAll(/`(evidence\/[^`]+\.md)`/g)].map((match) => match[1]),
+    });
+  });
+
+  if (rows.length === 0) {
+    add("PLAN.md", 0, "no §5 phase rows found",
+      "keep the `| P<N> … | `[x]` | `evidence/P<N>.md` |` status table; R11 parses it");
+    return { findings, files: 0, notes: ["no phase rows parsed — the table format changed"] };
+  }
+
+  let checked = 0;
+  let exempt = 0;
+  for (const row of rows) {
+    const started = row.status !== " ";
+    if (started && row.paths.length === 0) {
+      add("PLAN.md", row.line, `${row.phase} is \`[${row.status}]\` but cites no evidence file`,
+        "add the `evidence/P<N>.md` path to the gate-evidence column, or mark the phase not started");
+    }
+    for (const rel of row.paths) {
+      const text = readRepoText(root, store, rel);
+      if (text == null) {
+        if (!started) {
+          exempt += 1;
+          continue;
+        }
+        add("PLAN.md", row.line, `${row.phase} is \`[${row.status}]\` but ${rel} is missing`,
+          "record the gate commands in that file, or mark the phase not started (`[ ]`)");
+        continue;
+      }
+      checked += 1;
+      const signals = evidenceSignals(text);
+      if (signals.commands === 0) {
+        add(rel, 1, "no recorded command",
+          "evidence is command → exit → result: paste a gate command (fenced block or an inline `npm run …` span)");
+      }
+      if (!signals.verdict) {
+        add(rel, 1, "no PASS/FAIL/BLOCKED verdict",
+          "state the outcome (PASS / FAIL / BLOCKED / WAIVED, or a `| Verdict | … |` / `| Exit | … |` row)");
+      }
+    }
+  }
+
+  notes.push(
+    `${rows.length} phase row(s) parsed; ${checked} evidence file(s) checked; ` +
+      `${exempt} not-started reference(s) exempt (\`[ ]\` claims nothing yet)`,
+  );
+  notes.push("a started phase with no evidence file, or a file with no command/verdict, is a violation; the hash is not checked");
+  notes.push("exercised by `node scripts/audit.mjs --self-test` (complete/incomplete evidence fixtures)");
+
+  return { findings, files: checked, notes };
+}
+
+// ---------------------------------------------------------------------------
+// R12 — packaging sanity
+//
+// Static by design: the audit does not spawn `npm pack --dry-run` (it is not free — it walks the
+// tree, runs lifecycle scripts and can reach for the registry), so the model is the declared
+// `files` allowlist. Gate V7.1 runs the real `npm pack --dry-run --json` and is the authoritative
+// check for the tarball listing; this rule makes the allowlist itself trustworthy before that.
+// ---------------------------------------------------------------------------
+
+const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+const PACK_FORBIDDEN_PREFIXES = [
+  "tests", "bench", "research", "evidence", "node_modules", "artifacts", "coverage", "dist", ".git",
+];
+
+function packageKeyLine(text, key) {
+  const index = text.indexOf(`"${key}"`);
+  return index < 0 ? 0 : lineOf(text, index);
+}
+
+/** Line of `"value"` inside the array that follows `"key"`, so a finding points at the entry. */
+function packageValueLine(text, key, value) {
+  const keyIndex = text.indexOf(`"${key}"`);
+  const index = keyIndex < 0 ? -1 : text.indexOf(`"${value}"`, keyIndex);
+  return index < 0 ? packageKeyLine(text, key) : lineOf(text, index);
+}
+
+function escapeForRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** `files` entry vs. a packed path: a directory covers its subtree, `*` matches inside one segment. */
+function filesEntryCovers(entry, target) {
+  const normalised = entry.trim().replace(/^\.\//, "").replace(/\/+$/, "");
+  if (!normalised) return false;
+  if (target === normalised || target.startsWith(`${normalised}/`)) return true;
+  if (!normalised.includes("*")) return false;
+  const pattern = normalised.split("*").map(escapeForRegExp).join("[^/]*");
+  return new RegExp(`^${pattern}(?:/|$)`).test(target);
+}
+
+function checkPackaging(root, store, files) {
+  const findings = [];
+  const notes = [];
+  const seen = new Set();
+  const rel = "package.json";
+  const add = (line, match, hint) => {
+    const key = `${rel}:${line}:${match}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    findings.push({ file: rel, line, match, hint });
+  };
+
+  const text = readRepoText(root, store, rel);
+  if (text == null) {
+    add(0, "package.json missing", "the package manifest is the install surface; restore it");
+    return { findings, files: 0, notes: ["package.json missing"] };
+  }
+
+  let pkg;
+  try {
+    pkg = JSON.parse(text);
+  } catch (error) {
+    add(0, `invalid JSON (${error.message})`, "npm cannot publish a manifest that does not parse");
+    return { findings, files: 1, notes: ["package.json does not parse — nothing else could be checked"] };
+  }
+
+  if (typeof pkg.name !== "string" || pkg.name.trim() === "") {
+    add(packageKeyLine(text, "name"), "missing `name`", "the registry identity; set it before publishing");
+  } else if (!/^[a-z0-9][a-z0-9._-]*$/.test(pkg.name)) {
+    add(packageKeyLine(text, "name"), `non-npm-safe name ${JSON.stringify(pkg.name)}`,
+      "lowercase npm-safe characters only; the name is the install identity");
+  }
+
+  if (typeof pkg.version !== "string" || !SEMVER_RE.test(pkg.version)) {
+    add(packageKeyLine(text, "version"), `\`version\` is not semver${typeof pkg.version === "string" ? ` (${JSON.stringify(pkg.version)})` : ""}`,
+      "use MAJOR.MINOR.PATCH (npm rejects anything else)");
+  }
+
+  if (typeof pkg.license !== "string" || pkg.license.trim() === "") {
+    add(packageKeyLine(text, "license"), "missing `license`",
+      "state the license (MIT + LICENSE file in this repo); npm warns and redistributors need it");
+  }
+
+  const scripts = pkg.scripts && typeof pkg.scripts === "object" ? pkg.scripts : {};
+  for (const hook of ["preinstall", "postinstall"]) {
+    if (typeof scripts[hook] !== "string") continue;
+    add(packageKeyLine(text, hook), `\`${hook}\` script runs on user install`,
+      "the extension must not execute repo code at install time; remove the lifecycle hook");
+  }
+
+  const declared = pkg.files;
+  if (declared === undefined) {
+    const wouldShip = files.filter((file) =>
+      PACK_FORBIDDEN_PREFIXES.some((prefix) => file === prefix || file.startsWith(`${prefix}/`)),
+    );
+    const roots = [...new Set(wouldShip.map((file) => file.split("/")[0] ?? file))].sort();
+    notes.push(
+      `no \`files\` allowlist: npm would ship ${wouldShip.length} non-shipped path(s)` +
+        (roots.length > 0 ? ` (${roots.join(", ")})` : "") +
+        "; add `files` before publishing — gate V7.1 runs the real `npm pack --dry-run`",
+    );
+    notes.push(
+      "a missing allowlist is a note, not a violation: a pre-packaging manifest is an unfinished " +
+        "publish surface (V7.1 fails the tarball), not a hard-rule break; once `files` exists every entry is strict",
+    );
+  } else if (!Array.isArray(declared) || declared.length === 0) {
+    add(packageKeyLine(text, "files"), "`files` must be a non-empty array",
+      "list the shipped paths (e.g. [\"src/\", \"README.md\", \"LICENSE\"]); npm ships everything otherwise");
+  } else {
+    for (const entry of declared) {
+      if (typeof entry !== "string" || entry.trim() === "") {
+        add(packageKeyLine(text, "files"), "empty or non-string `files` entry",
+          "every entry must be a relative path string");
+        continue;
+      }
+      const normalised = entry.trim().replace(/^\.\//, "").replace(/\/+$/, "");
+      const line = packageValueLine(text, "files", entry);
+      if (normalised.startsWith("/") || normalised.split("/").includes("..")) {
+        add(line, `\`files\` entry \`${entry}\` escapes the package root`,
+          "only relative paths inside the package are allowed");
+        continue;
+      }
+      const rootSegment = normalised.split("/")[0] ?? "";
+      if (normalised === "*" || normalised === "**" || normalised === ".") {
+        add(line, `\`files\` entry \`${entry}\` ships the whole tree`,
+          "an allowlist entry of `*`/`.` is the same as no allowlist; list the shipped paths");
+        continue;
+      }
+      const forbidden =
+        PACK_FORBIDDEN_PREFIXES.includes(rootSegment) ||
+        /^\.env(?:\.|$)/.test(normalised) ||
+        /fixture/i.test(normalised) ||
+        /\.(?:html|htm)\.gz$/i.test(normalised);
+      if (!forbidden) continue;
+      add(line, `\`files\` entry \`${entry}\` is not a shipped path`,
+        "tests/, bench/, research/, evidence/, node_modules/, artifacts/, .env* and fixtures never ship");
+    }
+
+    const extensions = pkg.pi && Array.isArray(pkg.pi.extensions) ? pkg.pi.extensions : [];
+    for (const extension of extensions) {
+      if (typeof extension !== "string") continue;
+      const target = extension.replace(/^\.\//, "");
+      if (declared.some((entry) => typeof entry === "string" && filesEntryCovers(entry, target))) continue;
+      add(packageValueLine(text, "extensions", extension), `\`pi.extensions\` entry \`${extension}\` is not covered by \`files\``,
+        "the packed tarball would load an entry point it does not contain");
+    }
+
+    // What the allowlist would actually carry: every tracked path it covers is packed. Fixtures,
+    // artifact snapshots and gzipped fixtures must never be reachable from a `files` entry, even via
+    // a broad directory that also holds shipped code.
+    const smuggled = files.filter(
+      (file) =>
+        (/(?:^|\/)fixtures?\//.test(file) || /\.(?:html|htm)\.gz$/i.test(file) || /(?:^|\/)artifacts\//.test(file)) &&
+        declared.some((entry) => typeof entry === "string" && filesEntryCovers(entry, file)),
+    );
+    for (const file of smuggled) {
+      add(packageKeyLine(text, "files"), `\`files\` allowlist ships \`${file}\``,
+        "a directory entry can pull fixtures/artifacts into the tarball; narrow it or add an ignore");
+    }
+  }
+
+  notes.push(
+    "static check: `npm pack` is not spawned (it runs lifecycle scripts and walks the whole tree); " +
+      "the model is the `files` allowlist, and V7.1's `npm pack --dry-run --json` is authoritative",
+  );
+  notes.push(
+    `enforced: name, semver version, license, no preinstall/postinstall, files entries limited to shipped paths, ` +
+      `pi.extensions coverage; never shippable: ${PACK_FORBIDDEN_PREFIXES.join(", ")}, .env*, *fixture*, *.html.gz`,
+  );
+  notes.push("exercised by `node scripts/audit.mjs --self-test` (sane/broken/wildcard/fixture-smuggling manifests)");
+
+  return { findings, files: 1, notes };
+}
+
+// ---------------------------------------------------------------------------
 // Audit
 // ---------------------------------------------------------------------------
 
@@ -824,7 +1410,7 @@ function runAudit(root) {
     ["src/", "tests/"],
     R1_PATTERNS,
     [
-      "patterns: playwright, puppeteer, webdriverio, launchPersistentContext, any .launch(, headless: true, --enable-automation, --headless",
+      "patterns: playwright, puppeteer, webdriverio, launchPersistentContext, any .launch(, computed [\"launch\"] keys, bare launch*() after destructuring, headless: true, --enable-automation/--headless (also split across a concatenation)",
       "research/ and bench/ may use playwright-core for comparison (SPEC §4) and are deliberately not scanned",
     ],
   );
@@ -836,7 +1422,7 @@ function runAudit(root) {
     "src/",
     ["src/"],
     R2_PATTERNS,
-    ["reading navigator.webdriver is allowed; only assignments are flagged"],
+    ["reading navigator.webdriver is allowed; assignments, defineProperty/Reflect patches, delete and init scripts are flagged"],
   );
 
   // R3 — never kill/restart the user's Chrome.
@@ -846,7 +1432,7 @@ function runAudit(root) {
     "src/",
     ["src/"],
     R3_PATTERNS,
-    ["patterns: process.kill, pkill, taskkill, chrome…--restart"],
+    ["patterns: process.kill, child_process (any spawn/kill form), pkill, taskkill, chrome…--restart"],
   );
 
   // R4 — no captcha solving. A bare "captcha" is legitimate (E_WALL vocabulary).
@@ -1152,6 +1738,54 @@ function runAudit(root) {
     });
   }
 
+  // R10 — docs consistency.
+  {
+    const result = checkDocs(root, store);
+    checks.push({
+      id: "R10",
+      title: "docs consistency (SPEC ↔ PLAN ↔ AGENTS)",
+      scope: "SPEC.md, PLAN.md, AGENTS.md (+ package.json scripts)",
+      files: result.files,
+      findings: result.findings,
+      total: result.findings.length,
+      truncated: false,
+      capped: false,
+      notes: result.notes,
+    });
+  }
+
+  // R11 — evidence completeness.
+  {
+    const result = checkEvidence(root, store);
+    checks.push({
+      id: "R11",
+      title: "evidence completeness (PLAN §5 status ↔ evidence/)",
+      scope: "PLAN.md §5 + the evidence files it references",
+      files: result.files,
+      findings: result.findings,
+      total: result.findings.length,
+      truncated: false,
+      capped: false,
+      notes: result.notes,
+    });
+  }
+
+  // R12 — packaging sanity.
+  {
+    const result = checkPackaging(root, store, files);
+    checks.push({
+      id: "R12",
+      title: "packaging sanity (manifest + files allowlist)",
+      scope: "package.json",
+      files: result.files,
+      findings: result.findings,
+      total: result.findings.length,
+      truncated: false,
+      capped: false,
+      notes: result.notes,
+    });
+  }
+
   const shown = checks.reduce((sum, check) => sum + check.findings.length, 0);
   const total = checks.reduce((sum, check) => sum + (check.total ?? check.findings.length), 0);
   return {
@@ -1171,6 +1805,350 @@ function runAudit(root) {
       ok: total === 0,
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// --self-test
+//
+// The repo has no test runner for this script, and a rule that only ever says "ok" proves nothing.
+// `--self-test` builds throwaway mini-repos under /tmp/opencode, runs the real audit over them and
+// asserts each new/strengthened rule both fires on the bad fixture and stays quiet on the good one.
+// It is intentionally not part of `npm run audit`: it writes to disk and would be noise on every
+// wave. The orchestrator runs it once at the P7 gate (V7.4) and records the output.
+// ---------------------------------------------------------------------------
+
+/** The five documented commands, so the doc fixtures cannot drift from the assertions in R10. */
+function docsFixture(overrides = {}) {
+  const commands = DOC_COMMANDS.map(({ command }) => `\`${command}\``).join(", ");
+  const files = {
+    "SPEC.md": [
+      "# SPEC",
+      "",
+      `Gate commands: ${commands}.`,
+      `Config: \`${CANONICAL_CONFIG_PATH}\` (or \`${CANONICAL_CONFIG_PATH_ENV}\`).`,
+      `Artifacts: \`${CANONICAL_ARTIFACTS_PATH}/<ts>-google-abc/\`.`,
+      "",
+      "- `web_search`: `direct`.",
+      "- `web_read`, `image_search`, `web_research`: `deferred`.",
+      "",
+    ].join("\n"),
+    "PLAN.md": [
+      "# PLAN",
+      "",
+      `Every wave: ${commands}, plus \`npm run bench\`.`,
+      "",
+      "- `web_search` is direct; others deferred.",
+      "",
+    ].join("\n"),
+    "AGENTS.md": [
+      "# AGENTS",
+      "",
+      `Commands: ${commands}.`,
+      "",
+      "`web_search` is the only `direct` tool. Everything else is `deferred`.",
+      "",
+      `Artifacts: \`${CANONICAL_ARTIFACTS_PATH}/<ts>-<engine>-<hash>/\`.`,
+      "",
+    ].join("\n"),
+    "package.json": JSON.stringify({
+      name: "audit-doc-fixture",
+      version: "0.1.0",
+      license: "MIT",
+      scripts: { typecheck: "tsc --noEmit", test: "node --test", audit: "node scripts/audit.mjs", bench: "node bench/run.ts" },
+      files: ["src/"],
+    }, null, 2),
+    "src/index.ts": "export const ok = true;\n",
+  };
+  return { ...files, ...overrides };
+}
+
+const SELF_TEST_CASES = [
+  {
+    name: "launch spellings",
+    files: {
+      "src/looks-fine.ts": [
+        "/* docs: we never call chromium.launch(), never use playwright, never process.kill() */",
+        "export const headlessFlag = `--headless=new`;",
+        "export const splitFlag = \"--head\" + \"less\";",
+        "const chromium = { launch: () => 1 };",
+        "chromium.launch();",
+        "const alias = chromium;",
+        "alias[`launch`]();",
+        "const { launch } = chromium;",
+        "launch();",
+        "import { execFileSync } from \"node:child_process\";",
+        "",
+      ].join("\n"),
+    },
+    expect: [
+      { check: "R1", min: 3, label: "template/computed/aliased launch + split flag" },
+      { check: "R3", min: 1, label: "child_process in src/" },
+      { check: "R1", max: 5, label: "one finding per shape, not per pattern" },
+    ],
+    guards: [
+      {
+        label: "overlapping patterns dedupe to one finding per line",
+        run: (report) => {
+          const findings = report.checks.find((check) => check.id === "R1").findings;
+          return new Set(findings.map((finding) => `${finding.file}:${finding.line}`)).size === findings.length;
+        },
+      },
+    ],
+  },
+  {
+    name: "fingerprint patches",
+    files: {
+      "src/fp.ts": [
+        "Object.defineProperty(navigator, \"webdriver\", { get: () => false });",
+        "delete navigator.webdriver;",
+        "Reflect.set(navigator, \"webdriver\", false);",
+        "await page.evaluate(`navigator.webdriver = false`);",
+        "page.send(`Page.addScriptToEvaluateOnNewDocument`, {});",
+        "const split = \"addScriptToEvaluate\" + \"OnNewDocument\";",
+        "Emulation[\"setDeviceMetricsOverride\"]({});",
+        "",
+      ].join("\n"),
+    },
+    expect: [
+      { check: "R2", min: 5, label: "defineProperty/delete/Reflect/template assignment/init-script/Emulation" },
+    ],
+  },
+  {
+    name: "comments do not fire",
+    files: {
+      "src/clean.ts": [
+        "/* we never call chromium.launch(), never use playwright, never process.kill() */",
+        "// also never addScriptToEvaluateOnNewDocument and never assign navigator.webdriver",
+        "export async function probe(page) {",
+        "  const webdriver = await page.evaluate(\"navigator.webdriver\");",
+        "  return webdriver === false;",
+        "}",
+        "",
+      ].join("\n"),
+    },
+    expect: [
+      { check: "R1", max: 0, label: "comment-only mention of a launcher" },
+      { check: "R2", max: 0, label: "reading navigator.webdriver" },
+      { check: "R3", max: 0, label: "comment-only mention of process.kill" },
+    ],
+  },
+  {
+    name: "docs agree",
+    files: docsFixture(),
+    expect: [{ check: "R10", max: 0, label: "consistent SPEC/PLAN/AGENTS" }],
+  },
+  {
+    name: "docs disagree",
+    files: docsFixture({
+      "AGENTS.md": [
+        "# AGENTS",
+        "",
+        "`web_read` is `direct`.",
+        "Run `npm run typechek` before committing.",
+        "Config lives at `~/.config/pi/web_search.json`.",
+        "`web_search` is the only `direct` tool. Everything else is `deferred`.",
+        `Artifacts: \`${CANONICAL_ARTIFACTS_PATH}/x/\`.`,
+        `Gate commands: ${DOC_COMMANDS.map(({ command }) => `\`${command}\``).join(", ")}.`,
+        "",
+      ].join("\n"),
+    }),
+    expect: [{ check: "R10", min: 3, label: "wrong tool exposure, bogus script, wrong config path" }],
+  },
+  {
+    name: "evidence complete",
+    files: {
+      "PLAN.md": [
+        "# PLAN",
+        "",
+        "## 5. Status tracking",
+        "",
+        "| Phase | Status | Gate evidence | Blocker / note |",
+        "|---|---|---|---|",
+        "| P0 contracts | `[x]` | `evidence/P0.md` | ok |",
+        "| P1 attach | `[ ]` | `evidence/P1.md` | not started |",
+        "",
+        "## 6. Next",
+        "",
+        "| P9 lane | `[x]` | `evidence/P9.md` | not a status row |",
+        "",
+      ].join("\n"),
+      "evidence/P0.md": [
+        "# P0",
+        "",
+        "| # | Command | Exit | Verdict |",
+        "|---|---|---|---|",
+        "| V0.1 | `npm run typecheck` | 0 | PASS |",
+        "",
+      ].join("\n"),
+    },
+    expect: [{ check: "R11", max: 0, label: "started phase with a command and a verdict" }],
+    guards: [
+      {
+        label: "a `[x]` row outside §5 is not a claim",
+        run: (report) => !report.checks.find((check) => check.id === "R11").findings.some((f) => f.match.includes("P9")),
+      },
+    ],
+  },
+  {
+    name: "evidence incomplete",
+    files: {
+      "PLAN.md": [
+        "# PLAN",
+        "",
+        "## 5. Status tracking",
+        "",
+        "| Phase | Status | Gate evidence | Blocker / note |",
+        "|---|---|---|---|",
+        "| P0 contracts | `[x]` | `evidence/P0.md` | claims done |",
+        "| P1 attach | `[x]` | `evidence/P1.md` | claims done, file missing |",
+        "| P2 plumbing | `[ ]` | `evidence/P2.md` | not started, file missing is fine |",
+        "| P3 engines | `[x]` | `evidence/P3.md` | header-only table proves nothing |",
+        "",
+      ].join("\n"),
+      "evidence/P0.md": "# P0\n\nAll gates look good.\n",
+      "evidence/P3.md": [
+        "# P3",
+        "",
+        "| # | Command | Exit | Result | Verdict |",
+        "|---|---|---|---|---|",
+        "",
+      ].join("\n"),
+    },
+    expect: [{ check: "R11", min: 5, label: "no command, no verdict, missing file, header-only table" }],
+    guards: [
+      {
+        label: "not-started phase is exempt",
+        run: (report) => !report.checks.find((check) => check.id === "R11").findings.some((f) => f.match.includes("P2.md") || f.file.includes("P2.md")),
+      },
+      {
+        label: "missing started file is named",
+        run: (report) => report.checks.find((check) => check.id === "R11").findings.some((f) => f.match.includes("evidence/P1.md")),
+      },
+    ],
+  },
+  {
+    name: "packaging sane",
+    files: {
+      "package.json": JSON.stringify({
+        name: "audit-pack-fixture",
+        version: "0.1.0",
+        license: "MIT",
+        files: ["src/", "README.md", "LICENSE"],
+        pi: { extensions: ["./src/index.ts"] },
+      }, null, 2),
+      "src/index.ts": "export const ok = true;\n",
+    },
+    expect: [{ check: "R12", max: 0, label: "metadata + allowlist that covers pi.extensions" }],
+  },
+  {
+    name: "packaging broken",
+    files: {
+      "package.json": JSON.stringify({
+        name: "Audit Pack Fixture",
+        version: "1.0",
+        scripts: { postinstall: "node scripts/x.mjs" },
+        files: ["src/", "tests/", "evidence/P0.md", "tests/fixtures/page.html.gz"],
+        pi: { extensions: ["./bench/harness.ts"] },
+      }, null, 2),
+    },
+    expect: [{ check: "R12", min: 6, label: "name/version/license/postinstall/files/entry coverage" }],
+  },
+  {
+    name: "packaging wildcard",
+    files: {
+      "package.json": JSON.stringify({
+        name: "audit-pack-wildcard",
+        version: "0.1.0",
+        license: "MIT",
+        files: ["*"],
+      }, null, 2),
+    },
+    expect: [{ check: "R12", min: 1, label: "a `*` allowlist is no allowlist" }],
+  },
+  {
+    name: "packaging smuggles a fixture",
+    files: {
+      "package.json": JSON.stringify({
+        name: "audit-pack-smuggle",
+        version: "0.1.0",
+        license: "MIT",
+        files: ["src/", "tests/fixtures/"],
+        pi: { extensions: ["./src/index.ts"] },
+      }, null, 2),
+      "src/index.ts": "export const ok = true;\n",
+      "tests/fixtures/page.html.gz": "not really gzip\n",
+    },
+    expect: [
+      { check: "R12", min: 1, label: "fixtures reachable through the allowlist" },
+      { check: "R12", min: 2, label: "fixture entry itself is rejected too" },
+    ],
+  },
+];
+
+function runSelfTest() {
+  const base = join(
+    process.env.PI_AUDIT_SELFTEST_DIR || "/tmp/opencode",
+    `pi-audit-selftest-${process.pid}`,
+  );
+  const lines = ["pi-chrome-search audit — self-test (rules provably live)"];
+  let assertions = 0;
+  let failed = 0;
+
+  try {
+    rmSync(base, { recursive: true, force: true });
+    for (const testCase of SELF_TEST_CASES) {
+      const dir = join(base, testCase.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase());
+      for (const [rel, content] of Object.entries(testCase.files)) {
+        const abs = join(dir, rel);
+        mkdirSync(dirname(abs), { recursive: true });
+        writeFileSync(abs, content, "utf8");
+      }
+
+      let report;
+      try {
+        report = runAudit(dir);
+      } catch (error) {
+        failed += 1;
+        lines.push(`FAIL  ${testCase.name}: audit threw ${error?.message ?? String(error)}`);
+        continue;
+      }
+
+      for (const expectation of testCase.expect) {
+        assertions += 1;
+        const check = report.checks.find((entry) => entry.id === expectation.check);
+        const count = check ? check.total : -1;
+        const min = expectation.min ?? 0;
+        const max = expectation.max ?? Number.POSITIVE_INFINITY;
+        const ok = check !== undefined && count >= min && count <= max;
+        if (!ok) failed += 1;
+        lines.push(
+          `${ok ? "ok  " : "FAIL"}  ${testCase.name} — ${expectation.check}: ${count} finding(s) ` +
+            `for ${expectation.label} (want ${min}..${max === Number.POSITIVE_INFINITY ? "n" : max})`,
+        );
+      }
+
+      for (const guard of testCase.guards ?? []) {
+        assertions += 1;
+        let ok = false;
+        try {
+          ok = guard.run(report);
+        } catch {
+          ok = false;
+        }
+        if (!ok) failed += 1;
+        lines.push(`${ok ? "ok  " : "FAIL"}  ${testCase.name} — guard: ${guard.label}`);
+      }
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+
+  lines.push(
+    `self-test: ${SELF_TEST_CASES.length} case(s), ${assertions} assertion(s), ${failed} failed ` +
+      `(fixtures written under ${base}; removed afterwards)`,
+  );
+  process.stdout.write(`${lines.join("\n")}\n`);
+  return { ok: failed === 0, failed, assertions };
 }
 
 // ---------------------------------------------------------------------------
@@ -1232,8 +2210,17 @@ function printHuman(report) {
   out.push(
     "note: R9 is approximate; the authoritative tool-budget gate is tests/unit/tool_budget.test.ts (added in P2)",
   );
+  out.push(
+    "note: R12 is static (`npm pack` is not spawned) — gate V7.1 runs the real pack listing; " +
+      "`node scripts/audit.mjs --self-test` proves the launch, docs, evidence and packaging rules fire",
+  );
 
   process.stdout.write(`${out.join("\n")}\n`);
+}
+
+if (selfTest) {
+  const result = runSelfTest();
+  process.exit(result.ok ? 0 : 1);
 }
 
 let report;
