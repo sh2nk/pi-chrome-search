@@ -1,90 +1,90 @@
 # pi-chrome-search
-Free, keyless web search for [pi](https://pi.dev) through **your own, visible Chrome** — same profile,
-same cookies, same IP — returning compact Markdown from Google, DuckDuckGo and Yandex with each engine's
-native AI summary (AI Overview, Search Assist, "Быстрый ответ Алисы AI"), plus page reading and image
-search. The window staying visible is intentional: you can watch the search and solve a captcha yourself.
-It is not an automation browser: raw CDP, one owned window, one work tab per engine, ≤2500 chars of
-output, every failure carrying a code, a stage and a hint. No paid search APIs, no keys, no captcha
-solving, no fingerprint spoofing, no headless mode.
+
+[![npm](https://img.shields.io/npm/v/pi-chrome-search)](https://www.npmjs.com/package/pi-chrome-search)
+[![downloads](https://img.shields.io/npm/dm/pi-chrome-search)](https://www.npmjs.com/package/pi-chrome-search)
+[![ci](https://github.com/sh2nk/pi-chrome-search/actions/workflows/ci.yml/badge.svg)](https://github.com/sh2nk/pi-chrome-search/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/pi-chrome-search)](LICENSE)
+[![node](https://img.shields.io/badge/node-%3E%3D26-brightgreen)](package.json)
+
+Free web search for [pi](https://pi.dev) through your own visible Chrome: same profile, same cookies,
+same IP. Compact Markdown from Google, DuckDuckGo and Yandex, with each engine's native AI summary
+(AI Overview, Search Assist, Alice). The window stays visible on purpose, so you can watch the search
+and solve a captcha yourself. No keys, no paid APIs, no headless mode, no spoofing, no captcha solving.
+Needs Node ≥26 and Chrome 136+ on a headed desktop.
 
 ## Install
-Node ≥ 26 (native TypeScript, no build step), Chrome 136+ (tested on 157, Wayland), pi, a headed desktop
-session. Then `/web-doctor` inside pi must report a live CDP endpoint and `navigator.webdriver === false`.
 
 ```bash
-npm install            # ws + typescript (dev); no build step
-pi install .           # register this checkout as a pi package
-pi -e ./src/index.ts   # …or load it for one throwaway session
+npm install
+pi install .          # register this checkout as a pi package
+pi -e ./src/index.ts  # or load it for one throwaway session
 ```
 
 ## Enable CDP (once per Chrome session)
-Chrome 136+ ignores `--remote-debugging-port` for the default profile; debugging is enabled from inside
-the browser and needs an explicit **Allow** click.
+
+Chrome 136+ ignores `--remote-debugging-port` for the default profile: debugging is enabled from
+inside the browser, with an explicit **Allow** click.
 
 1. Open `chrome://inspect/#remote-debugging` in the Chrome window the agent should use.
-2. Tick **Discover network targets**, then click **Allow** on the prompt.
-3. Check the endpoint file (line 1 = port, line 2 = `/devtools/browser/<uuid>`):
-   `cat ~/.config/google-chrome/DevToolsActivePort`
+2. Tick **Discover network targets**, then click **Allow**.
+3. Check the endpoint file (port, then `ws` path): `cat ~/.config/google-chrome/DevToolsActivePort`.
 
-`curl 127.0.0.1:9222/json/version` may return nothing in this mode — expected; the file is authoritative.
-Discovery order: `PI_CHROME_CDP_WS` → `PI_CHROME_CDP_PORTS` → `DevToolsActivePort` → `cdp.ports`. The
-extension never launches, restarts or kills Chrome, never edits your profile, never closes foreign tabs.
+Discovery order: `PI_CHROME_CDP_WS` → `PI_CHROME_CDP_PORTS` → `DevToolsActivePort` → `cdp.ports`.
+`curl 127.0.0.1:9222/json/version` may stay empty here; the file is authoritative.
 
 ## Tools
-`web_search` is `direct`; everything else is `deferred` (tool search + `codemode`, not paid per prompt).
-All descriptions together stay under 900 characters.
 
-| Tool | Exposure | Arguments |
-|---|---|---|
-| `web_search` | direct | `q`; `n` 1–10 (5); `engines` `auto`\|id\|list; `summary` (true); `freshness` `d\|w\|m\|y`; `page`; `format` `md\|json` |
-| `web_read` | deferred | `url` (http/https); `offset`; `maxChars` (6000, ceiling 20000); `format` `md\|text` |
-| `image_search` | deferred | `q`; `n` ≤12 (4); `engine` `google\|yandex`; `attach` (≤4 thumbnails) |
-| `web_research` | deferred | `q`; `budget` `quick` (1 search + 2 reads) \| `normal` (2+4) \| `deep` (4+8) |
-| `web_doctor` | deferred | `probe` (true), `fix` (false: reconnect, close owned tabs, prune artifacts) |
+`web_search` is `direct`; the rest are `deferred` (via tool search or `codemode`, no per-prompt cost).
 
-Output is capped at 2500 chars (summary ≤1200, snippets ≤140). The AI block has three states: `ai:yes`
-only for ≥200 chars of prose, `ai:lead` (block present, no answer — never rendered as one), `ai:no`.
+| Tool | Arguments |
+|---|---|
+| `web_search` | `q`; `n` 1-10 (5); `engines` `auto`\|id\|list; `summary`; `freshness` `d\|w\|m\|y`; `page`; `format` `md\|json` |
+| `web_read` | `url` (public http/https); `offset`; `maxChars` (6000, ceiling 20000); `format` `md\|text` |
+| `image_search` | `q`; `n` ≤12 (4); `engine` `google\|yandex`; `attach` (≤4 image blocks) |
+| `web_research` | `q`; `budget` `quick` (1 search + 2 reads), `normal` (2+4), `deep` (4+8) |
+| `web_doctor` | `probe` (true); `fix` (false: reconnect, close owned tabs, prune artifacts) |
+
+Output is capped at 2500 chars (summary ≤1200, snippet ≤140). The AI block reports `ai:yes` only for
+≥200 chars of prose, `ai:lead` when the block exists without an answer, `ai:no` when absent.
 
 ## Configuration
-`~/.pi/agent/web-search.json` (or `$PI_CODING_AGENT_DIR/web-search.json`), optional and strict: an
-unknown key is `E_CONFIG`. All keys: [`docs/config.md`](docs/config.md). The six that matter most:
-`engines.google.enabled` (`true`, per-engine switch) · `search.n` (`5`, ≤`search.nMax` 10) ·
-`search.aiWaitMs` (`6000`, bounded AI-block wait) · `read.maxCharsCeiling` (`20000`) ·
-`window.follow` (`"work"`, which tab is raised during a stage) · `reflex.pageGate` (`true`,
-source-quality gate in `web_research`, rules floor in `web_read`).
 
-Env overrides: `PI_CHROME_CDP_WS`, `PI_CHROME_CDP_PORTS`, `PI_CHROME_SEARCH_PROFILE`,
-`PI_CHROME_SEARCH_DEBUG`, `PI_CODING_AGENT_DIR`. System 1 triage stays off (`reflex.enabled: false`):
-the benchmark showed no honest token win.
+`~/.pi/agent/web-search.json` (or `$PI_CODING_AGENT_DIR/web-search.json`), optional and strict: an
+unknown key fails as `E_CONFIG`. Every key and env override: [`docs/config.md`](docs/config.md).
 
 ## When it fails
+
 | Code | Action |
 |---|---|
-| `E_CDP_UNAVAILABLE` | Open `chrome://inspect/#remote-debugging`, tick **Discover network targets**, click **Allow**; or set `PI_CHROME_CDP_WS` |
-| `E_CDP_AWAITING_ALLOW` | The prompt is waiting; click it — the call resumes by itself (`cdp.attachWaitMs`, 60 s) |
-| `E_WALL` | A captcha/consent page: solve it in the visible window, then retry. Never automated |
-| `E_BUSY` | Another pi session holds `~/.pi/agent/web-search.lock`: close it or wait for the heartbeat |
-| `E_PARSE` | A selector canary failed: open the artifact dir, compare `page.txt` with `docs/engines.md` |
+| `E_CDP_UNAVAILABLE` | Open `chrome://inspect/#remote-debugging`, tick **Discover network targets**, click **Allow**, or set `PI_CHROME_CDP_WS` |
+| `E_CDP_AWAITING_ALLOW` | The prompt is waiting; click it, the call resumes on its own (60 s) |
+| `E_WALL` | Captcha or consent page: solve it in the visible window, then retry |
+| `E_BUSY` | Another pi session holds the lock in `~/.pi/agent/`: close it or wait |
+| `E_PARSE` | A selector canary broke: compare the artifact `page.txt` with [`docs/engines.md`](docs/engines.md) |
 
-All 18 codes with hints: [`docs/errors.md`](docs/errors.md). `/web-doctor` (or
-`node src/cli/doctor.ts --json`) is the first stop; `--fix` reconnects, closes only owned tabs and prunes
-artifacts under `~/.pi/agent/web-search/`.
+All 19 codes: [`docs/errors.md`](docs/errors.md). Start with `/web-doctor` or
+`node src/cli/doctor.ts --json`; `--fix` reconnects, closes only owned tabs and prunes artifacts.
 
 ## Security and ToS
-Your session, your cookies: searches and reads happen in your browser as you. `web_read` can open pages
-you are logged into but never exfiltrates content, and it refuses loopback/private/`file:`/`data:` URLs
-(re-checked on redirect). No telemetry; artifacts are sanitized and git-ignored. CDP is powerful — any
-local process that reaches the debugging port can drive the browser; it binds loopback only and you
-enable it explicitly. The optional page gate sends only URL/title/snippet of ≤10 sources (never page
-text) to your configured classifier; `reflex.localOnly: true` keeps it local.
 
-Google and Yandex prohibit automated access in their terms: this project does not claim compliance and
-must not be run as a service. If an engine shows a captcha, solve it in the window or stop.
+Searches run in your browser, as you. `web_read` refuses loopback, private, `file:` and `data:` URLs,
+re-checked on redirect. No telemetry; artifacts are sanitized and git-ignored. The optional page gate
+sends URL, title and snippet of at most 10 sources (never page text), `reflex.localOnly` keeps it local.
+
+Google and Yandex forbid automated access in their terms. This project does not claim compliance and
+must not be run as a service. A captcha means solve it in the window or stop.
 
 ## Development
-`npm run lint` (typecheck + audit) · `npm test` (offline contract suite) · `npm run test:live` (opt-in,
-one query per engine, no retries, `PI_CHROME_LIVE=1`). Decisions: [`docs/architecture.md`](docs/architecture.md)
-· selectors: [`docs/engines.md`](docs/engines.md). Never launch a browser from tests; never loop probes.
+
+```bash
+npm run lint                         # typecheck + audit
+npm test                             # offline contract suite
+PI_CHROME_LIVE=1 npm run test:live   # one query per engine, no retries
+node src/cli/doctor.ts --json        # canonical gate report
+```
+
+Decisions: [`docs/architecture.md`](docs/architecture.md). Selectors: [`docs/engines.md`](docs/engines.md).
 
 ## License
-MIT — see [`LICENSE`](LICENSE).
+
+MIT, see [`LICENSE`](LICENSE).
