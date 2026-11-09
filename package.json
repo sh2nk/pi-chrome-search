@@ -53,12 +53,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/pi-chrome-search/pi-chrome-search.git"
+    "url": "git+https://github.com/sh2nk/pi-chrome-search.git"
   },
   "bugs": {
-    "url": "https://github.com/pi-chrome-search/pi-chrome-search/issues"
+    "url": "https://github.com/sh2nk/pi-chrome-search/issues"
   },
-  "homepage": "https://github.com/pi-chrome-search/pi-chrome-search#readme",
+  "homepage": "https://github.com/sh2nk/pi-chrome-search#readme",
   "publishConfig": {
     "access": "public",
     "provenance": true
