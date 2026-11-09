@@ -43,10 +43,10 @@ src/runtime/        cache, limiter, errors, error-codes, artifacts, doctor, log,
                     attention, panel, ssrf, host
 src/cli/doctor.ts   headless doctor (--json), used by gates
 scripts/audit.mjs   hard rules, secrets, fixture hygiene, doc budgets, docs↔code drift, packaging
-scripts/release.mjs conventional-commit bump classification (offline-testable)
+scripts/release.mjs bump table, publish mode and step order (pure, table-tested)
 tests/unit          contract suite (offline) · tests/live opt-in smoke · tests/fixtures sanitized
 docs/               architecture, engines, errors, config
-.github/workflows   ci.yml (lint+test) · release.yml (bump/tag/publish)
+.github/workflows   ci.yml (lint+test) · release.yml (bump/tag/publish, OIDC trusted publishing)
 ```
 
 ## Commands
@@ -57,11 +57,20 @@ npm test                         # node --test tests/unit/**/*.test.ts (offline)
 node src/cli/doctor.ts --json    # canonical gate output; --no-probe --fix --watch
 PI_CHROME_LIVE=1 npm run test:live   # one query per engine, n=2, no retries; a wall = stop
 pi -e ./src/index.ts             # load the extension in a throwaway session
-node scripts/release.mjs --dry-run   # print the next version for the current log
+node scripts/release.mjs --dry-run   # next version for the current commit log
+# a release runs on push to main (src/**, package.json, release tooling) or Actions → release → Run workflow
 ```
 
 Live commands hit real engines: run them **once**. A wall means stop and ask, not retry. Artifacts:
 `~/.pi/agent/web-search/artifacts/`; decisions: `~/.pi/agent/web-search/decisions.jsonl`.
+
+## Publishing
+npm no longer issues CI tokens that bypass 2FA, so `release.yml` publishes with the job's OIDC id-token:
+a trusted publisher on npmjs.com (`sh2nk/pi-chrome-search`, workflow `release.yml`, allowed action
+`npm publish`) plus a public repository, or provenance cannot verify. Never add an `NPM_TOKEN` secret —
+`release.mjs` would prefer it and leave the OIDC path untested. The bump comes from commits since the last
+`v*` tag (`[skip release]` opts a commit out), publish precedes the tag so a failed publish leaves nothing
+behind, and a brand-new package still needs one manual `npm publish` (a trusted publisher requires it).
 
 ## Conventions
 
