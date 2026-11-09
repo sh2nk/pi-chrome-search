@@ -33,9 +33,10 @@ import { readFile, unlink } from "node:fs/promises";
 
 import type { Connector, ConnectorInfo } from "../cdp/browser.ts";
 import { defaultLockPath, parseLockRecord, pidAlive } from "../cdp/browser.ts";
+import { pageLockFor } from "../cdp/page-lock.ts";
 import type { CdpSource } from "../cdp/types.ts";
 import type { Config, FocusPolicy, FollowPolicy, HumanizeMode, Mode, ReflexBackend } from "../config.ts";
-import type { EngineId, EngineRegistry, Query, WallKind } from "../engines/types.ts";
+import type { Engine, EngineId, EngineRegistry, Query, WallKind } from "../engines/types.ts";
 import { ENGINE_IDS } from "../engines/types.ts";
 import { ERROR_HINTS, type FailureDetails } from "./error-codes.ts";
 import { fail, toFailure } from "./errors.ts";
@@ -152,9 +153,59 @@ function probeLocale(engine: EngineId, config: Config): Pick<Query, "lang" | "re
  * marker before `detectWall()` is ever reached. A limiter rejection (daily cap,
  * abort) is reported the same way and never navigates: a paced-out probe must
  * not burn an unthrottled search on the user's profile.
+ *
+ * One writer per engine tab: the probe navigates the same tab `web_search`
+ * extracts from, so it takes the tools' FIFO page lock for that engine. A
+ * diagnostic that yanks the document out from under a live search is not a
+ * diagnostic.
  */
 export function createEngineProbe(options: EngineProbeOptions): EngineProbe {
   const text = options.query ?? DOCTOR_PROBE_QUERY;
+
+  async function probe(id: EngineId, engine: Engine, elapsed: () => number): Promise<EngineProbeResult> {
+    // Pace before acquiring a page: the doctor is a live search like any
+    // other, and three back-to-back probes are exactly what a bot looks like.
+    if (options.limiter !== undefined) {
+      try {
+        await options.limiter.acquire(id);
+      } catch (error) {
+        const details = toFailure(error, { code: "E_RATE_LIMITED", stage: "navigate" });
+        return {
+          ms: elapsed(),
+          results: 0,
+          ai: false,
+          error: { code: details.code, stage: details.stage, hint: details.hint },
+        };
+      }
+    }
+    const query: Query = { text, n: 1, summary: false, ...probeLocale(id, options.config) };
+    const page = await options.connector.acquirePage(id);
+    await page.navigate(engine.buildUrl(query));
+
+    try {
+      await engine.settle(page);
+    } catch (error) {
+      const failure = toFailure(error, { code: "E_TIMEOUT", stage: "settle" });
+      const wall =
+        failure.code === "E_TIMEOUT" || failure.code === "E_PARSE"
+          ? await engine.detectWall(page).catch(() => null)
+          : null;
+      if (wall === null) throw error;
+      return { ms: elapsed(), results: 0, ai: false, wall: wall.kind };
+    }
+
+    const wall = await engine.detectWall(page);
+    if (wall !== null) return { ms: elapsed(), results: 0, ai: false, wall: wall.kind };
+
+    const serp = await engine.extract(page, query);
+    const canaries = await engine.canaries(page).catch(() => undefined);
+    return {
+      ms: elapsed(),
+      results: serp.results.length,
+      ai: serp.ai !== undefined && serp.ai.text.trim() !== "",
+      ...(canaries === undefined ? {} : { canaries }),
+    };
+  }
 
   return async (id) => {
     const startedAt = options.clock.now();
@@ -162,48 +213,7 @@ export function createEngineProbe(options: EngineProbeOptions): EngineProbe {
 
     try {
       const engine = options.registry.get(id);
-      // Pace before acquiring a page: the doctor is a live search like any
-      // other, and three back-to-back probes are exactly what a bot looks like.
-      if (options.limiter !== undefined) {
-        try {
-          await options.limiter.acquire(id);
-        } catch (error) {
-          const details = toFailure(error, { code: "E_RATE_LIMITED", stage: "navigate" });
-          return {
-            ms: elapsed(),
-            results: 0,
-            ai: false,
-            error: { code: details.code, stage: details.stage, hint: details.hint },
-          };
-        }
-      }
-      const query: Query = { text, n: 1, summary: false, ...probeLocale(id, options.config) };
-      const page = await options.connector.acquirePage(id);
-      await page.navigate(engine.buildUrl(query));
-
-      try {
-        await engine.settle(page);
-      } catch (error) {
-        const failure = toFailure(error, { code: "E_TIMEOUT", stage: "settle" });
-        const wall =
-          failure.code === "E_TIMEOUT" || failure.code === "E_PARSE"
-            ? await engine.detectWall(page).catch(() => null)
-            : null;
-        if (wall === null) throw error;
-        return { ms: elapsed(), results: 0, ai: false, wall: wall.kind };
-      }
-
-      const wall = await engine.detectWall(page);
-      if (wall !== null) return { ms: elapsed(), results: 0, ai: false, wall: wall.kind };
-
-      const serp = await engine.extract(page, query);
-      const canaries = await engine.canaries(page).catch(() => undefined);
-      return {
-        ms: elapsed(),
-        results: serp.results.length,
-        ai: serp.ai !== undefined && serp.ai.text.trim() !== "",
-        ...(canaries === undefined ? {} : { canaries }),
-      };
+      return await pageLockFor(options.connector).run(id, () => probe(id, engine, elapsed));
     } catch (error) {
       const details = toFailure(error, { code: "E_CDP_UNAVAILABLE", stage: "connect" });
       return {

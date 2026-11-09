@@ -24,6 +24,7 @@
 import { Type, type Static } from "typebox";
 
 import type { CdpPage } from "../cdp/types.ts";
+import { pageLockFor } from "../cdp/page-lock.ts";
 import type { Config } from "../config.ts";
 import {
   IMAGE_ENGINE_IDS,
@@ -440,6 +441,22 @@ async function search(
   if (signal?.aborted === true) {
     return failureResult(fail("E_CANCELLED", "navigate", { engine, message: "aborted by the caller" }));
   }
+
+  // Same tab, same FIFO lock as `web_search`: an image query and a web search on
+  // one engine must never navigate (or type into) the same tab at once. A
+  // validation or config error never waits on a lock.
+  return await pageLockFor(deps.cdp).run(engine, () =>
+    searchLocked(deps, input, signal, resolve),
+  );
+}
+
+async function searchLocked(
+  deps: ToolDeps,
+  input: NormalizedImageInput,
+  signal: AbortSignal | undefined,
+  resolve: ResolveHost | undefined,
+): Promise<ImageSearchResult> {
+  const engine = input.engine;
 
   try {
     await deps.limiter.acquire(engine, signal);

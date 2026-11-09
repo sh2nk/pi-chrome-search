@@ -28,7 +28,8 @@ pi process
 2. Discover the CDP endpoint (see `docs/engines.md` §Discovery), attach over one WebSocket.
 3. Ensure the extension's **one owned window**; its anchor tab is `assets/anchor.html` — a local
    control panel painted with one-off `Runtime.evaluate` (engine, query, stage, pace, counters).
-4. Per engine: pacing/limiter → typed or direct SERP URL → `settle()` (marker, not a sleep) →
+4. Per engine: FIFO page lock for that engine tab (one writer per tab, shared with `web_read` and
+   `/web-doctor`) → pacing/limiter → typed or direct SERP URL → `settle()` (marker, not a sleep) →
    `detectWall()` → `extract()` → `ai.probe()/wait` for the native AI block.
 5. `extract/compact.ts` merges engines, dedups URLs, strips tracking params and applies the two
    budgets (results floor first, AI to the remainder).

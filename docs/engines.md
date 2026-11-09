@@ -33,6 +33,9 @@ desktop once, and reports `E_CDP_AWAITING_ALLOW` (retryable) when the wait expir
   at 20–80 ms/char and never touches the fingerprint.
 - Yandex warm-up is `https://ya.ru/`: `yandex.ru` redirects to Dzen. A landing on a host outside
   `homeHosts: ["ya.ru","yandex.ru"]` is reported as `home-redirect` and served from the SERP URL.
+- The box value is read back after typing. A value that is not the query (a second writer, a lost
+  focus) is never submitted: Enter stays un-pressed and the search falls back to the SERP URL as
+  `box-mismatch`.
 
 ## Google
 

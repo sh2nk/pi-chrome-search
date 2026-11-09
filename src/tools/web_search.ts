@@ -29,6 +29,7 @@
 import { Type, type Static } from "typebox";
 
 import { humanSearch, type HumanSearchResult } from "../cdp/humanize.ts";
+import { pageLockFor } from "../cdp/page-lock.ts";
 import { waitForAi, type AiWaitResult } from "../cdp/ai-wait.ts";
 import type { CdpPage } from "../cdp/types.ts";
 import type { Config } from "../config.ts";
@@ -1019,8 +1020,30 @@ async function refineSerps(
  *
  * `firstUse` is consumed only after a successful extraction, so a wall or parse
  * failure on the typed path still makes the *next* call the human-shaped one.
+ *
+ * The limiter paces but does not hold the tab: pi runs the tool calls of one
+ * turn concurrently, and two attempts on the same engine would type into one
+ * search box at the same time (`CloudCflloaurdef…`). Every live attempt on an
+ * engine tab therefore runs under the same FIFO page lock `web_read` uses — one
+ * writer per tab (AGENTS hard rule 8). The lock also makes `firstUse` honest:
+ * the second caller sees the first call's success and takes the fast path
+ * instead of typing a duplicate search.
  */
 async function runEngine(
+  engine: Engine,
+  query: Query,
+  key: string,
+  deps: ToolDeps,
+  firstUse: Set<EngineId>,
+  signal: AbortSignal | undefined,
+  onHuman?: (human: HumanSearchResult) => void,
+): Promise<RawSerp> {
+  return await pageLockFor(deps.cdp).run(engine.id, () =>
+    runEngineLive(engine, query, key, deps, firstUse, signal, onHuman),
+  );
+}
+
+async function runEngineLive(
   engine: Engine,
   query: Query,
   key: string,

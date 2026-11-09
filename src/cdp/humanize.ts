@@ -116,10 +116,10 @@ export interface HumanSearchResult {
   settleMs: number;
   /** Pixels scrolled before extraction. */
   scrollPx: number;
-  /** True when the box never appeared, the query was too long, or home redirected. */
+  /** True when the box never appeared, the query was too long, home redirected, or the box held something else. */
   fellBackToSerp: boolean;
   /** Why the typed path was not used, when it wasn't. */
-  fellBackReason?: "box-missing" | "query-too-long" | "home-redirect";
+  fellBackReason?: "box-missing" | "query-too-long" | "home-redirect" | "box-mismatch";
   /** Host the home navigation actually landed on when it was the wrong one. */
   homeRedirectHost?: string;
   /** Time the home navigation cost (0 on the fast path). */
@@ -375,19 +375,34 @@ function typeDelays(profile: EngineTypeProfile | undefined): { minMs: number; ma
   return { minMs: min, maxMs: max };
 }
 
-/** How many characters the engine prefilled into the SERP box (read-only). */
-async function boxValueLength(page: CdpPage, selector: string): Promise<number> {
+/**
+ * The box's current value, read-only, or `null` when the document cannot answer.
+ * `null` and `""` are different answers: the first means "unverifiable", the
+ * second means "the box is empty because the keystrokes went somewhere else".
+ */
+async function boxValue(page: CdpPage, selector: string): Promise<string | null> {
   try {
     const raw = await page.evaluate<unknown>(
       `(() => { const el = document.querySelector(${literal(selector)}); ` +
-        `return el && typeof el.value === "string" ? el.value.length : 0; })()`,
+        `return el && typeof el.value === "string" ? el.value : null; })()`,
     );
-    if (typeof raw !== "number" || !Number.isFinite(raw)) return 0;
-    // A hostile/odd value must not turn into a thousand key presses.
-    return Math.min(500, Math.max(0, Math.floor(raw)));
+    return typeof raw === "string" ? raw : null;
   } catch {
-    return 0;
+    return null;
   }
+}
+
+/** How many characters the engine prefilled into the SERP box (read-only). */
+async function boxValueLength(page: CdpPage, selector: string): Promise<number> {
+  const value = await boxValue(page, selector);
+  if (value === null) return 0;
+  // A hostile/odd value must not turn into a thousand key presses.
+  return Math.min(500, Math.max(0, [...value].length));
+}
+
+/** Trim-only comparison: an engine may pad the box, and a trailing space is not a hijack. */
+function sameBoxText(value: string, query: string): boolean {
+  return value.trim() === query.trim();
 }
 
 /** Box candidates in profile-first order, without duplicates. */
@@ -408,11 +423,13 @@ function boxCandidates(selectors: readonly string[], profile: EngineTypeProfile 
  * Pressing Enter (rather than building a SERP URL) is why the browser sends the
  * same request a person would, from the same meaningful referrer chain.
  *
- * Three ways the typed path degrades — all honest, all reported in the result:
+ * Four ways the typed path degrades — all honest, all reported in the result:
  * the box never appeared (`box-missing`), the query is longer than the engine's
  * box accepts (`query-too-long`; typing a truncated query would search for
- * something the user did not ask), or the home navigation landed on a host the
- * engine does not own (`home-redirect`, e.g. Yandex → Dzen, P10-D).
+ * something the user did not ask), the home navigation landed on a host the
+ * engine does not own (`home-redirect`, e.g. Yandex → Dzen, P10-D), or the box
+ * no longer holds the query after typing (`box-mismatch`: a second writer in the
+ * same tab interleaved its own characters, so Enter is never pressed).
  *
  * Fast path: a direct SERP URL, which people share and reopen all the time.
  *
@@ -448,6 +465,44 @@ export async function humanSearch(opts: HumanSearchOptions): Promise<HumanSearch
     let fellBackReason: HumanSearchResult["fellBackReason"];
     let homeRedirectHost: string | undefined;
 
+    /**
+     * Click the box, type the query and submit it — unless the box no longer
+     * holds exactly the query, in which case `false` means "do not submit".
+     *
+     * Two tool calls can reach the same engine tab (the orchestrator serializes
+     * them, but a bug or a foreign writer may not), and two typists in one box
+     * interleave characters into `CloudCflloaurdef…`. The value check turns that
+     * from a garbage SERP the caller believes in into an honest SERP fallback.
+     */
+    const typeAndSubmit = async (box: string, clearPrefilled: boolean): Promise<boolean> => {
+      throwIfAborted(signal, stage, engine);
+      const typingStart = clock.now();
+      await page.click(box);
+      if (clearPrefilled) {
+        const prefilled = await boxValueLength(page, box);
+        for (let index = 0; index < prefilled; index += 1) {
+          throwIfAborted(signal, stage, engine);
+          await page.press("Backspace");
+        }
+      }
+      const { minMs, maxMs } = typeDelays(profile);
+      await page.typeText(opts.query, { minMs, maxMs });
+      typed = true;
+      // Typing is a page call without a signal; an abort that landed mid-query
+      // must not submit a half-typed search.
+      throwIfAborted(signal, stage, engine);
+      const landed = await boxValue(page, box);
+      // `null` is "unverifiable", not "wrong": an odd box must not be reported
+      // as a hijack. A readable value that is not the query is a real refusal.
+      if (landed !== null && !sameBoxText(landed, opts.query)) {
+        typeMs = Math.max(0, clock.now() - typingStart);
+        return false;
+      }
+      await page.press("Enter");
+      typeMs = Math.max(0, clock.now() - typingStart);
+      return true;
+    };
+
     if (!typedPath) {
       await page.navigate(opts.serpUrl, navigateOptions(signal));
     } else if (tooLong) {
@@ -474,21 +529,12 @@ export async function humanSearch(opts: HumanSearchOptions): Promise<HumanSearch
         // Already on the SERP: nothing to navigate, and the direct page is usable.
         fellBackToSerp = true;
         fellBackReason = "box-missing";
-      } else {
-        throwIfAborted(signal, stage, engine);
-        const typingStart = clock.now();
-        await page.click(box);
-        const prefilled = await boxValueLength(page, box);
-        for (let index = 0; index < prefilled; index += 1) {
-          throwIfAborted(signal, stage, engine);
-          await page.press("Backspace");
-        }
-        const { minMs, maxMs } = typeDelays(profile);
-        await page.typeText(opts.query, { minMs, maxMs });
-        typed = true;
-        throwIfAborted(signal, stage, engine);
-        await page.press("Enter");
-        typeMs = Math.max(0, clock.now() - typingStart);
+      } else if (!(await typeAndSubmit(box, true))) {
+        // Retype landed wrong (a second writer, a lost focus). The SERP URL is
+        // the same query without trusting the box.
+        fellBackToSerp = true;
+        fellBackReason = "box-mismatch";
+        await page.navigate(opts.serpUrl, navigateOptions(signal));
       }
     } else {
       const homeStart = clock.now();
@@ -523,18 +569,10 @@ export async function humanSearch(opts: HumanSearchOptions): Promise<HumanSearch
           fellBackToSerp = true;
           fellBackReason = "box-missing";
           await page.navigate(opts.serpUrl, navigateOptions(signal));
-        } else {
-          throwIfAborted(signal, stage, engine);
-          const typingStart = clock.now();
-          await page.click(box);
-          const { minMs, maxMs } = typeDelays(profile);
-          await page.typeText(opts.query, { minMs, maxMs });
-          typed = true;
-          // Typing is a page call without a signal; an abort that landed mid-query
-          // must not submit a half-typed search.
-          throwIfAborted(signal, stage, engine);
-          await page.press("Enter");
-          typeMs = Math.max(0, clock.now() - typingStart);
+        } else if (!(await typeAndSubmit(box, false))) {
+          fellBackToSerp = true;
+          fellBackReason = "box-mismatch";
+          await page.navigate(opts.serpUrl, navigateOptions(signal));
         }
       }
     }

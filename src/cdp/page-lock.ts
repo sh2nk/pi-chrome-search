@@ -15,12 +15,19 @@
  *    the next waiter, and an aborted caller never holds a key forever.
  *  - **Per connector, not global.** The lock is keyed by connector identity so
  *    two pi sessions (two connectors) do not serialise each other; the browser
- *    lock file already arbitrates the truly global case.
+ *    lock file already arbitrates the truly global case. This only works while
+ *    the connector is the one instance the tools share (the runtime builds it
+ *    once) — a connector rebuilt per call would hand out a fresh lock per call.
  *
  * The pool (`config.read.pool`) is a set of independent keys (`read`, `read#2`,
  * …): `pick()` returns the least-loaded one *synchronously*, so two callers who
  * arrive together do not both choose slot 1 and queue behind each other while
  * slot 2 is free.
+ *
+ * Search tabs use the engine id as their key: `web_search`, `image_search` and
+ * `/web-doctor` all touch `google`/`duckduckgo`/`yandex` through the same lock,
+ * so one tab has exactly one writer even when pi runs several tool calls of a
+ * turn at once (two typists in one search box interleave their characters).
  */
 
 export interface KeyedLock {
