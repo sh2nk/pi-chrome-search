@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { classifyBump, classifyCommit, nextVersion, publishMode } from "../../scripts/release.mjs";
+import { classifyBump, classifyCommit, nextVersion, publishMode, releaseSteps } from "../../scripts/release.mjs";
 
 test("the bump table covers feat/fix/refactor/breaking/docs-only/skip", () => {
   const cases = [
@@ -59,4 +59,18 @@ test("publishMode: a token wins, GitHub Actions falls back to OIDC, a local run 
   assert.equal(publishMode({ NPM_TOKEN: "   " }), "none");
   assert.equal(publishMode({ CI: "true", GH_TOKEN: "x" }), "none");
   assert.equal(publishMode({}), "none");
+});
+
+test("publish precedes the tag, so a failed publish leaves no trace", () => {
+  const ci = releaseSteps("0.1.1", "oidc").map(([command, args]) => `${command} ${args.join(" ")}`);
+  const publishAt = ci.findIndex((step) => step.startsWith("npm publish"));
+  const tagAt = ci.findIndex((step) => step.startsWith("git tag"));
+  const pushAt = ci.findIndex((step) => step.startsWith("git push"));
+  assert.ok(publishAt >= 0, "a CI run publishes");
+  assert.ok(publishAt < tagAt && tagAt < pushAt, ci.join(" | "));
+  assert.equal(ci.at(-1), "gh release create v0.1.1 --generate-notes --title v0.1.1");
+
+  const local = releaseSteps("0.1.1", "none").map(([command, args]) => `${command} ${args.join(" ")}`);
+  assert.equal(local.filter((step) => step.startsWith("npm publish")).length, 0);
+  assert.ok(local.some((step) => step.startsWith("git tag -a v0.1.1")));
 });

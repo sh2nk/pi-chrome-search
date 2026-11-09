@@ -97,6 +97,30 @@ export function publishMode(env) {
   return "none";
 }
 
+/**
+ * The shell steps of a real release, in order. Publish comes before the tag on
+ * purpose: a publish that fails (expired trusted publisher, wrong allowed
+ * action, registry hiccup) must leave no `v<x>` tag and no GitHub release
+ * pointing at a version that the registry does not have. A local run
+ * (`mode === "none"`) still tags and releases, it just never publishes.
+ *
+ * @param {string} next
+ * @param {"token" | "oidc" | "none"} mode
+ * @returns {Array<[string, string[]]>}
+ */
+export function releaseSteps(next, mode) {
+  const steps = [["npm", ["version", next, "--no-git-tag-version"]]];
+  if (mode !== "none") steps.push(["npm", ["publish", "--provenance", "--access", "public"]]);
+  steps.push(
+    ["git", ["add", "package.json", "package-lock.json"]],
+    ["git", ["commit", "-m", `chore(release): v${next}`]],
+    ["git", ["tag", "-a", `v${next}`, "-m", `v${next}`]],
+    ["git", ["push", "origin", "HEAD", "--follow-tags"]],
+    ["gh", ["release", "create", `v${next}`, "--generate-notes", "--title", `v${next}`]],
+  );
+  return steps;
+}
+
 function git(args, options = {}) {
   return execFileSync("git", ["-C", ROOT, ...args], {
     encoding: "utf8",
@@ -165,20 +189,13 @@ function main(argv) {
     return 1;
   }
 
-  run("npm", ["version", next, "--no-git-tag-version"]);
-  run("git", ["add", "package.json", "package-lock.json"]);
-  run("git", ["commit", "-m", `chore(release): v${next}`]);
-  run("git", ["tag", "-a", `v${next}`, "-m", `v${next}`]);
-  run("git", ["push", "origin", "HEAD", "--follow-tags"]);
-  run("gh", ["release", "create", `v${next}`, "--generate-notes", "--title", `v${next}`]);
-
   const mode = publishMode(process.env);
-  if (mode === "none") {
-    process.stdout.write("publish: skipped: not on GitHub Actions and no NPM_TOKEN\n");
-    return 0;
-  }
-  process.stdout.write(`publish: authenticating with ${mode}\n`);
-  run("npm", ["publish", "--provenance", "--access", "public"]);
+  process.stdout.write(
+    mode === "none"
+      ? "publish: skipped: not on GitHub Actions and no NPM_TOKEN\n"
+      : `publish: authenticating with ${mode}\n`,
+  );
+  for (const [command, args] of releaseSteps(next, mode)) run(command, args);
   return 0;
 }
 
