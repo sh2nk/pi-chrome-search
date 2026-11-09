@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { classifyBump, classifyCommit, nextVersion } from "../../scripts/release.mjs";
+import { classifyBump, classifyCommit, nextVersion, publishMode } from "../../scripts/release.mjs";
 
 test("the bump table covers feat/fix/refactor/breaking/docs-only/skip", () => {
   const cases = [
@@ -49,4 +49,14 @@ test("nextVersion is semver arithmetic without a dependency", () => {
   assert.equal(nextVersion("1.2.3-beta.1", "patch"), "1.2.4");
   assert.throws(() => nextVersion("v1", "patch"), /not a semver version/);
   assert.throws(() => nextVersion("1.0.0", "huge"), /unknown bump/);
+});
+
+test("publishMode: a token wins, GitHub Actions falls back to OIDC, a local run publishes nothing", () => {
+  assert.equal(publishMode({ NPM_TOKEN: "npm_secret" }), "token");
+  assert.equal(publishMode({ GITHUB_ACTIONS: "true", NPM_TOKEN: "npm_secret" }), "token");
+  assert.equal(publishMode({ GITHUB_ACTIONS: "true" }), "oidc");
+  assert.equal(publishMode({ GITHUB_ACTIONS: "  " }), "none");
+  assert.equal(publishMode({ NPM_TOKEN: "   " }), "none");
+  assert.equal(publishMode({ CI: "true", GH_TOKEN: "x" }), "none");
+  assert.equal(publishMode({}), "none");
 });

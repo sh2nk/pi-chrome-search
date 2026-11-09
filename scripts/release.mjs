@@ -16,7 +16,9 @@
  *
  * `node scripts/release.mjs --dry-run` prints the current version, the bump and
  * the next version and touches nothing. Without `--dry-run` it tags, pushes,
- * creates the GitHub release and publishes to npm only when NPM_TOKEN exists.
+ * creates the GitHub release and publishes to npm through whichever credential
+ * the environment offers (`publishMode`): a token, or the job's OIDC id-token
+ * when the package has a trusted publisher configured.
  */
 
 import { execFileSync } from "node:child_process";
@@ -76,6 +78,23 @@ export function nextVersion(version, bump) {
     throw new Error(`unknown bump: ${bump}`);
   }
   return `${major}.${minor}.${patch}`;
+}
+
+/**
+ * How a release authenticates to the registry:
+ *
+ *   `token`  NPM_TOKEN is set — the legacy path, still used until the package
+ *            has a trusted publisher configured on npmjs.com.
+ *   `oidc`   running on GitHub Actions: npm exchanges the job's id-token for a
+ *            short-lived publish token itself, so the workflow must not set
+ *            NODE_AUTH_TOKEN (setup-node would write it into `.npmrc` and that
+ *            wins over OIDC). Provenance is automatic in this mode.
+ *   `none`   a local run without a token: tag and release, never publish.
+ */
+export function publishMode(env) {
+  if ((env.NPM_TOKEN ?? "").trim() !== "") return "token";
+  if ((env.GITHUB_ACTIONS ?? "").trim() === "true") return "oidc";
+  return "none";
 }
 
 function git(args, options = {}) {
@@ -153,10 +172,12 @@ function main(argv) {
   run("git", ["push", "origin", "HEAD", "--follow-tags"]);
   run("gh", ["release", "create", `v${next}`, "--generate-notes", "--title", `v${next}`]);
 
-  if ((process.env.NPM_TOKEN ?? "").trim() === "") {
-    process.stdout.write("publish: skipped: no token\n");
+  const mode = publishMode(process.env);
+  if (mode === "none") {
+    process.stdout.write("publish: skipped: not on GitHub Actions and no NPM_TOKEN\n");
     return 0;
   }
+  process.stdout.write(`publish: authenticating with ${mode}\n`);
   run("npm", ["publish", "--provenance", "--access", "public"]);
   return 0;
 }
