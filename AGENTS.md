@@ -76,7 +76,9 @@ Live commands hit real engines: run them **once**. A wall means stop and ask, no
   IP, personal queries) and a line in `docs/engines.md`.
 - New dependency: justify it in the commit message. Tests are offline by default; live tests are opt-in.
 - Commit style: `feat: …`, `fix(parse): …`, `docs: …`, `test: …`, `chore: …` — the release workflow
-  classifies these (`!`/`BREAKING CHANGE` → major, docs/test/chore only → no release).
+  classifies these (`!`/`BREAKING CHANGE` → major, docs/test/chore only → no release). Commit on your
+  own as soon as the gates pass: do not wait for an explicit "commit" request, one logical change per
+  commit.
 
 ## Definition of done
 
