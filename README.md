@@ -1,7 +1,7 @@
 # pi-chrome-search
 
 [![npm](https://img.shields.io/npm/v/pi-chrome-search)](https://www.npmjs.com/package/pi-chrome-search)
-[![downloads](https://img.shields.io/npm/dm/pi-chrome-search)](https://www.npmjs.com/package/pi-chrome-search)
+[![pi](https://img.shields.io/badge/pi-package-6f42c1)](https://pi.dev/packages)
 [![ci](https://github.com/sh2nk/pi-chrome-search/actions/workflows/ci.yml/badge.svg)](https://github.com/sh2nk/pi-chrome-search/actions/workflows/ci.yml)
 [![license](https://img.shields.io/npm/l/pi-chrome-search)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D26-brightgreen)](package.json)
@@ -10,14 +10,13 @@ Free web search for [pi](https://pi.dev) through your own visible Chrome: same p
 same IP. Compact Markdown from Google, DuckDuckGo and Yandex, with each engine's native AI summary
 (AI Overview, Search Assist, Alice). The window stays visible on purpose, so you can watch the search
 and solve a captcha yourself. No keys, no paid APIs, no headless mode, no spoofing, no captcha solving.
-Needs Node ≥26 and Chrome 136+ on a headed desktop.
+Needs Node ≥26 and Chrome 136+.
 
 ## Install
 
 ```bash
-npm install
-pi install .          # register this checkout as a pi package
-pi -e ./src/index.ts  # or load it for one throwaway session
+pi install npm:pi-chrome-search   # adds the package to ~/.pi/agent/settings.json
+pi -e npm:pi-chrome-search        # or one session only; run /reload in pi afterwards
 ```
 
 ## Enable CDP (once per Chrome session)
@@ -45,7 +44,7 @@ Discovery order: `PI_CHROME_CDP_WS` → `PI_CHROME_CDP_PORTS` → `DevToolsActiv
 | `web_doctor` | `probe` (true); `fix` (false: reconnect, close owned tabs, prune artifacts) |
 
 Output is capped at 2500 chars (summary ≤1200, snippet ≤140). The AI block reports `ai:yes` only for
-≥200 chars of prose, `ai:lead` when the block exists without an answer, `ai:no` when absent.
+≥200 chars of prose, `ai:lead` for a block without an answer, `ai:no` when absent.
 
 ## Configuration
 
@@ -62,8 +61,7 @@ unknown key fails as `E_CONFIG`. Every key and env override: [`docs/config.md`](
 | `E_BUSY` | Another pi session holds the lock in `~/.pi/agent/`: close it or wait |
 | `E_PARSE` | A selector canary broke: compare the artifact `page.txt` with [`docs/engines.md`](docs/engines.md) |
 
-All 19 codes: [`docs/errors.md`](docs/errors.md). Start with `/web-doctor` or
-`node src/cli/doctor.ts --json`; `--fix` reconnects, closes only owned tabs and prunes artifacts.
+All 19 codes: [`docs/errors.md`](docs/errors.md). Start with `/web-doctor` or `node src/cli/doctor.ts --json`.
 
 ## Security and ToS
 
@@ -77,10 +75,12 @@ must not be run as a service. A captcha means solve it in the window or stop.
 ## Development
 
 ```bash
+git clone https://github.com/sh2nk/pi-chrome-search && cd pi-chrome-search && npm install
+pi install .                         # register this checkout, no copy
+pi -e ./src/index.ts                 # or one throwaway session
 npm run lint                         # typecheck + audit
 npm test                             # offline contract suite
 PI_CHROME_LIVE=1 npm run test:live   # one query per engine, no retries
-node src/cli/doctor.ts --json        # canonical gate report
 ```
 
 Decisions: [`docs/architecture.md`](docs/architecture.md). Selectors: [`docs/engines.md`](docs/engines.md).
