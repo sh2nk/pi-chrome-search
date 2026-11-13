@@ -15,7 +15,7 @@ user verbatim. `E_*` codes never mean "something failed"; they name what to do n
 | `E_EMPTY` | yes | No organic results: rephrase the query or try another engine. |
 | `E_PARSE` | no | A selector canary failed: open the artifact dir, compare `page.txt` with the markers in `docs/engines.md`, patch the adapter. |
 | `E_EMPTY_PAGE` | no | The document rendered no readable text (client-side page, empty shell): open the artifact, try another URL; `E_PARSE` means a selector canary broke. |
-| `E_TIMEOUT` | yes | Deadline exceeded: retry, or ask for less (a smaller `n` or `maxChars`). |
+| `E_TIMEOUT` | yes | Deadline exceeded; `stage: budget` means the whole call ran out of time. Retry, or ask for less (a smaller `n`, fewer engines, `summary:false`). |
 | `E_BUSY` | yes | Another pi session holds `~/.pi/agent/web-search.lock`; close it or wait for the heartbeat to expire. |
 | `E_BLOCKED_URL` | no | Only public `http(s)` is readable; loopback, private ranges, `file:` and `data:` are blocked (re-checked on redirect). |
 | `E_UNSUPPORTED` | no | Engine/vertical not implemented; `/web-doctor` shows per-engine status. |

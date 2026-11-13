@@ -43,9 +43,8 @@ Discovery order: `PI_CHROME_CDP_WS` → `PI_CHROME_CDP_PORTS` → `DevToolsActiv
 | `web_doctor` | deferred | `probe?` boolean; `fix?` boolean |
 <!-- tools:end -->
 
-Output is capped at 2500 chars (summary ≤1200, snippet ≤140). The AI block reports `ai:yes` only for ≥200
-chars of prose, `ai:lead` for a block without an answer, `ai:no` when absent. A Google `/goto` wrapper the
-resolver cannot open stays in the result and is marked `unresolved`; `details.unresolved` counts emitted ones.
+Output is capped at 2500 chars (summary ≤1200, snippet ≤140); one call has a single 60 s deadline. The AI block reports `ai:yes` only for ≥200 chars of prose, `ai:lead` for a block without an answer, `ai:no` when absent.
+DuckDuckGo has no pagination: `page>1` is page 1, reported as `ignored.page`. A Google `/goto` wrapper the resolver cannot open stays and is marked `unresolved`; `details.unresolved` counts emitted ones.
 
 ## Configuration
 

@@ -30,6 +30,7 @@
  *     // opaque Google /goto wrapper that stayed unresolved (S3.5, S7.4)
  *   ],
  *   "pageCarried": true,
+ *   "ignored": { "page": "duckduckgo" }, // only when an argument was not honoured
  *   "degraded": true,                   // only when true
  *   "cached": true,                     // only when true
  *   "chars": 1234,                      // == text.length
@@ -82,6 +83,12 @@ export interface CompactOptions {
   perEngine?: boolean;
   /** Codes of engines that failed inside a merged search; rendered as `id:0(CODE)`. */
   failedEngines?: Partial<Record<EngineId, string>>;
+  /**
+   * Honour-or-flag (S7.1): an accepted argument the engine cannot honour, with
+   * the engine/reason as the value. DuckDuckGo has no pagination, so
+   * `page > 1` yields `{ page: "duckduckgo" }`; the header and JSON carry it.
+   */
+  ignored?: Readonly<Record<string, string>>;
 }
 
 export interface CompactItem {
@@ -141,6 +148,7 @@ interface Opts {
   elapsedMs: number | undefined;
   perEngine: boolean;
   failedEngines: Partial<Record<EngineId, string>> | undefined;
+  ignored: Readonly<Record<string, string>> | undefined;
 }
 
 const DEFAULT_N = 5;
@@ -193,6 +201,7 @@ function resolveOpts(opts: CompactOptions): Opts {
     elapsedMs: typeof opts.elapsedMs === "number" && Number.isFinite(opts.elapsedMs) ? opts.elapsedMs : undefined,
     perEngine: opts.perEngine === true,
     failedEngines: opts.failedEngines,
+    ignored: opts.ignored,
   };
 }
 
@@ -476,6 +485,11 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
   const aiLabel = (state: AiState): string => (state === "answer" ? "yes" : state === "lead" ? "lead" : "no");
 
   const perEngine = opts.perEngine === true;
+  const ignoredEntries = Object.entries(opts.ignored ?? {}).filter(([, value]) => value !== "");
+  const ignoredNote =
+    ignoredEntries.length === 0
+      ? ""
+      : `ignored: ${ignoredEntries.map(([argument, reason]) => `${argument}(${reason})`).join(" ")}`;
 
   /** Contribution counts in canonical engine order; failed engines report `0(CODE)`. */
   const accountingFor = (items: readonly CompactItem[]): string => {
@@ -494,6 +508,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
     const parts = [engineLabel, `${items.length} results`, `ai:${aiLabel(state)}`];
     const accounting = accountingFor(items);
     if (accounting !== "") parts.push(accounting);
+    if (ignoredNote !== "") parts.push(ignoredNote);
     const elapsed = formatElapsed(opts.elapsedMs);
     if (elapsed) parts.push(elapsed);
     if (opts.cached) parts.push("cached");
@@ -589,6 +604,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
     chars: text.length,
     truncated,
   };
+  if (ignoredEntries.length > 0) data.ignored = Object.fromEntries(ignoredEntries);
   if (perEngine) {
     const counts: Record<string, number> = {};
     for (const id of ENGINE_IDS) {

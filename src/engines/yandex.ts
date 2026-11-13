@@ -1,8 +1,7 @@
 /**
  * Yandex adapter (SPEC §6.2, PLAN P3-Yandex).
  *
- * What the 2026 desktop layout actually gives us (see `tests/fixtures/yandex-*.html.gz`
- * and `research/FINDINGS.md` §3):
+ * What the 2026 desktop layout actually gives us (see `tests/fixtures/yandex-*.html.gz`):
  *
  *  - There is **no `li.serp-item`** any more. A result is `.Organic` holding
  *    `.OrganicTitle` (an anchor inside it, or the nearest anchor) and
@@ -45,7 +44,7 @@ import type {
 } from "./types.ts";
 
 /** A Yandex SERP appeared in ~5.5 s in the capture; 10 s leaves room for a slow page. */
-const SETTLE_DEADLINE_MS = 10_000;
+export const YANDEX_SETTLE_DEADLINE_MS = 10_000;
 const SETTLE_POLL_MS = 200;
 /** After the opt-in "Показать полностью" click the card needs a moment to unfold. */
 const EXPAND_WAIT_MS = 500;
@@ -799,7 +798,7 @@ export async function settleYandex(page: CdpPage, options: YandexSettleOptions =
     marker: INTERACTION.marker,
     selector: INTERACTION.selector,
     minCount: INTERACTION.minCount ?? 1,
-    deadlineMs: options.deadlineMs ?? SETTLE_DEADLINE_MS,
+    deadlineMs: options.deadlineMs ?? YANDEX_SETTLE_DEADLINE_MS,
     pollMs: options.pollMs ?? SETTLE_POLL_MS,
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.rng === undefined ? {} : { rng: options.rng }),

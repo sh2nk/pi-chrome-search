@@ -31,6 +31,7 @@ const CONFIG_DOCS: Readonly<Record<string, string>> = {
   "pacing.google": "Min/max gap in ms between Google searches.",
   "pacing.duckduckgo": "Min/max gap in ms between DuckDuckGo searches.",
   "pacing.yandex": "Min/max gap in ms between Yandex searches.",
+  "search.budgetMs": "Whole-call deadline in ms; pacing, settle, AI wait and link resolution draw from it (S8.1).",
   "search.n": "Default result count.",
   "search.nMax": "Hard ceiling for `n`; never above 10.",
   "search.summaryMaxChars": "Cap for the AI answer block.",

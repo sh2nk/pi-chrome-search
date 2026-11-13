@@ -34,16 +34,18 @@ import { waitForAi, type AiWaitResult } from "../cdp/ai-wait.ts";
 import type { CdpPage } from "../cdp/types.ts";
 import type { Config } from "../config/index.ts";
 import { compactSerps } from "../extract/compact.ts";
-import { createGotoResolver } from "../extract/goto.ts";
+import { GOTO_BATCH_TIMEOUT_MS, createGotoResolver, resolveGotoBatch } from "../extract/goto.ts";
 import { parseLink } from "../extract/urls.ts";
 import {
   ENGINE_IDS,
+  SUPPORT_MATRIX,
   type AiState,
   type Engine,
   type EngineId,
   type EngineSelection,
   type Query,
   type RawSerp,
+  type SupportArgument,
   type Wall,
 } from "../engines/types.ts";
 import { serpKey } from "../runtime/cache.ts";
@@ -52,6 +54,7 @@ import { isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, renderToolFailure, toFailure } from "../runtime/errors.ts";
 import type { FailureFallback, FailureJson, ToolTextBlock } from "../runtime/errors.ts";
 import { saveFailureArtifact } from "../runtime/artifacts.ts";
+import { createCallBudget, raceSignal, type CallBudget } from "../runtime/budget.ts";
 import type { PanelCounter, WorkAnnouncement } from "../runtime/panel.ts";
 import type { Clock } from "../runtime/types.ts";
 import type { ToolDeps } from "./types.ts";
@@ -118,11 +121,12 @@ export interface WebSearchDetails {
   cached: boolean;
   pageCarried: boolean;
   /**
-   * DuckDuckGo has no pagination until M2: a `page > 1` request is served as
-   * page 1. Set only when that happened, so the caller knows the page was not
-   * actually honoured (the fallback engines still paginate normally).
+   * Honour-or-flag (S4.2, S7.1): an accepted argument an engine could not
+   * honour, with the engine as the value. DuckDuckGo has no pagination, so a
+   * `page > 1` request that reached it is reported as
+   * `{ page: "duckduckgo" }` — never dropped silently.
    */
-  pageIgnored?: boolean;
+  ignored?: Partial<Record<SupportArgument, string>>;
   /** Set only by the keyless HTTP fallback (SPEC §6.5); never by a real SERP. */
   degraded?: boolean;
   /**
@@ -347,7 +351,9 @@ function resolveLocale(value: string): string | undefined {
  */
 function buildQuery(engine: EngineId, input: NormalizedInput, config: Config): Query {
   const query: Query = { text: input.q, n: input.n, summary: input.summary };
-  if (engine !== "duckduckgo") query.page = input.page;
+  // S4.2 is data (`SUPPORT_MATRIX`): an engine that cannot paginate never
+  // receives `page`, and the caller is told so through `ignored` below.
+  if (SUPPORT_MATRIX.page[engine] === "yes") query.page = input.page;
 
   switch (engine) {
     case "google": {
@@ -369,6 +375,29 @@ function buildQuery(engine: EngineId, input: NormalizedInput, config: Config): Q
     }
   }
   return query;
+}
+
+/**
+ * S4.2/S7.1: an argument is honoured by every engine that contributed, or it is
+ * reported. The walk reads `SUPPORT_MATRIX`, so adding an engine or changing a
+ * cell moves the behaviour and the test together.
+ */
+function ignoredArguments(
+  input: NormalizedInput,
+  engines: readonly EngineId[],
+): Partial<Record<SupportArgument, string>> | undefined {
+  const requested: Record<SupportArgument, boolean> = {
+    n: true,
+    page: input.page > 1,
+    summary: input.summary,
+  };
+  const ignored: Partial<Record<SupportArgument, string>> = {};
+  for (const argument of ["n", "page", "summary"] as const) {
+    if (!requested[argument]) continue;
+    const flagged = engines.filter((engine) => SUPPORT_MATRIX[argument][engine] === "flag");
+    if (flagged.length > 0) ignored[argument] = flagged.join(",");
+  }
+  return Object.keys(ignored).length === 0 ? undefined : ignored;
 }
 
 /**
@@ -717,11 +746,18 @@ async function resolveGotoResults(
   page: CdpPage,
   serp: RawSerp,
   deps: ToolDeps,
-  signal: AbortSignal | undefined,
+  budget: CallBudget,
 ): Promise<void> {
   const base = page.url();
-  if (!serp.results.some((item) => parseLink(item.url, base)?.kind === "goto")) return;
+  const pending = serp.results
+    .map((item) => ({ item, link: parseLink(item.url, base) }))
+    .filter(
+      (entry): entry is { item: (typeof serp.results)[number]; link: NonNullable<ReturnType<typeof parseLink>> } =>
+        entry.link !== null && entry.link.kind === "goto" && entry.link.wrapperUrl !== null,
+    );
+  if (pending.length === 0) return;
 
+  budget.check("resolve", serp.engine);
   const resolver = createGotoResolver({
     cache: deps.cache,
     clock: deps.clock,
@@ -729,32 +765,33 @@ async function resolveGotoResults(
     ...(deps.fetchImpl === undefined ? {} : { fetchImpl: deps.fetchImpl }),
     cookieSource: (urls) => page.cookiesFor([...urls]),
     navigateFallback: async (wrapperUrl) => {
-      await page.navigate(wrapperUrl, signal === undefined ? {} : { signal });
+      await page.navigate(wrapperUrl, { signal: budget.signal });
       return page.url();
     },
   });
 
-  let resolved = 0;
-  for (const item of serp.results) {
-    const link = parseLink(item.url, base);
-    if (link === null || link.kind !== "goto" || link.wrapperUrl === null) continue;
-    try {
-      const resolution = await resolver.resolve(link.wrapperUrl, signal);
-      if (resolution.url !== null) {
-        item.url = resolution.url;
-        resolved += 1;
-      } else {
-        // The wrapper stays clickable in the user's browser, but the caller must
-        // be able to tell that this is not a verified destination (S3.5, S7.4).
-        item.unresolved = true;
-      }
-    } catch {
-      // Keep the wrapper and mark it; see the policy above.
+  // S8.3: concurrency 3 and one total deadline, clamped by what is left of the
+  // call. A wrapper the batch did not reach stays the wrapper and is marked.
+  const batch = await resolveGotoBatch({
+    resolver,
+    wrappers: pending.map((entry) => entry.link.wrapperUrl as string),
+    deadlineMs: Math.min(GOTO_BATCH_TIMEOUT_MS, budget.remainingMs()),
+    signal: budget.signal,
+  });
+
+  for (const { item, link } of pending) {
+    const wrapperUrl = link.wrapperUrl as string;
+    const resolution = batch.byWrapper.get(wrapperUrl);
+    if (resolution?.url != null) {
+      item.url = resolution.url;
+    } else {
+      // The wrapper stays clickable in the user's browser, but the caller must
+      // be able to tell that this is not a verified destination (S3.5, S7.4).
       item.unresolved = true;
     }
   }
 
-  if (signal?.aborted === true) {
+  if (budget.signal.aborted === true) {
     throw fail("E_CANCELLED", "extract", {
       engine: serp.engine,
       message: "the search was aborted while resolving result links",
@@ -763,8 +800,10 @@ async function resolveGotoResults(
   void deps.log.write({
     kind: "goto",
     engine: serp.engine,
-    links: serp.results.length,
-    resolved,
+    links: pending.length,
+    resolved: batch.resolved,
+    unresolved: batch.unresolved,
+    timedOut: batch.timedOut,
   });
 }
 
@@ -802,18 +841,48 @@ async function notifySearching(update: UpdateFn | undefined, engine: EngineId): 
  * the second caller sees the first call's success and takes the fast path
  * instead of typing a duplicate search.
  */
+interface PageHolder {
+  page?: CdpPage;
+}
+
 async function runEngine(
   engine: Engine,
   query: Query,
   key: string,
   deps: ToolDeps,
   firstUse: Set<EngineId>,
-  signal: AbortSignal | undefined,
+  budget: CallBudget,
   onHuman?: (human: HumanSearchResult) => void,
 ): Promise<RawSerp> {
-  return await pageLockFor(deps.cdp).run(engine.id, () =>
-    runEngineLive(engine, query, key, deps, firstUse, signal, onHuman),
-  );
+  const holder: PageHolder = {};
+  const work = pageLockFor(deps.cdp).run(engine.id, async () => {
+    try {
+      return await runEngineLive(engine, query, key, deps, firstUse, budget, holder, onHuman);
+    } catch (error) {
+      if (!budget.expired()) throw error;
+      // S8.1: an exhausted budget is reported as such, with the page we were
+      // looking at when there is one. A cancelled caller keeps its E_CANCELLED.
+      let artifact: string | undefined;
+      if (holder.page !== undefined) {
+        artifact = await saveFailureArtifact(deps, {
+          code: "E_TIMEOUT",
+          stage: "budget",
+          engine: engine.id,
+          url: holder.page.url(),
+          query: query.text,
+          page: holder.page,
+        });
+      }
+      throw fail("E_TIMEOUT", "budget", {
+        engine: engine.id,
+        ...(artifact === undefined ? {} : { artifact }),
+        message: `search budget of ${budget.budgetMs} ms exhausted`,
+      });
+    }
+  });
+  // A queued attempt must not outlive the call's deadline. The losing task is
+  // left to finish; it checks the budget again before touching the tab.
+  return await raceSignal(work, budget.signal);
 }
 
 async function runEngineLive(
@@ -822,9 +891,12 @@ async function runEngineLive(
   key: string,
   deps: ToolDeps,
   firstUse: Set<EngineId>,
-  signal: AbortSignal | undefined,
+  budget: CallBudget,
+  holder: PageHolder,
   onHuman?: (human: HumanSearchResult) => void,
 ): Promise<RawSerp> {
+  const signal = budget.signal;
+  budget.check("navigate", engine.id);
   const pacing = deps.config.pacing[engine.id];
   // P10-A: the query reaches the anchor before the pacing sleep, so the panel
   // shows what is about to happen even when the limiter waits for seconds.
@@ -842,12 +914,15 @@ async function runEngineLive(
     throw asFailure(error, "navigate", engine.id, signal);
   }
 
+  budget.check("navigate", engine.id);
   let page: CdpPage;
   try {
     page = await deps.cdp.acquirePage(engine.id);
   } catch (error) {
     throw asFailure(error, "connect", engine.id, signal);
   }
+  holder.page = page;
+  budget.check("navigate", engine.id);
 
   const firstInSession = !firstUse.has(engine.id);
   const interaction = engine.interaction;
@@ -974,7 +1049,7 @@ async function runEngineLive(
     // reports the collapsed state honestly.
     if (deps.config.search.aiExpand === true && engine.ai.expand !== undefined) {
       try {
-        await engine.ai.expand(page, signal === undefined ? {} : { signal });
+        await engine.ai.expand(page, { signal });
       } catch (error) {
         if (signal?.aborted === true) throw asFailure(error, "extract", engine.id, signal);
         void deps.log.write({
@@ -986,10 +1061,12 @@ async function runEngineLive(
     }
 
     aiWait = await waitForAi(page, engine.ai, {
-      deadlineMs: deps.config.search.aiWaitMs,
+      // Derive the wait from what is left of the call (S8.1), not from a
+      // second independent deadline.
+      deadlineMs: Math.min(deps.config.search.aiWaitMs, budget.remainingMs()),
       clock: deps.clock,
       engine: engine.id,
-      ...(signal === undefined ? {} : { signal }),
+      signal,
     });
 
     if (aiWait.timedOut) {
@@ -1016,6 +1093,7 @@ async function runEngineLive(
     }
   }
 
+  budget.check("extract", engine.id);
   let serp: RawSerp;
   try {
     serp = await engine.extract(page, query);
@@ -1047,7 +1125,8 @@ async function runEngineLive(
     serp.timings = { ...serp.timings, aiWaitMs: aiWait.waitMs };
   }
   if (measuredSettleMs > 0) serp.timings = { ...serp.timings, settleMs: measuredSettleMs };
-  await resolveGotoResults(page, serp, deps, signal);
+  await resolveGotoResults(page, serp, deps, budget);
+  budget.check("render", engine.id);
 
   // A SERP with zero organic results is a failed search, not an empty success:
   // it must trigger the next engine and must never be cached as the answer.
@@ -1094,21 +1173,36 @@ export function createWebSearchTool(
       return failureResult(error, { code: "E_CONFIG", stage: "config" });
     }
 
+    let budget: CallBudget;
+    try {
+      budget = createCallBudget({
+        clock: deps.clock,
+        budgetMs: deps.config.search.budgetMs,
+        ...(signal === undefined ? {} : { parent: signal }),
+        label: "web_search",
+      });
+    } catch (error) {
+      return failureResult(error, { code: "E_CONFIG", stage: "config" });
+    }
+
     // Last-resort barrier: a dependency bug must still reach the agent as a
     // rendered failure with a code and a stage, never as a bare thrown error.
     try {
-      return await search(deps, params, signal, onUpdate);
+      return await search(deps, params, budget, onUpdate);
     } catch (error) {
       return failureResult(error);
+    } finally {
+      budget.dispose();
     }
   }
 
   async function search(
     deps: ToolDeps,
     params: WebSearchInput,
-    signal: AbortSignal | undefined,
+    budget: CallBudget,
     onUpdate: unknown,
   ): Promise<WebSearchResult> {
+    const signal = budget.signal;
     const validation = normalizeInput(params, deps.config);
     if (!validation.ok) {
       return failureResult(fail("E_CONFIG", "config", { hint: INPUT_HINT, message: validation.message }));
@@ -1183,6 +1277,7 @@ export function createWebSearchTool(
 
       await notifySearching(update, id);
       try {
+        budget.check("navigate", id);
         const single = order.length === 1;
         serps.push(
           await runEngine(
@@ -1191,7 +1286,7 @@ export function createWebSearchTool(
             key,
             deps,
             firstUse,
-            signal,
+            budget,
             single
               ? (human) => {
                   humanRun = {
@@ -1239,6 +1334,8 @@ export function createWebSearchTool(
 
     const elapsedMs = deps.clock.now() - startedAt;
     const multiEngineSearch = merge && order.length > 1;
+    const contributed = [...new Set(serps.map((serp) => serp.engine))];
+    const ignored = ignoredArguments(input, contributed);
     const compact = compactSerps(serps, {
       n: input.n,
       summaryMaxChars: deps.config.search.summaryMaxChars,
@@ -1249,6 +1346,7 @@ export function createWebSearchTool(
       elapsedMs,
       perEngine: multiEngineSearch,
       failedEngines: failed,
+      ...(ignored === undefined ? {} : { ignored }),
     });
 
     // The JSON view needs its own cap: `compact.ts` caps Markdown, while JSON
@@ -1261,7 +1359,6 @@ export function createWebSearchTool(
         ? serializeJsonWithin(compact.data, deps.config.search.outputMaxChars)
         : null;
     const text = json === null ? compact.text : json.text;
-    const contributed = [...new Set(serps.map((serp) => serp.engine))];
     const rendered = json === null ? compact.items.length : json.results;
     const truncated = json === null ? compact.truncated : json.truncated;
     const shownAi = json === null ? compact.ai !== undefined : json.ai;
@@ -1294,8 +1391,7 @@ export function createWebSearchTool(
       truncated,
       cached: cachedAny,
       pageCarried: compact.pageCarried,
-      // DuckDuckGo has no pagination yet (M2): `page` is requested but not honoured.
-      ...(input.page > 1 && contributed.includes("duckduckgo") ? { pageIgnored: true } : {}),
+      ...(ignored === undefined ? {} : { ignored }),
       ...(compact.degraded ? { degraded: true } : {}),
       ...(isPerEngineCounts(accounting) ? { perEngine: accounting } : {}),
       ...(Object.keys(failed).length === 0 ? {} : { failedEngines: { ...failed } }),

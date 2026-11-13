@@ -67,6 +67,7 @@ export const CONFIG_SPEC: Spec = {
     search: {
       kind: "object",
       fields: {
+        budgetMs: NUM(1_000, true, 600_000),
         n: NUM(1),
         nMax: NUM(1),
         summaryMaxChars: NUM(1),

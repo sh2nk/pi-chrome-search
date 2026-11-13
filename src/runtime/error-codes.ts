@@ -59,7 +59,8 @@ export type Stage =
   | "extract"
   | "resolve"
   | "render"
-  | "read";
+  | "read"
+  | "budget";
 
 export const STAGES = [
   "config",
@@ -71,6 +72,7 @@ export const STAGES = [
   "resolve",
   "render",
   "read",
+  "budget",
 ] as const satisfies readonly Stage[];
 
 export interface FailureDetails {

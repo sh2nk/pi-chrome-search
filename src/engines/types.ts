@@ -201,6 +201,28 @@ export interface Engine {
 /** Engine selection requested by the tool layer (D9). */
 export type EngineSelection = "auto" | EngineId | EngineId[];
 
+/**
+ * The tool-level arguments whose support differs per engine (SPEC S4.2).
+ *
+ * The matrix is deliberately data, not four `if` statements: the tool layer uses
+ * `page: "flag"` to omit an unsupported parameter and report `ignored`, and the
+ * unit test walks the same table, so the documentation and the behaviour cannot
+ * drift apart. `q` operators are the fourth row of the S4.2 table and pass
+ * through everywhere; they are asserted in the same test, not modelled here.
+ */
+export type SupportArgument = "n" | "page" | "summary";
+export type ArgumentSupport = "yes" | "flag";
+
+export const SUPPORT_MATRIX: Readonly<
+  Record<SupportArgument, Readonly<Record<EngineId, ArgumentSupport>>>
+> = Object.freeze({
+  n: Object.freeze({ google: "yes", duckduckgo: "yes", yandex: "yes" }),
+  // DuckDuckGo has no pagination in this adapter: page > 1 is served as page 1
+  // and must be reported as `ignored.page`, never silently dropped (S4.2, S7.1).
+  page: Object.freeze({ google: "yes", duckduckgo: "flag", yandex: "yes" }),
+  summary: Object.freeze({ google: "yes", duckduckgo: "yes", yandex: "yes" }),
+});
+
 export interface EngineRegistry {
   /** Throws E_UNSUPPORTED when the adapter is missing or disabled. */
   get(id: EngineId): Engine;

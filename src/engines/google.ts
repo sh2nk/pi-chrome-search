@@ -81,8 +81,7 @@ const SERP_CONTAINER_SELECTOR = "#rso, #search";
  *
  * `#captcha-form` is the real `/sorry` form, `#recaptcha`/`.g-recaptcha` are the
  * widget shapes (the fixture renders `#recaptcha`), and the consent form selector
- * is verified against `tests/fixtures/google-consent.html.gz`
- * (`<form action="https://consent.google.com/save">`).
+ * mirrors the live `<form action="https://consent.google.com/save">` shape.
  */
 const WALL_CONTAINER_SELECTOR =
   '#captcha-form, #recaptcha, .g-recaptcha, form[action*="consent.google.com"]';
@@ -90,7 +89,7 @@ const WALL_CONTAINER_SELECTOR =
 const READY_SELECTOR = `${SERP_CONTAINER_SELECTOR}, ${WALL_CONTAINER_SELECTOR}`;
 const SERP_MIN_COUNT = 1;
 /** Bounded wait; a page that is not ready in 8 s is a layout change or a wall. */
-const SETTLE_DEADLINE_MS = 8_000;
+export const GOOGLE_SETTLE_DEADLINE_MS = 8_000;
 
 /** Google pages on a desktop SERP: 10 organics per `start` step. */
 const RESULTS_PER_PAGE = 10;
@@ -785,7 +784,7 @@ export async function settleGoogleSerp(
       marker: SERP_MARKER,
       selector: READY_SELECTOR,
       minCount: SERP_MIN_COUNT,
-      deadlineMs: options.deadlineMs ?? SETTLE_DEADLINE_MS,
+      deadlineMs: options.deadlineMs ?? GOOGLE_SETTLE_DEADLINE_MS,
       ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
       ...(options.clock === undefined ? {} : { clock: options.clock }),
       ...(signal === undefined ? {} : { signal }),

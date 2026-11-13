@@ -156,8 +156,8 @@ test("buildUrl percent-encodes the query (not form-encoded with +)", () => {
   );
 });
 
-test("buildUrl ignores pagination until M2 (page>1 yields the same URL)", () => {
-  // PLAN §5: DDG pagination is deferred; the tool reports pageIgnored instead.
+test("buildUrl ignores pagination (page>1 yields the same URL; S4.2)", () => {
+  // S4.2: DDG has no pagination; the tool reports ignored.page instead.
   const first = duckduckgoEngine.buildUrl(query({ page: 1 }));
   const third = duckduckgoEngine.buildUrl(query({ page: 3 }));
   assert.equal(third, first);

@@ -42,6 +42,7 @@ naming the dotted path.
 | `pacing.google` | `[2500,5000]` | [integer ≥ 0, integer ≥ 0] | Min/max gap in ms between Google searches. |
 | `pacing.duckduckgo` | `[2000,4000]` | [integer ≥ 0, integer ≥ 0] | Min/max gap in ms between DuckDuckGo searches. |
 | `pacing.yandex` | `[5000,9000]` | [integer ≥ 0, integer ≥ 0] | Min/max gap in ms between Yandex searches. |
+| `search.budgetMs` | `60000` | integer 1000..600000 | Whole-call deadline in ms; pacing, settle, AI wait and link resolution draw from it (S8.1). |
 | `search.n` | `5` | integer ≥ 1 | Default result count. |
 | `search.nMax` | `10` | integer ≥ 1 | Hard ceiling for `n`; never above 10. |
 | `search.summaryMaxChars` | `1200` | integer ≥ 1 | Cap for the AI answer block. |

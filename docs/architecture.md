@@ -84,7 +84,7 @@ traffic goes to the engines the user already uses. Artifacts and `decisions.json
 
 ## Repo layout
 
-Phase labels in source comments (`PLAN-v2 P8`, `evidence/P2-A`, `research/FINDINGS.md §3`) name the
+Phase labels in source comments (`PLAN-v2 P8`, `S4.2`, `P3`) name the
 project's history: that apparatus lives in the annotated tag `archive/pre-publication`
 (`git show archive/pre-publication:PLAN-v2.md`), not in the shipped tree.
 

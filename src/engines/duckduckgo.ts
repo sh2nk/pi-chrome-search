@@ -12,9 +12,9 @@
  * helpers: `extractFromDocument` therefore repeats the three small literals it
  * needs (`results`, `snippets`, the assist testid) on purpose.
  *
- * Pagination is deliberately absent. `Query.page` is google/yandex-only (PLAN §5
- * "DDG pagination deferred"); the tool layer reports `pageIgnored` for `page > 1`
- * instead of us inventing `&s=`.
+ * Pagination is deliberately absent. `Query.page` is google/yandex-only (SPEC
+ * S4.2); the tool layer reports `ignored.page` for `page > 1` instead of us
+ * inventing an offset parameter.
  */
 
 import type { CdpPage } from "../cdp/types.ts";
@@ -48,7 +48,7 @@ const BOX_SELECTORS: readonly string[] = ['input[name="q"]', "#searchbox_input"]
 const SETTLE_MARKER = "DuckDuckGo";
 const RESULT_TITLE_SELECTOR = 'a[data-testid="result-title-a"]';
 const SETTLE_MIN_RESULTS = 1;
-const SETTLE_DEADLINE_MS = 8_000;
+export const DUCKDUCKGO_SETTLE_DEADLINE_MS = 8_000;
 const SETTLE_POLL_MS = 150;
 
 const SNIPPET_SELECTOR = '[data-result="snippet"]';
@@ -499,7 +499,7 @@ export interface DuckDuckGoEngineOptions {
 type SettleState = "ready" | "wall" | "waiting";
 
 function normalizeDeadline(value: number | undefined): number {
-  if (value === undefined || !Number.isFinite(value)) return SETTLE_DEADLINE_MS;
+  if (value === undefined || !Number.isFinite(value)) return DUCKDUCKGO_SETTLE_DEADLINE_MS;
   return Math.max(0, Math.floor(value));
 }
 

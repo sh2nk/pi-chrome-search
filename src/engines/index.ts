@@ -36,18 +36,10 @@ export type EngineMap = Partial<Record<EngineId, Engine>>;
 /**
  * Append-only adapter map — the single source of truth for wiring.
  *
- * Empty until P3: no adapter exists yet, so `createDefaultRegistry()` is a
- * registry that honestly reports "registered: false" for every engine instead
- * of pretending a search would work. P3 appends, e.g.:
- *
- * ```ts
- * export const DEFAULT_ENGINES: EngineMap = Object.freeze({
- *   google: googleEngine,
- * });
- * ```
- *
- * Frozen so a runtime bug cannot inject an adapter behind a live registry's
- * back; tests build their own maps with `createEngineRegistry(map, config)`.
+ * Each green adapter has exactly one line here; adding an engine means appending
+ * one entry, never teaching the registry about it at module load. Frozen so a
+ * runtime bug cannot inject an adapter behind a live registry's back; tests
+ * build their own maps with `createEngineRegistry(map, config)`.
  */
 export const DEFAULT_ENGINES: EngineMap = Object.freeze({
   google: googleEngine,

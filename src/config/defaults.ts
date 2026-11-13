@@ -63,6 +63,8 @@ export interface PacingConfig {
 }
 
 export interface SearchConfig {
+  /** Whole-call deadline, from the first live attempt to the rendered result (S8.1). */
+  budgetMs: number;
   n: number;
   nMax: number;
   summaryMaxChars: number;
@@ -129,6 +131,7 @@ export const DEFAULT_CONFIG: Config = {
   },
   pacing: { google: [2500, 5000], yandex: [5000, 9000], duckduckgo: [2000, 4000] },
   search: {
+    budgetMs: 60000,
     n: 5,
     nMax: 10,
     summaryMaxChars: 1200,
