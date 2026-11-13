@@ -20,6 +20,7 @@ import { Type, type Static } from "typebox";
 
 import { pageLockFor, readSlotKeys } from "../session/index.ts";
 import type { CdpPage, PageKey } from "../cdp/types.ts";
+import { READINESS_SOFT_DEADLINE_MS, waitForDocumentReadiness } from "../cdp/readiness.ts";
 import type { Config } from "../config/index.ts";
 import {
   extractPdfText,
@@ -28,6 +29,7 @@ import {
 } from "../extract/pdf.ts";
 import {
   READ_MAX_CHARS_CEILING,
+  blocksToText,
   extractReadableDocument,
   renderReadableDocument,
   type ReadBlock,
@@ -35,6 +37,7 @@ import {
   type ReadableDocument,
 } from "../extract/read.ts";
 import { saveFailureArtifact } from "../runtime/artifacts.ts";
+import { createCallBudget, raceSignal, type CallBudget } from "../runtime/budget.ts";
 import type { FailureDetails, Stage, WebSearchError } from "../runtime/error-codes.ts";
 import { isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, renderToolFailure, toFailure } from "../runtime/errors.ts";
@@ -135,8 +138,6 @@ export interface WebReadOptions {
 /** Validation hint: the fix is in the call, not in a config file. */
 const INPUT_HINT =
   "check the web_read arguments: url (public http/https), offset >= 0, maxChars >= 1, format md|text";
-
-const UNSUPPORTED_HINT = "the page produced no readable text; try a different URL";
 
 /**
  * Reads get their own work tabs (`PageKey` in `src/cdp/types.ts`): a long article
@@ -352,6 +353,7 @@ function auditDomain(finalUrl: URL): string {
  */
 const ARTIFACT_CODES: ReadonlySet<string> = new Set([
   "E_PARSE",
+  "E_EMPTY_PAGE",
   "E_TIMEOUT",
   "E_BLOCKED_URL",
   "E_NAVIGATION_MISMATCH",
@@ -413,6 +415,28 @@ async function failWithArtifact(
 }
 
 /**
+ * Budget exhaustion is `E_TIMEOUT` at stage `budget` with an artifact (S8.1).
+ * The page is already open at every call site, so the snapshot is cheap and
+ * tells the reader what the tab was showing when the deadline hit.
+ */
+async function checkReadBudget(
+  deps: ToolDeps,
+  page: CdpPage,
+  budget: CallBudget,
+  stage: Stage,
+): Promise<void> {
+  try {
+    budget.check(stage);
+  } catch (error) {
+    throw await failWithArtifact(
+      deps,
+      page,
+      asFailure(error, stage, "E_CDP_DISCONNECTED", budget.signal),
+    );
+  }
+}
+
+/**
  * Same-document check for the post-navigate proof. A fragment or a trailing
  * slash is not a different page; a host, path or query change is.
  */
@@ -444,12 +468,26 @@ export function createWebReadTool(
       return failureResult(error, { code: "E_CONFIG", stage: "config" });
     }
 
+    let budget: CallBudget;
+    try {
+      budget = createCallBudget({
+        clock: deps.clock,
+        budgetMs: deps.config.read.budgetMs,
+        ...(signal === undefined ? {} : { parent: signal }),
+        label: "web_read",
+      });
+    } catch (error) {
+      return failureResult(error, { code: "E_CONFIG", stage: "config" });
+    }
+
     // Last-resort barrier: a dependency bug must still reach the agent as a
     // rendered failure with a code and a stage, never as a bare thrown error.
     try {
-      return await read(deps, params, signal);
+      return await read(deps, params, budget);
     } catch (error) {
       return failureResult(error, { code: "E_CDP_DISCONNECTED", stage: "read" });
+    } finally {
+      budget.dispose();
     }
   }
 
@@ -461,14 +499,15 @@ export function createWebReadTool(
   async function read(
     deps: ToolDeps,
     params: WebReadInput,
-    signal: AbortSignal | undefined,
+    budget: CallBudget,
   ): Promise<WebReadResult> {
+    const signal = budget.signal;
     const validation = normalizeInput(params, deps.config);
     if (!validation.ok) {
       throw fail("E_CONFIG", "config", { hint: INPUT_HINT, message: validation.message });
     }
     const input = validation.value;
-    if (signal?.aborted === true) {
+    if (signal.aborted === true) {
       throw fail("E_CANCELLED", "read", { message: "aborted by the caller" });
     }
 
@@ -478,12 +517,16 @@ export function createWebReadTool(
       input.url,
       options.resolve === undefined ? {} : { resolve: options.resolve },
     );
+    budget.check("read");
 
     const lock = pageLockFor(deps.cdp);
     const slots = readSlotKeys(deps.config.read.pool);
     const slot = lock.pick(slots) as PageKey;
 
-    return await lock.run(slot, () => readSlot(deps, input, requested, slot, signal));
+    const work = lock.run(slot, () => readSlot(deps, input, requested, slot, budget));
+    // A queued read must not outlive the call's deadline. The losing task is
+    // left to finish and checks the budget again before touching the tab.
+    return await raceSignal(work, signal);
   }
 
   /**
@@ -511,8 +554,10 @@ export function createWebReadTool(
     final: URL,
     requested: URL,
     input: NormalizedInput,
-    signal: AbortSignal | undefined,
+    budget: CallBudget,
   ): Promise<WebReadResult> {
+    const signal = budget.signal;
+    await checkReadBudget(deps, page, budget, "extract");
     const fetcher = deps.cdp.fetchBytes;
     if (fetcher === undefined) {
       throw await failWithArtifact(
@@ -529,11 +574,13 @@ export function createWebReadTool(
     try {
       fetched = await fetcher.call(deps.cdp, final.href, {
         maxBytes: deps.config.read.pdfMaxBytes,
-        ...(signal === undefined ? {} : { signal }),
+        timeoutMs: Math.max(1, budget.remainingMs()),
+        signal,
       });
     } catch (error) {
       throw await failWithArtifact(deps, page, asFailure(error, "read", "E_PDF_UNSUPPORTED", signal));
     }
+    await checkReadBudget(deps, page, budget, "extract");
 
     // Second SSRF pass: a public PDF URL may redirect to a private host, and the
     // bytes came from the *final* hop, not from the URL the caller supplied.
@@ -570,6 +617,7 @@ export function createWebReadTool(
     } catch (error) {
       throw await failWithArtifact(deps, page, asFailure(error, "extract", "E_PDF_UNSUPPORTED", signal));
     }
+    await checkReadBudget(deps, page, budget, "render");
 
     const window = renderPdfWindow(extracted, { offset: input.offset, maxChars: input.maxChars });
     if (input.offset > 0 && input.offset >= window.totalChars) {
@@ -639,22 +687,28 @@ export function createWebReadTool(
     input: NormalizedInput,
     requested: URL,
     slot: PageKey,
-    signal: AbortSignal | undefined,
+    budget: CallBudget,
   ): Promise<WebReadResult> {
+    const signal = budget.signal;
     let page: CdpPage;
     try {
       page = await deps.cdp.acquirePage(slot);
     } catch (error) {
       throw asFailure(error, "connect", "E_CDP_DISCONNECTED", signal);
     }
+    await checkReadBudget(deps, page, budget, "connect");
 
     try {
-      await page.navigate(requested.href, signal === undefined ? {} : { signal });
+      await page.navigate(requested.href, {
+        signal,
+        // One deadline per call: navigate may not outlive what is left (S8.1).
+        timeoutMs: Math.max(1, budget.remainingMs()),
+      });
     } catch (error) {
       throw await failWithArtifact(deps, page, asFailure(error, "navigate", "E_CDP_DISCONNECTED", signal));
     }
 
-    // P9-B: `page.url()` is a target-event cache; a redirect or the typed path
+    // S5.4: `page.url()` is a target-event cache; a redirect or the typed path
     // can leave it stale. Ask the document, then prove it did not move again
     // after the extractor ran (a second writer would be a stranger's page).
     const landed = await safeCurrentUrl(page);
@@ -688,7 +742,7 @@ export function createWebReadTool(
     const mime = await documentContentType(page);
     if (mime === "application/pdf") {
       try {
-        return await readPdf(deps, page, final, requested, input, signal);
+        return await readPdf(deps, page, final, requested, input, budget);
       } finally {
         // Chrome swaps a PDF tab's document into an out-of-process viewer; the
         // flattened session can be detached afterwards. Reusing that tab makes
@@ -698,6 +752,51 @@ export function createWebReadTool(
       }
     }
 
+    // S5.1: `navigate()` returns at an interactive commit, which a client-side
+    // app reaches before its text. Wait for the read bar (text floor or
+    // `complete`) inside the soft deadline, clamped by the call budget.
+    await checkReadBudget(deps, page, budget, "settle");
+    try {
+      await waitForDocumentReadiness(page, {
+        clock: deps.clock,
+        softDeadlineMs: Math.min(READINESS_SOFT_DEADLINE_MS, budget.remainingMs()),
+        signal,
+      });
+    } catch (error) {
+      throw await failWithArtifact(
+        deps,
+        page,
+        asFailure(error, "settle", "E_CDP_DISCONNECTED", signal),
+      );
+    }
+
+    // S5.3: a document may navigate itself while it paints. Re-run the guard on
+    // the URL it actually settled on, and use that value as the pre-extraction
+    // baseline for the stability proof below.
+    const settled = await safeCurrentUrl(page);
+    if (typeof settled !== "string" || settled.trim() === "") {
+      throw await failWithArtifact(
+        deps,
+        page,
+        fail("E_BLOCKED_URL", "read", {
+          hint: "the tab did not report a URL; retry or use a public site",
+          message: "the document settled without a URL",
+        }),
+      );
+    }
+    try {
+      final = await recheckLanding(settled, options);
+    } catch (error) {
+      throw await failWithArtifact(
+        deps,
+        page,
+        isWebSearchError(error)
+          ? error
+          : fail("E_BLOCKED_URL", "read", { message: "the settled URL failed the SSRF guard" }),
+      );
+    }
+    await checkReadBudget(deps, page, budget, "extract");
+
     let raw: unknown;
     try {
       raw = await page.evaluate<unknown>(`(${extractReadableDocument.toString()})(document)`);
@@ -706,7 +805,7 @@ export function createWebReadTool(
     }
 
     const after = await safeCurrentUrl(page);
-    if (!sameDocument(landed, after)) {
+    if (!sameDocument(settled, after)) {
       throw await failWithArtifact(
         deps,
         page,
@@ -727,13 +826,14 @@ export function createWebReadTool(
         }),
       );
     }
-    if (data.blocks.length === 0) {
+    // S5.2: an empty document is a property of the page, not a broken
+    // extractor. `E_PARSE` is reserved for a canary/payload failure.
+    if (data.blocks.length === 0 || blocksToText(data.blocks).trim() === "") {
       throw await failWithArtifact(
         deps,
         page,
-        fail("E_PARSE", "extract", {
-          hint: UNSUPPORTED_HINT,
-          message: "the readability pass found no text blocks",
+        fail("E_EMPTY_PAGE", "extract", {
+          message: "the document rendered no extractable text",
         }),
       );
     }

@@ -50,7 +50,8 @@ naming the dotted path.
 | `search.outputMaxChars` | `2500` | integer ≥ 1 | Cap for the whole Markdown output. |
 | `search.aiWaitMs` | `6000` | integer 0..60000 | Deadline for the native AI block; `0` disables waiting. |
 | `search.aiExpand` | `false` | boolean | Click the engine's "show more" on the AI card once. |
-| `read.defaultMaxChars` | `6000` | integer ≥ 1 | Default `web_read` budget. |
+| `read.budgetMs` | `30000` | integer 1000..600000 | Whole-call deadline in ms; navigation, readiness, extraction and the PDF ladder draw from it (S8.1). |
+| `read.defaultMaxChars` | `6000` | integer ≥ 1 | Default `maxChars` window. |
 | `read.maxCharsCeiling` | `20000` | integer ≥ 1 | `maxChars` above this is clamped and reported. |
 | `read.pool` | `1` | integer 1..3 | Concurrent read slots; each holds its own tab and exclusive lock. |
 | `read.pdfMaxBytes` | `20971520` | integer ≥ 1 | Refuse larger PDFs. |

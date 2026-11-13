@@ -80,6 +80,7 @@ export const CONFIG_SPEC: Spec = {
     read: {
       kind: "object",
       fields: {
+        budgetMs: NUM(1_000, true, 600_000),
         defaultMaxChars: NUM(1),
         maxCharsCeiling: NUM(1),
         pool: NUM(1, true, 3),

@@ -311,7 +311,7 @@ export function createCdpPage(
             message: `navigate to ${url} did not finish loading within ${timeoutMs}ms`,
             hint:
               "the page never committed a new document or never reached readyState interactive; " +
-              "retry, or raise navigateTimeoutMs in config",
+              "retry, or read a lighter page",
           });
 
         const deadlineTimer = setTimeout(() => abort(timeoutError()), timeoutMs);

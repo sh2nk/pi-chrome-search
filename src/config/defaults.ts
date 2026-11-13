@@ -77,6 +77,8 @@ export interface SearchConfig {
 }
 
 export interface ReadConfig {
+  /** Whole-call deadline in ms: navigation, readiness, extraction and the PDF ladder (S8.1). */
+  budgetMs: number;
   defaultMaxChars: number;
   maxCharsCeiling: number;
   /** Concurrent read slots, each with its own tab and exclusive lock (S5.7). */
@@ -141,6 +143,7 @@ export const DEFAULT_CONFIG: Config = {
     aiExpand: false,
   },
   read: {
+    budgetMs: 30000,
     defaultMaxChars: 6000,
     maxCharsCeiling: 20000,
     pool: 1,

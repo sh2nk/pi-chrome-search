@@ -155,12 +155,10 @@ export const RETRYABLE: Record<ErrorCode, boolean> = {
  * Codes whose owning phase has not added a dedicated offline test yet (S9.5).
  * Production paths may throw them, but the contract is not proven until the
  * named phase lands its test, so a reservation cannot become a permanent pass.
+ * P5 proved `E_EMPTY_PAGE`, `E_NAVIGATION_MISMATCH` and `E_OFFSET_RANGE`; the
+ * table stays so a future code can be reserved deliberately, not by omission.
  */
-export const RESERVED_CODES: Partial<Record<ErrorCode, string>> = {
-  E_EMPTY_PAGE: "P5 read: a thin document after readiness",
-  E_NAVIGATION_MISMATCH: "P5 read: URL changed between navigation and extraction",
-  E_OFFSET_RANGE: "P5 read: offset past totalChars",
-};
+export const RESERVED_CODES: Partial<Record<ErrorCode, string>> = {};
 
 export class WebSearchError extends Error {
   readonly details: FailureDetails;
