@@ -28,28 +28,33 @@ If a phase needs a decision that changes a public contract, stop and write an AD
    write `~/.config/google-chrome/**`, copy cookies, or edit `Local State`.
 3. **No headless, no fingerprint work.** No UA/locale/timezone/screen/WebGL/`navigator.*` overrides, no
    `Page.addScriptToEvaluateOnNewDocument`. One-off `Runtime.evaluate` is fine.
-4. **Never solve captchas.** Surface the window, return `E_WALL` with an artifact, stop. No solver, no
-   automatic re-navigation, no wait-for-human loop (S8.5, D5).
-5. **No paid search APIs or search keys.** No classifier provider sees search traffic. Remote model
-   calls are off by default (S11.5); if the owner opts in, they are capped, logged and disableable.
-6. **Rate-limit like a human.** One live search per engine at a time, pacing and daily caps respected,
-   one probe per engine per gate. Never loop live probes. A wall means stop and ask.
-7. **Every failure is diagnosable**: `code` + `stage` + `retryable` + a hint the user can actually
+4. **Never solve captchas.** Surface the window and return `E_WALL` with an artifact **at once**, so the
+   human can click it. No solver, no automatic re-navigation, no wait-for-human timer (S8.5,
+   ADR-0001 D5).
+5. **No quality gates.** No classifier, no heuristic rules, no page/read/coverage gate: the model
+   decides what to read and the tool reports what it got (ADR-0001 D1). The SSRF guard is a security
+   boundary, not a quality opinion, and stays.
+6. **No paid search APIs or search keys, no model calls.** Search and read traffic never goes through a
+   third-party provider (S11.5). Do not add a "small classifier" back in any form.
+7. **Rate-limit like a human.** One live search per engine at a time and per-engine pacing with jitter;
+   there are no daily caps (ADR-0001 D8). One probe per engine per gate; never loop live probes. A wall
+   means stop and ask.
+8. **Every failure is diagnosable**: `code` + `stage` + `retryable` + a hint the user can actually
    execute (`S9.2`) + an artifact for page states. No bare `throw new Error("failed")`.
-8. **Reachability is a requirement** (S3.1): every registered tool must be callable in a stock install.
+9. **Reachability is a requirement** (S3.1): every registered tool must be callable in a stock install.
    A `deferred` tool is acceptable only if the extension itself activates the discovery tool; otherwise
    register it `direct`. Test both branches.
-9. **Honesty over convenience** (S7): every argument is honoured or reported `ignored`; `details`
-   describe the emitted text; no phantom config keys, flags or docs.
-10. **One deadline per call** (S8): stages derive from the remaining budget, worst case is a test.
-11. **Single writer.** Live Chrome work goes through the session layer only; one writer per tab; parallel
+10. **Honesty over convenience** (S7): every argument is honoured or reported `ignored`; `details`
+    describe the emitted text; no phantom config keys, flags or docs.
+11. **One deadline per call** (S8): stages derive from the remaining budget, worst case is a test.
+12. **Single writer.** Live Chrome work goes through the session layer only; one writer per tab; parallel
     tool calls queue on a per-tab lock.
-12. **Keep the prompt cheap** (S3.3): tool descriptions ≤1200 chars total, each ≤350; caps live in one
-    module.
-13. **Host facts live in `src/runtime/host.ts`** (platform, paths, profile tables, `capability()`,
+13. **Keep the prompt cheap** (S3.3): tool descriptions ≤1200 chars total, each ≤350; search operators are
+    taught with `promptGuidelines` (≤400 chars), not with a new argument; caps live in one module.
+14. **Host facts live in `src/runtime/host.ts`** (platform, paths, profile tables, `capability()`,
     process liveness). Nothing else imports `node:os`, reads `$HOME`/`PATH`, hardcodes `/proc/` or
     `.config/`, or spawns to probe a binary.
-14. **Docs are code.** `docs/config.md` and the README tables are generated; never hand-edit them.
+15. **Docs are code.** `docs/config.md` and the README tables are generated; never hand-edit them.
 
 ## Target layout
 
@@ -61,8 +66,7 @@ src/session/             one session lifecycle: discover, attach, lock, tab pool
 src/cdp/                 raw WS client, navigation commit, document access, humanize
 src/engines/             google, duckduckgo, yandex, images: buildUrl + extractor + canaries
 src/extract/             readability, urls, goto, pdf, compact (all caps here)
-src/quality/             deterministic page rules (replaces the v1 reflex model layer)
-src/runtime/             errors, codes, artifacts, limiter, cache, host, log, notify, panel
+src/runtime/             errors, codes, artifacts, limiter (pacing only), cache, host, log, notify, panel
 src/tools/               search, read, images, research, doctor
 src/commands/            /web-doctor, /web-focus
 scripts/                 audit.mjs, release.mjs, gen-config-doc.mjs
