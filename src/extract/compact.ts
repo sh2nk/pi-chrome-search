@@ -24,8 +24,10 @@
  *   "query": "…",
  *   "ai": { "text": "…", "sources": ["a.com"] },   // omitted when absent
  *   "results": [
- *     { "title": "…", "url": "…", "domain": "…", "snippet": "…", "engine": "google" }
- *     // "engine" only when the caller mixed engines
+ *     { "title": "…", "url": "…", "domain": "…", "snippet": "…", "engine": "google",
+ *       "unresolved": true }
+ *     // "engine" only when the caller mixed engines; "unresolved" only for an
+ *     // opaque Google /goto wrapper that stayed unresolved (S3.5, S7.4)
  *   ],
  *   "pageCarried": true,
  *   "degraded": true,                   // only when true
@@ -88,6 +90,8 @@ export interface CompactItem {
   domain: string;
   snippet: string;
   engine?: EngineId;
+  /** The URL is an opaque `/goto` wrapper that stayed unresolved (S3.5, S7.4). */
+  unresolved?: boolean;
 }
 
 export interface CompactAi {
@@ -125,6 +129,7 @@ interface MergedItem {
   domain: string;
   snippet: string;
   engine?: EngineId;
+  unresolved?: boolean;
 }
 
 interface Opts {
@@ -344,7 +349,8 @@ function renderItem(item: CompactItem, index: number): string {
   const tag = item.engine ? `[${item.engine}] ` : "";
   const name = item.title ? `${tag}${item.title}` : tag.trim();
   const heading = name ? `${name} — ${item.domain}` : item.domain;
-  const lines = [`${index + 1}. ${heading}`, `   ${item.url}`];
+  const marker = item.unresolved === true ? " (unresolved)" : "";
+  const lines = [`${index + 1}. ${heading}`, `   ${item.url}${marker}`];
   if (item.snippet) lines.push(`   ${item.snippet}`);
   return lines.join("\n");
 }
@@ -357,6 +363,7 @@ function jsonItem(item: CompactItem): Record<string, unknown> {
     snippet: item.snippet,
   };
   if (item.engine) out.engine = item.engine;
+  if (item.unresolved === true) out.unresolved = true;
   return out;
 }
 
@@ -424,6 +431,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
           domain: domainOf(normalized),
           snippet,
           engine,
+          ...(raw.unresolved === true ? { unresolved: true } : {}),
         });
         continue;
       }
@@ -432,6 +440,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
       // the earlier engine, so the outcome does not depend on map internals).
       if (!existing.title && title) existing.title = title;
       if (snippet.length > existing.snippet.length) existing.snippet = snippet;
+      if (raw.unresolved === true) existing.unresolved = true;
     }
   }
 
@@ -509,6 +518,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
       snippet: truncate(item.snippet, snippetCap),
     };
     if (mixed || perEngine) out.engine = item.engine;
+    if (item.unresolved === true) out.unresolved = true;
     return out;
   };
 

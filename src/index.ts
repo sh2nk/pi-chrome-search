@@ -29,7 +29,8 @@ import type { DoctorDeps } from "./runtime/doctor.ts";
 import { agentDir } from "./runtime/host.ts";
 import { createLogger } from "./runtime/log.ts";
 import type { Artifacts, Cache, Clock, Limiter, Logger } from "./runtime/types.ts";
-import { createTools } from "./tools/index.ts";
+import { DISCOVERY_TOOL_NAME, createTools } from "./tools/index.ts";
+import type { RegisteredTool } from "./tools/index.ts";
 import type { ToolDeps } from "./tools/types.ts";
 import { EXTENSION_NAME, EXTENSION_VERSION } from "./version.ts";
 
@@ -202,6 +203,41 @@ export function toDoctorDeps(runtime: Runtime): DoctorDeps {
   };
 }
 
+/**
+ * Whether this pi build has a discovery tool that can actually reach a deferred
+ * tool. The built-in `tool_search` declares `reachesTools`; a same-named tool
+ * without it cannot load our deferred set, so it does not count (S3.1).
+ */
+function hasDiscoveryTool(pi: ExtensionAPI): boolean {
+  return pi.getAllTools().some(
+    (tool) => tool.name === DISCOVERY_TOOL_NAME && typeof tool.reachesTools === "function",
+  );
+}
+
+/**
+ * Register the canonical surface, then make every tool reachable without asking
+ * the user to edit settings (S3.1, D3):
+ *
+ * - discovery present: activate `tool_search` so the deferred trio is findable;
+ * - discovery absent: re-register the deferred tools as `direct`, because a
+ *   deferred tool with no loader is the v1 defect this phase exists to remove.
+ *
+ * Re-registering a name replaces its definition and activates a `direct` tool,
+ * which is how pi supports promotion after registration.
+ */
+export function ensureToolReachability(pi: ExtensionAPI, tools: readonly RegisteredTool[]): "discovery" | "direct-fallback" {
+  if (hasDiscoveryTool(pi)) {
+    const active = pi.getActiveTools();
+    if (!active.includes(DISCOVERY_TOOL_NAME)) pi.setActiveTools([...active, DISCOVERY_TOOL_NAME]);
+    return "discovery";
+  }
+  for (const tool of tools) {
+    if (tool.exposure === "direct") continue;
+    pi.registerTool({ ...tool, exposure: "direct" } as ToolDefinition);
+  }
+  return "direct-fallback";
+}
+
 export default function register(pi: ExtensionAPI): void {
   const tools = createTools({
     getDeps: async (ctx?: unknown) => toToolDeps(await getRuntime(), ctx),
@@ -212,6 +248,12 @@ export default function register(pi: ExtensionAPI): void {
     // success branch of the union, so register the structural definition.
     pi.registerTool(tool as ToolDefinition);
   }
+
+  // Extensions finish loading before the first session starts, so this is the
+  // first point where pi.getAllTools() has the built-in discovery tool.
+  pi.on("session_start", () => {
+    ensureToolReachability(pi, tools);
+  });
 
   pi.on("session_shutdown", async () => {
     const pending = runtimePromise;

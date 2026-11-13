@@ -32,7 +32,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MAX_BYTES = 4 * 1024 * 1024;
 const SKIP_DIRS = new Set(["node_modules", ".git"]);
 const CODE_EXT = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
-const TOOL_BUDGET_CHARS = 900;
+const TOOL_BUDGET_CHARS = 1200;
 const DOC_BUDGET = { README: 90, AGENTS: 150, SPEC: 320, PLAN: 260, doc: 120, docsTotal: 400 };
 
 const json = process.argv.includes("--json");

@@ -184,7 +184,7 @@ export interface WebResearchTool {
 }
 
 /**
- * Kept short on purpose: the deferred surface still shares the 900-char prompt
+ * Kept short on purpose: the deferred surface still shares the 1200-char prompt
  * budget with the three sibling tools, so every word here costs tokens.
  */
 export const WEB_RESEARCH_DESCRIPTION =

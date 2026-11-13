@@ -6,11 +6,10 @@
 [![license](https://img.shields.io/npm/l/pi-chrome-search)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D26-brightgreen)](package.json)
 
-Free web search for [pi](https://pi.dev) through your own visible Chrome: same profile, same cookies,
-same IP. Compact Markdown from Google, DuckDuckGo and Yandex, with each engine's native AI summary
-(AI Overview, Search Assist, Alice). The window stays visible on purpose, so you can watch the search
-and solve a captcha yourself. No keys, no paid APIs, no headless mode, no spoofing, no captcha solving.
-Needs Node ≥26 and Chrome 136+.
+Free web search and page reading for [pi](https://pi.dev) through your own visible Chrome: same profile,
+cookies and IP. Compact Markdown from Google, DuckDuckGo and Yandex, with each native AI summary (AI
+Overview, Search Assist, Alice). The window stays visible on purpose, so you can watch the search and
+solve a captcha yourself. No keys, no paid APIs, no headless mode, no spoofing. Needs Node ≥26, Chrome 136+.
 
 ## Install
 
@@ -33,18 +32,20 @@ Discovery order: `PI_CHROME_CDP_WS` → `PI_CHROME_CDP_PORTS` → `DevToolsActiv
 
 ## Tools
 
-`web_search` is `direct`; the rest are `deferred` (via tool search or `codemode`, no per-prompt cost).
+`web_search` and `web_read` are `direct`; the other three are `deferred` through `tool_search`.
+<!-- tools:start -->
+| Tool | Exposure | Arguments |
+|---|---|---|
+| `web_search` | direct | `q` string; `n?` integer 1..10; `engines?` "auto" or ("google" or "duckduckgo" or "yandex") or list of ("google" or "duckduckgo" or "yandex") 1..3; `summary?` boolean; `freshness?` "d" or "w" or "m" or "y"; `page?` integer >=1; `format?` "md" or "json" |
+| `web_read` | direct | `url` string; `offset?` integer >=0; `maxChars?` integer >=1; `format?` "md" or "text" |
+| `image_search` | deferred | `q` string; `n?` integer 1..12; `engine?` "google" or "yandex"; `attach?` boolean or "bytes" |
+| `web_research` | deferred | `q` string; `budget?` "quick" or "normal" or "deep" |
+| `web_doctor` | deferred | `probe?` boolean; `fix?` boolean |
+<!-- tools:end -->
 
-| Tool | Arguments |
-|---|---|
-| `web_search` | `q`; `n` 1-10 (5); `engines` `auto`\|id\|list; `summary`; `freshness` `d\|w\|m\|y`; `page`; `format` `md\|json` |
-| `web_read` | `url` (public http/https); `offset`; `maxChars` (6000, ceiling 20000); `format` `md\|text` |
-| `image_search` | `q`; `n` ≤12 (4); `engine` `google\|yandex`; `attach` (≤4 image blocks) |
-| `web_research` | `q`; `budget` `quick` (1 search + 2 reads), `normal` (2+4), `deep` (4+8) |
-| `web_doctor` | `probe` (true); `fix` (false: reconnect, close owned tabs, prune artifacts) |
-
-Output is capped at 2500 chars (summary ≤1200, snippet ≤140). The AI block reports `ai:yes` only for
-≥200 chars of prose, `ai:lead` for a block without an answer, `ai:no` when absent.
+Output is capped at 2500 chars (summary ≤1200, snippet ≤140). The AI block reports `ai:yes` only for ≥200
+chars of prose, `ai:lead` for a block without an answer, `ai:no` when absent. A Google `/goto` wrapper the
+resolver cannot open stays in the result and is marked `unresolved`; `details.unresolved` counts emitted ones.
 
 ## Configuration
 
@@ -78,8 +79,7 @@ must not be run as a service. A captcha means solve it in the window or stop.
 git clone https://github.com/sh2nk/pi-chrome-search && cd pi-chrome-search && npm install
 pi install .                         # register this checkout, no copy
 pi -e ./src/index.ts                 # or one throwaway session
-npm run lint                         # typecheck + audit
-npm test                             # offline contract suite
+npm run lint && npm test             # typecheck + audit + offline suite
 PI_CHROME_LIVE=1 npm run test:live   # one query per engine, no retries
 ```
 

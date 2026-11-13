@@ -1,5 +1,5 @@
 /**
- * `web_read` — deferred page reading (SPEC §7.2, PLAN P4-A).
+ * `web_read` — direct page reading, the second half of search → read (S3, S5).
  *
  * The tool is a thin orchestrator over frozen contracts, like `web_search`:
  * validate the URL through the SSRF guard, acquire the work tab, navigate,
@@ -104,13 +104,13 @@ export interface WebReadFailure {
 
 export type WebReadResult = WebReadSuccess | WebReadFailure;
 
-/** The object shape pi registers (P4-D wires it into the extension). */
+/** The object shape pi registers; it is direct because reading is half the product (S3). */
 export interface WebReadTool {
   name: "web_read";
   label: string;
   description: string;
   parameters: typeof webReadSchema;
-  exposure: "deferred";
+  exposure: "direct";
   annotations: { readOnlyHint: true; openWorldHint: true; idempotentHint: true };
   execute(
     toolCallId: string,
@@ -127,7 +127,7 @@ export interface WebReadTool {
  * parameters and the hard security rule, and nothing else.
  */
 export const WEB_READ_DESCRIPTION =
-  "Read a public page via the user's Chrome as clean Markdown. PDFs become text with page markers; scans are refused. 6000 chars default; offset/maxChars <=20000. Private/local URLs refused.";
+  "Read one public http(s) page in the user's visible Chrome as compact, paged Markdown or text. Pass a web_search result URL. PDFs become text; scanned PDFs are refused. Private/local URLs refused.";
 
 export interface WebReadOptions {
   /**
@@ -875,7 +875,7 @@ export function createWebReadTool(
     label: "Web Read",
     description: WEB_READ_DESCRIPTION,
     parameters: webReadSchema,
-    exposure: "deferred",
+    exposure: "direct",
     annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
     execute,
   };

@@ -39,6 +39,12 @@ export interface SerpItem {
   sourceQuery?: string;
   /** Set by the merge layer only when results from several engines are mixed. */
   engine?: EngineId;
+  /**
+   * True when this URL is still an opaque `/goto` wrapper: the destination could
+   * not be verified, so the output must mark it instead of pretending it is a
+   * resolved link (S3.5, S7.4).
+   */
+  unresolved?: boolean;
 }
 
 /**

@@ -1,5 +1,5 @@
 /**
- * `web_search` — the only `direct` tool (SPEC §7.1, PLAN P2-D).
+ * `web_search` — a direct tool, paired with direct `web_read` (S3).
  *
  * The tool is a thin, deterministic orchestrator over frozen contracts: engine
  * selection/fallback, cache, pacing, human-shaped navigation and compaction. It
@@ -140,6 +140,13 @@ export interface WebSearchDetails {
   /** P10: typed-path facts for a single-engine search; absent on cache hits. */
   human?: HumanRunDetails;
   /**
+   * Number of emitted results whose Google `/goto` wrapper stayed opaque. Such a
+   * result keeps its wrapper URL and is marked `unresolved` in the output (S3.5,
+   * S7.4), so a caller can tell a real destination from a wrapper that may still
+   * redirect in the browser.
+   */
+  unresolved?: number;
+  /**
    * Time from the SERP request to the result marker (summed across engines).
    * P10 measures the typed path's *page* cost against the direct one with this:
    * keystroke time is deliberate human work, not search latency.
@@ -168,6 +175,8 @@ export interface WebSearchTool {
   parameters: typeof webSearchSchema;
   exposure: "direct";
   annotations: { readOnlyHint: true; openWorldHint: true; idempotentHint: true };
+  /** Search operators the model can use without a tool-level date filter (S3.6). */
+  promptGuidelines?: readonly string[];
   execute(
     toolCallId: string,
     params: WebSearchInput,
@@ -184,7 +193,15 @@ export interface WebSearchTool {
  * every word.
  */
 export const WEB_SEARCH_DESCRIPTION =
-  "Search the web for free in the user's visible Chrome (Google, DuckDuckGo, Yandex) with each engine's native AI summary. Compact results, n<=10; site:/filetype:/quoted queries pass through; engines: id, list, or auto.";
+  "Search the web for free in the user's visible Chrome (Google, DuckDuckGo, Yandex) with each engine's native AI summary. Compact results, n<=10. Call web_read on a result URL to get that page as paged Markdown. site:/filetype:/quoted queries pass through; engines: id, list, or auto.";
+
+/**
+ * SPEC S3.6: `q` is passed verbatim, so narrowing happens in the query. The
+ * guideline is prompt text, not an argument, and stays under 400 chars.
+ */
+export const WEB_SEARCH_GUIDELINES: readonly string[] = [
+  "web_search passes q verbatim: use quoted phrases, -term, OR, site:, filetype:; narrow by date with after:/before: on Google or date: on Yandex (there is no date argument).",
+];
 
 /**
  * Codes a sibling engine can plausibly cure. Everything else (E_PARSE, E_TIMEOUT,
@@ -467,6 +484,8 @@ interface JsonRender {
   aiChars: number;
   /** P9-D: per-engine counts of the results that survived the fit, when requested. */
   perEngine?: Record<string, number>;
+  /** Emitted results that still carry an unresolved `/goto` wrapper (S3.5, S7.4). */
+  unresolved?: number;
 }
 
 /**
@@ -640,6 +659,7 @@ function serializeJsonWithin(data: Record<string, unknown>, maxChars: number): J
   let ai = copy.ai !== undefined;
   const aiText = isRecord(copy.ai) && typeof copy.ai.text === "string" ? copy.ai.text : "";
   let aiChars = aiText.length;
+  let unresolved = items.filter((item) => item.unresolved === true).length;
   if (text.length > maxChars) {
     // The cap is below the envelope: return the floor and report exactly that,
     // even if the starting data already had no results/AI to drop.
@@ -648,6 +668,7 @@ function serializeJsonWithin(data: Record<string, unknown>, maxChars: number): J
     results = 0;
     ai = false;
     aiChars = 0;
+    unresolved = 0;
   }
 
   return {
@@ -656,6 +677,7 @@ function serializeJsonWithin(data: Record<string, unknown>, maxChars: number): J
     truncated,
     ai,
     aiChars,
+    ...(unresolved === 0 ? {} : { unresolved }),
     ...(perEngineCounts === undefined ? {} : { perEngine: perEngineCounts }),
   };
 }
@@ -747,9 +769,14 @@ async function resolveGotoResults(
       if (resolution.url !== null) {
         item.url = resolution.url;
         resolved += 1;
+      } else {
+        // The wrapper stays clickable in the user's browser, but the caller must
+        // be able to tell that this is not a verified destination (S3.5, S7.4).
+        item.unresolved = true;
       }
     } catch {
-      // Keep the wrapper; see the policy above.
+      // Keep the wrapper and mark it; see the policy above.
+      item.unresolved = true;
     }
   }
 
@@ -1581,6 +1608,10 @@ export function createWebSearchTool(
     const settleMs = refined.reduce((sum, serp) => sum + (serp.timings.settleMs ?? 0), 0);
     const accounting =
       json === null ? compact.data.perEngine : json.perEngine;
+    const unresolved =
+      json === null
+        ? compact.items.filter((item) => item.unresolved === true).length
+        : json.unresolved ?? 0;
     const details: WebSearchDetails = {
       engines: contributed,
       results: rendered,
@@ -1598,6 +1629,7 @@ export function createWebSearchTool(
       ...(isPerEngineCounts(accounting) ? { perEngine: accounting } : {}),
       ...(Object.keys(failed).length === 0 ? {} : { failedEngines: { ...failed } }),
       ...(humanRun === undefined ? {} : { human: humanRun }),
+      ...(unresolved === 0 ? {} : { unresolved }),
       ...(settleMs <= 0 ? {} : { settleMs }),
     };
 
@@ -1624,6 +1656,7 @@ export function createWebSearchTool(
     parameters: webSearchSchema,
     exposure: "direct",
     annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+    promptGuidelines: WEB_SEARCH_GUIDELINES,
     execute,
   };
 }

@@ -9,7 +9,7 @@ pi process
     ├── config.ts                    loadConfig() → ~/.pi/agent/web-search.json
     ├── tools/
     │   ├── web_search.ts    direct   SERP → compact Markdown/JSON (≤2500 chars)
-    │   ├── web_read.ts      deferred page → Markdown (≤6000 chars, offset)
+    │   ├── web_read.ts      direct   page → Markdown (≤6000 chars, offset)
     │   ├── image_search.ts  deferred tiles; attach:"bytes" returns real image blocks
     │   ├── web_research.ts  deferred search→read→claims loop
     │   └── web_doctor.ts    deferred diagnostics (+ /web-doctor command)
