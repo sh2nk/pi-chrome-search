@@ -14,6 +14,8 @@ change ships a new fixture and updates this page (S13.4).
 | `tests/fixtures/ddg-no-assist.html.gz` | DuckDuckGo | no assist block, toggle-only `lead` |
 | `tests/fixtures/yandex-neuro.html.gz` | Yandex | organics, Futuris AI answer, jsredir ads, tracking params |
 | `tests/fixtures/yandex-captcha.html.gz` | Yandex | SmartCaptcha wall classification |
+| `tests/fixtures/images-google.html.gz` | Google Images | tile cards, `data-lpage` page URLs, `encrypted-tbn` thumbs, canaries |
+| `tests/fixtures/images-yandex.html.gz` | Yandex Images | `.SerpItem` tiles, `img_url` source-image URLs, canaries |
 
 ## Discovery (in order)
 
@@ -64,6 +66,13 @@ Text alone never wins: a wall phrase needs a captcha/consent node or a wall URL.
 `[data-result="snippet"]`; Search Assist `[data-testid="duckassist-answer-content"]`; ads
 `duckduckgo.com/y.js`, `[data-result="ad"]`; walls `anomaly` path, `Unfortunately, bots use DuckDuckGo
 too`, `Please complete the following challenge` (weak `unusual traffic` only with zero results).
+
+**Images** (`images-google`, `images-yandex`, loaded by `tests/unit/image_search.test.ts`):
+Google tiles `[data-attrid="images universal"]` with `data-lpage` (the source page); Yandex tiles
+`.SerpItem` with `.SerpItem-Thumb` and `a.ImagesContentImage-Cover` (`img_url` is the source image).
+Ads `[data-text-ad]`/`[data-ad]` and the `реклама`/`промо` labels are dropped; a `data:` thumb is a
+lazy placeholder, never a reportable URL. Yandex 2026 has no `.serp-item`, so a non-zero
+`legacySerpItem` canary means the layout rolled back.
 
 **Yandex** (`yandex-neuro`, `yandex-captcha`): ready `.OrganicTitle, .Misspell, .SmartCaptcha`;
 organics `.OrganicTitle`; snippet `.OrganicTextContentSpan`; AI `[class*='Futuris']` (`FuturisSearch`,

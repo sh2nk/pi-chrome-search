@@ -37,8 +37,8 @@ test("S13.4: every documented fixture exists", () => {
 });
 
 test("S13.4: every adapter test loads a fixture and every fixture is asserted", () => {
-  const tests = ["google", "duckduckgo", "yandex"].map((engine) =>
-    readFileSync(join(ROOT, `tests/unit/${engine}.test.ts`), "utf8"),
+  const tests = ["google", "duckduckgo", "yandex", "image_search"].map((name) =>
+    readFileSync(join(ROOT, `tests/unit/${name}.test.ts`), "utf8"),
   );
   const corpus = tests.join("\n");
   for (const file of readdirSync(FIXTURES).filter((name) => name.endsWith(".html.gz"))) {
