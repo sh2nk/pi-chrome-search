@@ -36,7 +36,7 @@ Discovery order: `PI_CHROME_CDP_WS` → `PI_CHROME_CDP_PORTS` → `DevToolsActiv
 <!-- tools:start -->
 | Tool | Exposure | Arguments |
 |---|---|---|
-| `web_search` | direct | `q` string; `n?` integer 1..10; `engines?` "auto" or ("google" or "duckduckgo" or "yandex") or list of ("google" or "duckduckgo" or "yandex") 1..3; `summary?` boolean; `freshness?` "d" or "w" or "m" or "y"; `page?` integer >=1; `format?` "md" or "json" |
+| `web_search` | direct | `q` string; `n?` integer 1..10; `engines?` "auto" or ("google" or "duckduckgo" or "yandex") or list of ("google" or "duckduckgo" or "yandex") 1..3; `summary?` boolean; `page?` integer >=1; `format?` "md" or "json" |
 | `web_read` | direct | `url` string; `offset?` integer >=0; `maxChars?` integer >=1; `format?` "md" or "text" |
 | `image_search` | deferred | `q` string; `n?` integer 1..12; `engine?` "google" or "yandex"; `attach?` boolean or "bytes" |
 | `web_research` | deferred | `q` string; `budget?` "quick" or "normal" or "deep" |
@@ -62,13 +62,13 @@ unknown key fails as `E_CONFIG`. Every key and env override: [`docs/config.md`](
 | `E_BUSY` | Another pi session holds the lock in `~/.pi/agent/`: close it or wait |
 | `E_PARSE` | A selector canary broke: compare the artifact `page.txt` with [`docs/engines.md`](docs/engines.md) |
 
-All 19 codes: [`docs/errors.md`](docs/errors.md). Start with `/web-doctor` or `node src/cli/doctor.ts --json`.
+All 18 codes: [`docs/errors.md`](docs/errors.md). Start with `/web-doctor` or `node src/cli/doctor.ts --json`.
 
 ## Security and ToS
 
 Searches run in your browser, as you. `web_read` refuses loopback, private, `file:` and `data:` URLs,
-re-checked on redirect. No telemetry; artifacts are sanitized and git-ignored. The optional page gate
-sends URL, title and snippet of at most 10 sources (never page text), `reflex.localOnly` keeps it local.
+re-checked on redirect. No telemetry and no classifier: no page-quality gate decides what you read, and
+search/read traffic never goes through a third-party provider.
 
 Google and Yandex forbid automated access in their terms. This project does not claim compliance and
 must not be run as a service. A captcha means solve it in the window or stop.

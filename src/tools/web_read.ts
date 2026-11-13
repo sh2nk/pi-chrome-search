@@ -10,10 +10,6 @@
  * - the guard runs before `acquirePage`, so a private URL causes no navigation;
  * - it runs again on `page.url()`, because the first check cannot see redirects.
  *
- * When `config.reflex.enabled` is true, the P14 page gate (and, for a pre-P14
- * reflex, the P5 read gate) may decline the page before a tab is spent; a
- * disabled reflex is not consulted at all.
- *
  * Output is Markdown (or plain text) produced by `extract/read.ts`; raw HTML is
  * never returned. The audit log records `host + path` only — a read URL may
  * carry a session token or a personal query, and the log is not the place for
@@ -24,7 +20,7 @@ import { Type, type Static } from "typebox";
 
 import { pageLockFor, readSlotKeys } from "../cdp/page-lock.ts";
 import type { CdpPage, PageKey } from "../cdp/types.ts";
-import type { Config } from "../config.ts";
+import type { Config } from "../config/index.ts";
 import {
   extractPdfText,
   renderPdfWindow,
@@ -38,7 +34,6 @@ import {
   type ReadInline,
   type ReadableDocument,
 } from "../extract/read.ts";
-import type { PageVerdict, Reflex } from "../reflex/types.ts";
 import { saveFailureArtifact } from "../runtime/artifacts.ts";
 import type { FailureDetails, Stage, WebSearchError } from "../runtime/error-codes.ts";
 import { isWebSearchError } from "../runtime/error-codes.ts";
@@ -111,7 +106,7 @@ export interface WebReadTool {
   description: string;
   parameters: typeof webReadSchema;
   exposure: "direct";
-  annotations: { readOnlyHint: true; openWorldHint: true; idempotentHint: true };
+  annotations: { readOnlyHint: false; openWorldHint: true; idempotentHint: false };
   execute(
     toolCallId: string,
     params: WebReadInput,
@@ -142,31 +137,6 @@ const INPUT_HINT =
   "check the web_read arguments: url (public http/https), offset >= 0, maxChars >= 1, format md|text";
 
 const UNSUPPORTED_HINT = "the page produced no readable text; try a different URL";
-
-/**
- * `E_UNSUPPORTED` is the least misleading code in the frozen taxonomy for a
- * declined read: the page was not refused as private (`E_BLOCKED_URL`), not
- * walled, not unparseable — the reflex simply judged it not worth a page load.
- * The hint names the escape hatch so a wrong verdict is actionable.
- */
-const READ_GATE_HINT =
-  "the reflex read gate declined this page (spam/ad host, login or checkout, or unlikely to answer); " +
-  "read another URL or set reflex.enabled=false to turn the gate off";
-
-/**
- * P14 hint. A quality skip is not a transport failure: the URL is fine, the
- * judge does not expect it to answer. Naming the escape hatch keeps a wrong
- * verdict actionable without inviting the caller to retry in a loop.
- */
-const PAGE_GATE_HINT =
-  "the reflex page gate judged this page not worth a read (farm/aggregator host, off-topic section, " +
-  "deceptive URL or thin content); read another URL or set reflex.enabled=false to turn the gate off";
-
-/** One printable line: kind plus the rules/model reasons that decided it. */
-function pageGateMessage(verdict: PageVerdict): string {
-  const reasons = verdict.reasons.slice(0, 3).join(", ");
-  return `page gate declined this URL: ${verdict.kind}${reasons === "" ? "" : ` (${reasons})`}`;
-}
 
 /**
  * Reads get their own work tabs (`PageKey` in `src/cdp/types.ts`): a long article
@@ -371,40 +341,6 @@ function auditDomain(finalUrl: URL): string {
   return value.length > 300 ? `${value.slice(0, 299)}…` : value;
 }
 
-/**
- * The read gate (P5-D + P14). `web_read` has no query and no SERP metadata, so
- * the URL itself is the only honest subject.
- *
- * P14 runs first: `judgePages` screens farm/aggregator hosts, off-topic
- * sections, deceptive URLs and (with an excerpt, which a read does not have yet)
- * thin content, and the classifier may add a skip. When the gate is absent
- * (pre-P14 reflex) or abstains, the older `gateRead` still answers, so the two
- * generations compose instead of duplicating a model call.
- *
- * Fail-open: a reflex that throws is a reflex problem, never a reason to refuse
- * a page the caller explicitly asked for.
- */
-async function pageGateVerdict(reflex: Reflex, url: string): Promise<PageVerdict | null> {
-  if (typeof reflex.judgePages !== "function") return null;
-  try {
-    // Rules only: an explicit URL has already been chosen, so the gate is the
-    // safety floor (punycode, abused TLD, scam, login) and this read pays no
-    // classifier latency or cost. `web_research` uses the classifier.
-    const verdicts = await reflex.judgePages(url, [{ url }], { backend: "rules" });
-    return verdicts === null ? null : (verdicts[0] ?? null);
-  } catch {
-    return null;
-  }
-}
-
-async function readGateAllows(reflex: Reflex, url: string): Promise<boolean> {
-  try {
-    return await reflex.gateRead(url, { title: url, url, snippet: "", engine: "read" });
-  } catch {
-    return true;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Failure snapshots + the post-navigate proof
 // ---------------------------------------------------------------------------
@@ -542,30 +478,6 @@ export function createWebReadTool(
       input.url,
       options.resolve === undefined ? {} : { resolve: options.resolve },
     );
-
-    // Reflex page gate (P14): after the SSRF guard, before a tab is acquired, so
-    // a refused page costs no navigation at all. `reflex.pageGate` turns it on
-    // without the rest of the reflex; with `enabled:false` the policy still
-    // answers from rules, so this costs no model call. A pre-P14 reflex has no
-    // `judgePages`; the older `gateRead` then answers instead (P5-D).
-    if ((deps.config.reflex.enabled || deps.config.reflex.pageGate) && deps.reflex !== undefined) {
-      const verdict = await pageGateVerdict(deps.reflex, requested.href);
-      if (verdict !== null && !verdict.worth) {
-        throw fail("E_UNSUPPORTED", "read", {
-          hint: PAGE_GATE_HINT,
-          message: pageGateMessage(verdict),
-        });
-      }
-      if (verdict === null) {
-        const allowed = await readGateAllows(deps.reflex, requested.href);
-        if (!allowed) {
-          throw fail("E_UNSUPPORTED", "read", {
-            hint: READ_GATE_HINT,
-            message: "the reflex read gate declined this URL",
-          });
-        }
-      }
-    }
 
     const lock = pageLockFor(deps.cdp);
     const slots = readSlotKeys(deps.config.read.pool);
@@ -876,7 +788,7 @@ export function createWebReadTool(
     description: WEB_READ_DESCRIPTION,
     parameters: webReadSchema,
     exposure: "direct",
-    annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+    annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: false },
     execute,
   };
 }

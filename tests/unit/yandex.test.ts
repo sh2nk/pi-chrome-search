@@ -117,26 +117,7 @@ test("buildUrl: text encoding, page mapping and region", () => {
   assert.equal(yandexEngine.buildUrl(query({ region: undefined })).includes("lr="), false);
 });
 
-test("buildUrl: freshness is unverified, so it is omitted; the builder stays pure", () => {
-  const base = yandexEngine.buildUrl(query({ page: 2 }));
-  for (const freshness of ["d", "w", "m", "y"] as const) {
-    assert.equal(
-      yandexEngine.buildUrl(query({ page: 2, freshness })),
-      base,
-      "an unverified within= mapping must not be guessed",
-    );
-    assert.equal(base.includes("within="), false);
-  }
 
-  const input = query({ page: 3, freshness: "w", region: "6" });
-  const snapshot = { ...input };
-  const first = yandexEngine.buildUrl(input);
-  const second = yandexEngine.buildUrl(input);
-  assert.equal(first, second);
-  assert.deepEqual(input, snapshot);
-  // summary only changes extraction effort, never the URL.
-  assert.equal(yandexEngine.buildUrl(query({ summary: false })), yandexEngine.buildUrl(query({ summary: true })));
-});
 
 // ---------------------------------------------------------------------------
 // settle
@@ -621,9 +602,8 @@ test("canaries do not throw on an empty body", async () => {
   assert.deepEqual(Object.values(await yandexEngine.canaries(page)), [0, 0, 0, 0, 0, 0]);
 });
 
-test("engine metadata: id, retryOnWall and the interaction contract", () => {
+test("engine metadata: id and the interaction contract", () => {
   assert.equal(yandexEngine.id, "yandex");
-  assert.equal(yandexEngine.retryOnWall, true);
   const interaction = yandexEngine.interaction;
   assert.ok(interaction !== undefined);
   assert.equal(interaction.homeUrl, "https://ya.ru/");

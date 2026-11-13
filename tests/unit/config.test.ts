@@ -16,7 +16,7 @@ import {
   loadConfig,
   parseConfig,
   resolveConfigPath,
-} from "../../src/config.ts";
+} from "../../src/config/index.ts";
 import {
   ERROR_CODES,
   ERROR_HINTS,
@@ -85,15 +85,26 @@ test("defaults load when the config file is missing", () => {
   const dir = tempDir();
   const config = loadConfig({ path: join(dir, "absent.json"), env: {} });
   assert.deepEqual(config.engines.google, DEFAULT_CONFIG.engines.google);
-  assert.equal(config.mode, "attach");
-  assert.equal(config.reflex.enabled, false);
+  assert.equal(config.debug, false);
 });
 
-test("P14 reflex.pageGate defaults on and parses independently of reflex.enabled", () => {
-  assert.equal(DEFAULT_CONFIG.reflex.pageGate, true);
-  const off = parseConfig({ reflex: { pageGate: false } });
-  assert.equal(off.reflex.pageGate, false);
-  assert.equal(off.reflex.enabled, false, "the gate flag must not switch the whole reflex on");
+test("S13.2: every removed surface is an unknown key, not a silent no-op", () => {
+  for (const removed of [
+    { mode: "launch" },
+    { reflex: { enabled: true } },
+    { captcha: { waitMs: 1000 } },
+    { window: { reuse: true } },
+    { cdp: { profileDir: "/tmp/profile" } },
+    { engines: { google: { dailyCap: 10 } } },
+  ]) {
+    expectConfigError(() => parseConfig(removed), "unknown key");
+  }
+  assert.equal("mode" in DEFAULT_CONFIG, false);
+  assert.equal("reflex" in DEFAULT_CONFIG, false);
+  assert.equal("captcha" in DEFAULT_CONFIG, false);
+  assert.equal("reuse" in DEFAULT_CONFIG.window, false);
+  assert.equal("profileDir" in DEFAULT_CONFIG.cdp, false);
+  assert.equal("dailyCap" in DEFAULT_CONFIG.engines.google, false);
 });
 
 test("unknown top-level key is rejected with the key path", () => {
@@ -154,13 +165,11 @@ test("env overrides apply without touching the file", () => {
       PI_CHROME_CDP_WS: "ws://127.0.0.1:9333/devtools/browser/abc",
       PI_CHROME_CDP_PORTS: "9222, 9333",
       PI_CHROME_SEARCH_DEBUG: "1",
-      PI_CHROME_SEARCH_PROFILE: "/tmp/pi-chrome-search-profile",
     },
   });
   assert.equal(config.cdp.ws, "ws://127.0.0.1:9333/devtools/browser/abc");
   assert.deepEqual(config.cdp.ports, [9222, 9333]);
   assert.equal(config.debug, true);
-  assert.equal(config.cdp.profileDir, "/tmp/pi-chrome-search-profile");
 });
 
 test("invalid env values are E_CONFIG", () => {

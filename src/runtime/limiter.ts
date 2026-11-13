@@ -1,156 +1,39 @@
 /**
- * Per-engine pacing and daily soft caps (SPEC §5.5).
+ * Per-engine pacing (S10.1, ADR-0001 D8).
  *
- * The state file keeps the last acquire timestamp and today's count so a pi
- * restart does not reset the pace. Writes are atomic (`<state>.tmp` + rename,
- * mode 0600). The day boundary is the local calendar date of `clock.now()`: a
- * new day clears the count but keeps `lastAt`, because two searches a second
- * apart across midnight would still look like a bot.
+ * Politeness is a minimum gap with jitter between searches on one engine plus
+ * one in-flight search per engine. There is no daily cap, no counter that can
+ * fail a call, and no persisted state file: the engines are free, a quota was
+ * an unmeasured guess, and a stale state file is a bug waiting to happen.
  *
  * `acquire` is serialized in-process per engine: concurrent callers queue, so
  * the second one computes its gap after the first one updated `lastAt`. The
- * lock file for cross-process exclusion belongs to the browser lane; this
- * limiter assumes one writer per state file.
- *
- * A `lastAt` in the future is treated as clock skew, not as a gap to wait out;
- * see `repairFutureLastAt`.
+ * page lock in `src/cdp/page-lock.ts` supplies the same guarantee for the tab.
  */
 
-import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-
-import type { Config } from "../config.ts";
+import type { Config } from "../config/index.ts";
 import { ENGINE_IDS, type EngineId } from "../engines/types.ts";
 import { ERROR_HINTS, WebSearchError } from "./error-codes.ts";
-import { agentDir } from "./host.ts";
 import type { Clock, Limiter, LimiterStats } from "./types.ts";
 
-const STATE_VERSION = 1 as const;
+export interface LimiterOptions {
+  config: Config;
+  clock: Clock;
+  /** Injectable uniform [0,1) source; defaults to `Math.random`. */
+  rng?: () => number;
+}
 
 interface EngineCounters {
   lastAt: number | null;
   today: number;
 }
 
-interface LimiterState {
-  version: typeof STATE_VERSION;
-  day: string;
-  engines: Record<EngineId, EngineCounters>;
-}
-
-export interface LimiterOptions {
-  config: Config;
-  clock: Clock;
-  /** Defaults to `<agent dir>/web-search/state.json`; tests inject a temp file. */
-  statePath?: string;
-  /** Injectable uniform [0,1) source; defaults to `Math.random`. */
-  rng?: () => number;
-}
-
-export interface LimiterWithStats extends Limiter {
-  /** Absolute path of the persisted state file. */
-  statePath(): string;
-}
-
-/**
- * `$PI_CODING_AGENT_DIR/web-search/state.json`, or `~/.pi/agent/web-search/state.json`.
- * Kept separate from `resolveConfigPath` because the state is runtime data, not
- * user-editable config.
- */
-export function resolveStatePath(env: NodeJS.ProcessEnv = process.env): string {
-  return join(agentDir(env), "web-search", "state.json");
-}
-
-function emptyEngines(): Record<EngineId, EngineCounters> {
+function emptyCounters(): Record<EngineId, EngineCounters> {
   return {
     google: { lastAt: null, today: 0 },
     duckduckgo: { lastAt: null, today: 0 },
     yandex: { lastAt: null, today: 0 },
   };
-}
-
-function freshState(now: number): LimiterState {
-  return { version: STATE_VERSION, day: localDay(now), engines: emptyEngines() };
-}
-
-/** Local calendar date, not UTC: the daily cap resets when the user's day does. */
-function localDay(now: number): string {
-  const date = new Date(now);
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${date.getFullYear()}-${month}-${day}`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isDayString(value: unknown): value is string {
-  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
-}
-
-/**
- * Validate a parsed state file. Unknown versions or a malformed shape are
- * corruption, not errors: the caller starts fresh instead of crashing pi.
- */
-function parseState(raw: unknown): LimiterState | null {
-  if (!isRecord(raw) || raw.version !== STATE_VERSION || !isDayString(raw.day)) return null;
-  if (!isRecord(raw.engines)) return null;
-
-  const engines = emptyEngines();
-  for (const engine of ENGINE_IDS) {
-    const candidate = raw.engines[engine];
-    if (!isRecord(candidate)) continue;
-    const lastAt = candidate.lastAt;
-    const today = candidate.today;
-    engines[engine] = {
-      lastAt: typeof lastAt === "number" && Number.isFinite(lastAt) ? lastAt : null,
-      today: typeof today === "number" && Number.isInteger(today) && today >= 0 ? today : 0,
-    };
-  }
-  return { version: STATE_VERSION, day: raw.day, engines };
-}
-
-function loadState(path: string, now: number): LimiterState {
-  let text: string;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch {
-    // Missing or unreadable: start clean. If the directory really is not
-    // writable, the next persist names the path in an E_CONFIG error.
-    return freshState(now);
-  }
-  try {
-    return parseState(JSON.parse(text)) ?? freshState(now);
-  } catch {
-    return freshState(now);
-  }
-}
-
-function saveState(path: string, state: LimiterState): void {
-  const tmp = `${path}.tmp`;
-  try {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    // writeFileSync applies `mode` only when it creates the file; a leftover
-    // temp file from a crashed run could otherwise keep broader permissions.
-    chmodSync(tmp, 0o600);
-    renameSync(tmp, path);
-  } catch (error) {
-    try {
-      unlinkSync(tmp);
-    } catch {
-      // Best effort: the original error is the one worth reporting.
-    }
-    const message = error instanceof Error ? error.message : String(error);
-    throw new WebSearchError({
-      code: "E_CONFIG",
-      stage: "config",
-      retryable: false,
-      hint: `check that ${dirname(path)} exists and is writable; limiter state is ${path}`,
-      message: `cannot persist limiter state: ${message}`,
-    });
-  }
 }
 
 function cancelled(engine: EngineId): WebSearchError {
@@ -163,37 +46,13 @@ function cancelled(engine: EngineId): WebSearchError {
   });
 }
 
-function rateLimited(engine: EngineId, today: number, cap: number): WebSearchError {
-  const message = `daily cap ${cap} for ${engine} reached (${today} searches today)`;
-  return new WebSearchError({
-    code: "E_RATE_LIMITED",
-    engine,
-    stage: "navigate",
-    retryable: true,
-    hint: `${message}; wait for the local day reset or use another engine`,
-    message,
-  });
-}
-
-export function createLimiter(options: LimiterOptions): LimiterWithStats {
+export function createLimiter(options: LimiterOptions): Limiter {
   const { config, clock } = options;
-  const statePath = options.statePath ?? resolveStatePath();
   const rng = options.rng ?? Math.random;
-
-  let state = loadState(statePath, clock.now());
+  const counters = emptyCounters();
   // One tail promise per engine: `acquire` chains onto it, so two concurrent
   // callers cannot both read the same `lastAt` and compute the same gap.
   const tails = new Map<EngineId, Promise<void>>();
-
-  function rollover(): void {
-    const day = localDay(clock.now());
-    if (state.day === day) return;
-    const engines = emptyEngines();
-    for (const engine of ENGINE_IDS) {
-      engines[engine] = { lastAt: state.engines[engine].lastAt, today: 0 };
-    }
-    state = { version: STATE_VERSION, day, engines };
-  }
 
   /** Uniform draw from the configured [min,max] window, rounded to whole ms. */
   function targetGap(engine: EngineId): number {
@@ -205,49 +64,26 @@ export function createLimiter(options: LimiterOptions): LimiterWithStats {
   }
 
   /**
-   * A `lastAt` in the future is clock skew, not a real gap: an RTC change, a VM
-   * resumed from a snapshot, or a dual-boot session share this state file, so
-   * `now` can jump backwards by hours. Sleeping `gap - (now - lastAt)` would
-   * then sleep for the whole skew — a 1 h step-back asks for 3,602,500 ms and a
-   * state file written 24 h ahead asks for 86,402,500 ms. The policy is: treat
-   * the stale timestamp as unknown, reset it to `now`, wait 0 and persist the
-   * corrected value. A forward jump needs no special case: the elapsed time is
-   * simply large, so no sleep is taken. Returns true when a reset happened.
+   * A `lastAt` in the future is clock skew, not a real gap: an RTC change or a
+   * VM resumed from a snapshot can move `now` backwards by hours. Sleeping the
+   * whole skew would turn a clock adjustment into a hang, so the stale stamp is
+   * reset to `now` and the wait is zero. A forward jump needs no special case.
    */
-  function repairFutureLastAt(counters: EngineCounters): boolean {
+  function repairFutureLastAt(entry: EngineCounters): boolean {
     const now = clock.now();
-    if (counters.lastAt === null || counters.lastAt <= now) return false;
-    const stale = counters.lastAt;
-    counters.lastAt = now;
-    try {
-      // Persist on its own so the correction survives a later abort or cap
-      // rejection. Rare event, so the extra atomic write is acceptable.
-      saveState(statePath, state);
-    } catch (error) {
-      counters.lastAt = stale;
-      throw error;
-    }
+    if (entry.lastAt === null || entry.lastAt <= now) return false;
+    entry.lastAt = now;
     return true;
   }
 
   async function run(engine: EngineId, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw cancelled(engine);
-
-    rollover();
-    const counters = state.engines[engine];
-
-    // Repair before the cap check: a capped engine should still correct a
-    // skewed file, and the repair itself never sleeps.
-    const skewRepaired = repairFutureLastAt(counters);
-
-    const cap = config.engines[engine].dailyCap;
-    // `dailyCap: 0` disables the cap (config validates it as >= 0). Check the
-    // cap before sleeping: a capped engine should fail fast, not wait first.
-    if (cap > 0 && counters.today >= cap) throw rateLimited(engine, counters.today, cap);
+    const entry = counters[engine];
+    const skewRepaired = repairFutureLastAt(entry);
 
     const gap = targetGap(engine);
-    if (!skewRepaired && counters.lastAt !== null) {
-      const waitMs = gap - (clock.now() - counters.lastAt);
+    if (!skewRepaired && entry.lastAt !== null) {
+      const waitMs = gap - (clock.now() - entry.lastAt);
       if (waitMs > 0) {
         try {
           await clock.sleep(waitMs, signal);
@@ -267,26 +103,15 @@ export function createLimiter(options: LimiterOptions): LimiterWithStats {
       }
     }
 
-    // An abort during the sleep must not consume a daily slot.
     if (signal?.aborted) throw cancelled(engine);
-
-    const previous: EngineCounters = { lastAt: counters.lastAt, today: counters.today };
-    counters.today += 1;
-    counters.lastAt = clock.now();
-    try {
-      saveState(statePath, state);
-    } catch (error) {
-      counters.lastAt = previous.lastAt;
-      counters.today = previous.today;
-      throw error;
-    }
+    entry.today += 1;
+    entry.lastAt = clock.now();
   }
 
   return {
     acquire(engine: EngineId, signal?: AbortSignal): Promise<void> {
       // An already-aborted caller must fail immediately, not after the sleep of
-      // whoever is ahead of it in the per-engine queue: reject before chaining
-      // so it never enters the queue and never waits.
+      // whoever is ahead of it in the per-engine queue.
       if (signal?.aborted) return Promise.reject(cancelled(engine));
       const previous = tails.get(engine) ?? Promise.resolve();
       const current = previous.then(() => run(engine, signal));
@@ -300,25 +125,12 @@ export function createLimiter(options: LimiterOptions): LimiterWithStats {
     },
 
     stats(engine: EngineId): LimiterStats {
-      // Project today's view even when no acquire ran since midnight, so the
-      // doctor does not report yesterday's exhausted cap. The file catches up
-      // on the next acquire.
-      rollover();
-      const counters = state.engines[engine];
-      // A future `lastAt` must not reach `/web-doctor` as a timestamp hours
-      // ahead: repair it here under the same policy as `run` (reset to `now`,
-      // persist, no sleep) instead of leaving the fix to the next acquire.
-      repairFutureLastAt(counters);
-      return {
-        engine,
-        lastAt: counters.lastAt,
-        today: counters.today,
-        dailyCap: config.engines[engine].dailyCap,
-      };
-    },
-
-    statePath(): string {
-      return statePath;
+      const entry = counters[engine];
+      repairFutureLastAt(entry);
+      return { engine, lastAt: entry.lastAt, today: entry.today };
     },
   };
 }
+
+/** Exported so tests and the doctor can name the canonical engine order. */
+export { ENGINE_IDS };

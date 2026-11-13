@@ -25,7 +25,7 @@ import { Type, type Static } from "typebox";
 
 import type { CdpPage } from "../cdp/types.ts";
 import { pageLockFor } from "../cdp/page-lock.ts";
-import type { Config } from "../config.ts";
+import type { Config } from "../config/index.ts";
 import {
   IMAGE_ENGINE_IDS,
   buildImagesUrl,
@@ -102,7 +102,7 @@ export interface ImageSearchTool {
   description: string;
   parameters: typeof imageSearchSchema;
   exposure: "deferred";
-  annotations: { readOnlyHint: true; openWorldHint: true; idempotentHint: true };
+  annotations: { readOnlyHint: false; openWorldHint: true; idempotentHint: false };
   execute(
     toolCallId: string,
     params: ImageSearchInput,
@@ -620,7 +620,7 @@ export function createImageSearchTool(
     description: IMAGE_SEARCH_DESCRIPTION,
     parameters: imageSearchSchema,
     exposure: "deferred",
-    annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+    annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: false },
     execute,
   };
 }

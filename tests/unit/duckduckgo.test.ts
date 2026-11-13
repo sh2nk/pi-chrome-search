@@ -164,16 +164,9 @@ test("buildUrl ignores pagination until M2 (page>1 yields the same URL)", () => 
   assert.equal(new URL(third).searchParams.has("s"), false);
 });
 
-test("buildUrl ignores freshness (df is unverified, so it is not invented)", () => {
-  const plain = duckduckgoEngine.buildUrl(query());
-  const requested = duckduckgoEngine.buildUrl(query({ freshness: "w" }));
-  assert.equal(requested, plain);
-  assert.equal(new URL(requested).searchParams.has("df"), false);
-});
-
 test("buildUrl is pure: same Query, same URL, and the Query is not mutated", () => {
   const frozen = Object.freeze(
-    query({ text: "solar panel", lang: "ru", region: "ru", page: 2, freshness: "d" }),
+    query({ text: "solar panel", lang: "ru", region: "ru", page: 2 }),
   );
   const snapshot = JSON.stringify(frozen);
   const first = duckduckgoEngine.buildUrl(frozen);

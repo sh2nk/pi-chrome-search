@@ -12,12 +12,9 @@
  * helpers: `extractFromDocument` therefore repeats the three small literals it
  * needs (`results`, `snippets`, the assist testid) on purpose.
  *
- * Pagination and freshness are deliberately absent. `Query.page` is
- * google/yandex-only (PLAN §5 "DDG pagination deferred"); the tool layer reports
- * `pageIgnored` for `page > 1` instead of us inventing `&s=`. `&df=` was never
- * verified against a live capture, so a `freshness` request is ignored rather
- * than guessed (see the lane handoff); inventing it would silently narrow a
- * search.
+ * Pagination is deliberately absent. `Query.page` is google/yandex-only (PLAN §5
+ * "DDG pagination deferred"); the tool layer reports `pageIgnored` for `page > 1`
+ * instead of us inventing `&s=`.
  */
 
 import type { CdpPage } from "../cdp/types.ts";
@@ -479,8 +476,8 @@ function klFor(q: Query): string {
 }
 
 export function buildDuckDuckGoUrl(q: Query): string {
-  // Pagination (`&s=`) and freshness (`&df=`) are intentionally absent: see the
-  // module header. Same Query -> same URL, always.
+  // Pagination (`&s=`) is intentionally absent: see the module header. Same
+  // Query -> same URL, always.
   return `https://duckduckgo.com/?q=${encodeURIComponent(q.text)}&kl=${klFor(q)}`;
 }
 

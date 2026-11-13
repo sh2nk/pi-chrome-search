@@ -14,11 +14,9 @@ import { createConnector, type Connector } from "./cdp/browser.ts";
 import { discoverEndpoint } from "./cdp/discovery.ts";
 import { handleDoctorCommand } from "./commands/doctor.ts";
 import { handleFocusCommand } from "./commands/focus.ts";
-import { loadConfig, resolveConfigPath, type Config } from "./config.ts";
+import { loadConfig, resolveConfigPath, type Config } from "./config/index.ts";
 import { createDefaultRegistry } from "./engines/index.ts";
 import type { EngineRegistry } from "./engines/types.ts";
-import type { ClassifierRegistry } from "./reflex/classifier.ts";
-import { createReflex, type ReflexBundle } from "./reflex/index.ts";
 import { createArtifacts } from "./runtime/artifacts.ts";
 import { createAllowAttention } from "./runtime/attention.ts";
 import { createCache } from "./runtime/cache.ts";
@@ -57,7 +55,7 @@ function createRuntime(): Runtime {
   const stateDir = join(agentDir(env), "web-search");
   const log = createLogger({ path: join(stateDir, "decisions.jsonl"), clock });
   const cache = createCache({ maxEntries: config.cache.maxEntries, clock });
-  const limiter = createLimiter({ config, clock, statePath: join(stateDir, "state.json") });
+  const limiter = createLimiter({ config, clock });
   const artifacts = createArtifacts({ config, clock });
   // P11: while a CDP handshake waits for the user's Allow, fire exactly one
   // desktop notification and (unless `window.raiseOnPrompt: "never"`) one
@@ -84,74 +82,8 @@ function createRuntime(): Runtime {
   return { config, configPath, clock, log, cache, limiter, artifacts, connector, registry };
 }
 
-/**
- * The session's classifier API, or `undefined` when this pi build has none (or a
- * test passes no context). Narrowed structurally: the extension must not depend
- * on the full `ModelRegistry` surface, and an older pi must degrade to rules
- * instead of failing every tool call.
- */
-function ctxClassifierRegistry(ctx: unknown): ClassifierRegistry | undefined {
-  if (typeof ctx !== "object" || ctx === null) return undefined;
-  const candidate = (ctx as { modelRegistry?: unknown }).modelRegistry;
-  if (typeof candidate !== "object" || candidate === null) return undefined;
-  const registry = candidate as Partial<ClassifierRegistry>;
-  if (
-    typeof registry.getAvailableOfType !== "function" ||
-    typeof registry.findOfType !== "function" ||
-    typeof registry.classify !== "function"
-  ) {
-    return undefined;
-  }
-  return registry as ClassifierRegistry;
-}
-
-/**
- * Reflex bundles are memoised per session model registry.
- *
- * The reflex must be built from the *execution context's* registry — never from a
- * module-level singleton created before a session exists — because that registry
- * is what carries pi's classifier auth. Memoising on the registry object (not on
- * this module) keeps `maxCallsPerSession`/`maxUsdPerSession` honest across tool
- * calls: a bundle built per call would reset the session cost guard on every
- * search. A weak key means a new session (or a new registry) starts clean and
- * the old bundle is collectable.
- *
- * No registry → rules-only: there is no model to budget, so a fresh bundle per
- * call is enough and nothing is retained.
- */
-interface CachedReflex {
-  runtime: Runtime;
-  bundle: ReflexBundle;
-}
-
-const reflexBundles = new WeakMap<object, CachedReflex>();
-
-function reflexFor(runtime: Runtime, registry: ClassifierRegistry | undefined): ReflexBundle {
-  if (registry === undefined) {
-    return createReflex({
-      config: runtime.config,
-      clock: runtime.clock,
-      cache: runtime.cache,
-      log: runtime.log,
-    });
-  }
-  const cached = reflexBundles.get(registry);
-  // The runtime check covers a session restart that reuses pi's registry object
-  // while config, cache and log have been rebuilt underneath it.
-  if (cached !== undefined && cached.runtime === runtime) return cached.bundle;
-  const bundle = createReflex({
-    config: runtime.config,
-    clock: runtime.clock,
-    cache: runtime.cache,
-    log: runtime.log,
-    registry,
-  });
-  reflexBundles.set(registry, { runtime, bundle });
-  return bundle;
-}
-
-/** Tool dependencies for one execution context. `ctx` is `unknown` by contract. */
-export function toToolDeps(runtime: Runtime, ctx?: unknown): ToolDeps {
+/** Tool dependencies for one execution context. */
+export function toToolDeps(runtime: Runtime): ToolDeps {
   return {
     config: runtime.config,
     engines: runtime.registry,
@@ -161,7 +93,6 @@ export function toToolDeps(runtime: Runtime, ctx?: unknown): ToolDeps {
     artifacts: runtime.artifacts,
     log: runtime.log,
     clock: runtime.clock,
-    reflex: reflexFor(runtime, ctxClassifierRegistry(ctx)).reflex,
   };
 }
 
@@ -240,7 +171,7 @@ export function ensureToolReachability(pi: ExtensionAPI, tools: readonly Registe
 
 export default function register(pi: ExtensionAPI): void {
   const tools = createTools({
-    getDeps: async (ctx?: unknown) => toToolDeps(await getRuntime(), ctx),
+    getDeps: async () => toToolDeps(await getRuntime()),
     getDoctorDeps: async () => toDoctorDeps(await getRuntime()),
   });
   for (const tool of tools) {
@@ -265,7 +196,7 @@ export default function register(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("web-doctor", {
-    description: "Diagnose CDP attach, lock, window, per-engine probes and the reflex layer",
+    description: "Diagnose CDP attach, lock, window and per-engine probe verdicts",
     handler: async (args, ctx: ExtensionContext) => {
       await handleDoctorCommand(
         args,

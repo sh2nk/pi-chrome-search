@@ -28,7 +28,7 @@
  * `research/probes/13-claims.mjs` reproducible.
  */
 
-import { queryTerms, tokenize } from "../reflex/rules.ts";
+import { queryTerms, tokenize } from "./text.ts";
 import { domainOf, sourceKey, stripTrackingFromText } from "./urls.ts";
 
 /** A claim shorter than this is a fragment, not a statement. */

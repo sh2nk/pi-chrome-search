@@ -53,7 +53,7 @@ import { chmod, link, mkdir, open, readFile, rename, unlink, writeFile } from "n
 import type { FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type { Config, FocusPolicy } from "../config.ts";
+import type { Config, FocusPolicy } from "../config/index.ts";
 import type { EngineId } from "../engines/types.ts";
 import { WebSearchError, isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, toFailure } from "../runtime/errors.ts";

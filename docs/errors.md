@@ -12,10 +12,10 @@ user verbatim. `E_*` codes never mean "something failed"; they name what to do n
 | `E_CDP_DISCONNECTED` | yes | The socket dropped: retry once; if it repeats run `/web-doctor` and check the lock file. |
 | `E_TARGET_LOST` | yes | The owned tab was closed or navigated away; retry reopens it. |
 | `E_WALL` | yes | Captcha/consent: solve it in the visible window, then retry. Never automated. |
-| `E_EMPTY` | yes | No organic results: rephrase, try another engine, drop `freshness`/`page`. |
+| `E_EMPTY` | yes | No organic results: rephrase the query or try another engine. |
 | `E_PARSE` | no | A selector canary failed: open the artifact dir, compare `page.txt` with the markers in `docs/engines.md`, patch the adapter. |
-| `E_TIMEOUT` | yes | Deadline exceeded: retry, or raise the timeout in config. |
-| `E_RATE_LIMITED` | yes | Per-engine gap or daily soft cap: wait, or use another engine. |
+| `E_EMPTY_PAGE` | no | The document rendered no readable text (client-side page, empty shell): open the artifact, try another URL; `E_PARSE` means a selector canary broke. |
+| `E_TIMEOUT` | yes | Deadline exceeded: retry, or ask for less (a smaller `n` or `maxChars`). |
 | `E_BUSY` | yes | Another pi session holds `~/.pi/agent/web-search.lock`; close it or wait for the heartbeat to expire. |
 | `E_BLOCKED_URL` | no | Only public `http(s)` is readable; loopback, private ranges, `file:` and `data:` are blocked (re-checked on redirect). |
 | `E_UNSUPPORTED` | no | Engine/vertical not implemented; `/web-doctor` shows per-engine status. |
@@ -29,3 +29,7 @@ user verbatim. `E_*` codes never mean "something failed"; they name what to do n
 `node src/cli/doctor.ts --json` prints the same report headlessly. Artifacts:
 `~/.pi/agent/web-search/artifacts/<ts>-<engine>-<hash>/` (`page.html`, `page.txt`, `screenshot.jpg`,
 `meta.json`). Decisions: `~/.pi/agent/web-search/decisions.jsonl`.
+
+Reserved codes (thrown by production code, dedicated offline test lands in the named phase):
+`E_TARGET_LOST` (P3), `E_EMPTY_PAGE` (P5), `E_NAVIGATION_MISMATCH` (P5), `E_OFFSET_RANGE` (P5),
+`E_CDP_AWAITING_ALLOW` (P3). `RESERVED_CODES` in `src/runtime/error-codes.ts` carries the same list.

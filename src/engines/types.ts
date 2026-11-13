@@ -14,8 +14,6 @@ export type EngineId = "google" | "duckduckgo" | "yandex";
 /** Canonical order. `auto` keeps this order; yandex stays last by policy (D10). */
 export const ENGINE_IDS = ["google", "duckduckgo", "yandex"] as const satisfies readonly EngineId[];
 
-export type Freshness = "d" | "w" | "m" | "y";
-
 export interface Query {
   text: string;
   /** Engine UI language, e.g. "ru". "auto" is resolved by the caller, never by the adapter. */
@@ -25,7 +23,6 @@ export interface Query {
   n: number;
   /** 1-based. Google/Yandex only. */
   page?: number;
-  freshness?: Freshness;
   /** Ask the engine for its native AI summary; `false` only suppresses extraction effort. */
   summary: boolean;
 }
@@ -187,8 +184,6 @@ export interface EngineInteraction {
 
 export interface Engine {
   readonly id: EngineId;
-  /** Yandex only: the tool layer may retry once after a wall. Adapters never retry themselves. */
-  readonly retryOnWall?: boolean;
   /** Optional human-search metadata; absent means the tool navigates the SERP directly. */
   readonly interaction?: EngineInteraction;
   /** Pure: same Query → same URL. No network, no clock, no config lookups. */

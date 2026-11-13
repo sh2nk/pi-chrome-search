@@ -26,7 +26,7 @@
  * appear in no returned field and no log row.
  */
 
-import { DEFAULT_CONFIG } from "../config.ts";
+import { DEFAULT_CONFIG } from "../config/index.ts";
 import { gotoKey } from "../runtime/cache.ts";
 import { fail } from "../runtime/errors.ts";
 import type { Cache, Clock } from "../runtime/types.ts";
@@ -478,7 +478,7 @@ export function createGotoResolver(options: GotoResolverOptions): GotoResolver {
         if (target === null) return unresolved(wrapper, "bad-location", status);
         // A Google-valued Location means /sorry, consent or another wrapper.
         // Following it would turn this resolver into a redirect follower, and
-        // looping on /sorry is exactly the burst that earns a captcha.
+        // looping on /sorry is exactly the burst that earns a wall.
         if (isGoogleOwnedHost(hostOf(target))) {
           return unresolved(wrapper, "unexpected-redirect", status);
         }

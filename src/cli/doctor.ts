@@ -33,8 +33,8 @@ import { createConnector } from "../cdp/browser.ts";
 import type { Connector, ConnectorOptions } from "../cdp/browser.ts";
 import { defaultLockPath } from "../cdp/browser.ts";
 import { discoverEndpoint } from "../cdp/discovery.ts";
-import { loadConfig, resolveConfigPath } from "../config.ts";
-import type { Config } from "../config.ts";
+import { loadConfig, resolveConfigPath } from "../config/index.ts";
+import type { Config } from "../config/index.ts";
 import { createDefaultRegistry } from "../engines/index.ts";
 import { createAllowAttention, oscNotification, type AllowAttention } from "../runtime/attention.ts";
 import type { EngineRegistry } from "../engines/types.ts";
@@ -91,8 +91,8 @@ export interface DoctorCliDeps {
   probe?: EngineProbe;
   /**
    * Pacing for the live probe. Production leaves it unset and gets the real
-   * limiter over `~/.pi/agent/web-search/state.json`, so `--fix`/`--json` never
-   * fire three unthrottled searches (AGENTS §2 rule 7); tests inject a fake.
+   * in-memory limiter, so `--fix`/`--json` never fire three unthrottled searches
+   * (AGENTS §2 rule 7); tests inject a fake.
    */
   limiter?: Limiter;
   /**
@@ -291,9 +291,8 @@ export async function runDoctorCli(
   // The same runtime objects the extension uses: the probe acquires an owned
   // work tab through this connector, extracts with the real adapters and paces
   // through the same limiter as `web_search`. The factory itself is lazy, so
-  // `--no-probe` never touches the browser; the limiter only reads its state.
-  const limiter =
-    deps.limiter ?? createLimiter({ config, clock, statePath: join(stateDir(env), "state.json") });
+  // `--no-probe` never touches the browser.
+  const limiter = deps.limiter ?? createLimiter({ config, clock });
   const probe: EngineProbe =
     deps.probe ?? createEngineProbe({ config, connector, registry, clock, limiter });
 

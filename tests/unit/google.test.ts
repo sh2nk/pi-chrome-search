@@ -24,7 +24,7 @@ import {
   wallEvidenceFromDocument,
   type ExtractedSerp,
 } from "../../src/engines/google.ts";
-import type { Freshness, Query } from "../../src/engines/types.ts";
+import type { Query } from "../../src/engines/types.ts";
 import { isWebSearchError } from "../../src/runtime/error-codes.ts";
 import { FakeClock } from "../helpers/fake-cdp.ts";
 import { fixtureDocument, runInPage } from "../helpers/fixtures.ts";
@@ -199,18 +199,6 @@ test("buildUrl paginates at 10 results per page and omits start on page 1", () =
   assert.equal(new URL(googleEngine.buildUrl(makeQuery({ page: Number.NaN }))).searchParams.has("start"), false);
 });
 
-test("buildUrl encodes freshness as tbs=qdr:<unit> and drops unknown units", () => {
-  for (const unit of ["d", "w", "m", "y"] as const) {
-    const url = new URL(googleEngine.buildUrl(makeQuery({ freshness: unit })));
-    assert.equal(url.searchParams.get("tbs"), `qdr:${unit}`);
-  }
-  // The parameter is encoded application/x-www-form-urlencoded, which Google accepts.
-  assert.ok(googleEngine.buildUrl(makeQuery({ freshness: "w" })).includes("tbs=qdr%3Aw"));
-
-  const bogus = new URL(googleEngine.buildUrl(makeQuery({ freshness: "q" as Freshness })));
-  assert.equal(bogus.searchParams.has("tbs"), false);
-});
-
 test("buildUrl percent-encodes Cyrillic and search operators", () => {
   const url = googleEngine.buildUrl(makeQuery({ text: "что такое трансформер", lang: "ru" }));
   // Nothing non-ASCII may reach the URL string.
@@ -224,7 +212,7 @@ test("buildUrl percent-encodes Cyrillic and search operators", () => {
 });
 
 test("buildUrl is pure: same Query in, byte-identical URL out", () => {
-  const query = makeQuery({ text: "rust", lang: "ru", region: "ru", page: 2, freshness: "m" });
+  const query = makeQuery({ text: "rust", lang: "ru", region: "ru", page: 2 });
   const first = googleEngine.buildUrl(query);
   const second = googleEngine.buildUrl({ ...query });
   const frozen = Object.freeze({ ...query });

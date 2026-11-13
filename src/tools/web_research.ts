@@ -9,11 +9,10 @@
  *    coverage judge says the evidence is enough, or when the token cap cannot
  *    hold another excerpt. The per-round read share (`ceil(readsLeft/roundsLeft)`)
  *    is what keeps a later search round from finding all reads already spent.
- * 2. **The loop.** search → triage → read top-k → coverage → refine/stop. Triage
- *    and coverage come from the injected `Reflex` only when
- *    `config.reflex.enabled` is true; otherwise the fixed order and the
- *    deterministic "no new domains" rule apply and no model is consulted at all
- *    (V6.3). A throwing reflex always falls back to the fixed path.
+ * 2. **The loop.** search → read top-k → coverage → refine/stop. Page selection is
+ *    deterministic (merge order, dedupe, top-N) and coverage is a fixed rule; no
+ *    model is consulted and no page-quality gate decides what to read (ADR-0001
+ *    D1).
  * 3. **The evidence bundle.** Every claim cites a URL that a search actually
  *    returned; sources are de-duplicated by canonical host+path
  *    (`sourceKey`), tracking parameters are stripped from URLs and link text,
@@ -29,8 +28,8 @@
  *
  * Side effects are behind the two injected seams (`search`, `read`). The default
  * seams call the sibling tools, which already own the browser, the cache, the
- * limiter, the SSRF guard and the reflex read gate — this module never touches
- * `deps.cdp`, so an abort cannot leak a page acquisition here. Every failure
+ * limiter and the SSRF guard — this module never touches `deps.cdp`, so an abort
+ * cannot leak a page acquisition here. Every failure
  * leaves through `renderToolFailure` with a code, a stage and a hint; `execute`
  * never throws at the agent.
  */
@@ -46,9 +45,7 @@ import {
   selectClaims,
 } from "../extract/claims.ts";
 import { domainOf, normalizeUrl, sourceKey, stripTrackingFromText } from "../extract/urls.ts";
-import { queryTerms, tokenize } from "../reflex/rules.ts";
-import type { Candidate, CoverageNext, CoverageVerdict, Evidence, PageVerdict } from "../reflex/types.ts";
-import { PAGE_BATCH_MAX } from "../reflex/types.ts";
+import { queryTerms, tokenize } from "../extract/text.ts";
 import type { ErrorCode, FailureDetails, Stage } from "../runtime/error-codes.ts";
 import { isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, renderToolFailure, toFailure } from "../runtime/errors.ts";
@@ -144,13 +141,6 @@ export interface ResearchDetails {
   evidence: ResearchEvidence;
   /** Set when a later search/read failed but earlier evidence was still returned. */
   error?: { code: ErrorCode; stage: Stage };
-  /**
-   * P14 gate telemetry: how many candidates the page gate judged and how many it
-   * refused. `skipped` is the honest "reads not spent on junk" number; it is not
-   * a promise that fewer reads were *used*, because a refused candidate frees a
-   * slot for the next one.
-   */
-  gate?: { judged: number; skipped: number };
 }
 
 export interface WebResearchSuccess {
@@ -173,7 +163,7 @@ export interface WebResearchTool {
   description: string;
   parameters: typeof webResearchSchema;
   exposure: "deferred";
-  annotations: { readOnlyHint: true; openWorldHint: true; idempotentHint: true };
+  annotations: { readOnlyHint: false; openWorldHint: true; idempotentHint: false };
   execute(
     toolCallId: string,
     params: WebResearchInput,
@@ -205,7 +195,7 @@ export interface SearchHit {
 export interface SearchOutcome {
   query: string;
   hits: SearchHit[];
-  /** Engines that produced the SERP, in try order. Used for triage labelling. */
+  /** Engines that produced the SERP, in try order. */
   engines: EngineId[];
 }
 
@@ -502,11 +492,6 @@ interface LoopState {
   reads: ReadRecord[];
   searches: number;
   readCount: number;
-  /** P14: candidates the page gate judged / refused across rounds. */
-  gateJudged: number;
-  gateSkipped: number;
-  /** URLs the page gate refused: they never get a read and are never re-picked. */
-  refused: Set<string>;
   lastError?: { code: ErrorCode; stage: Stage };
 }
 
@@ -526,7 +511,7 @@ function readShare(readsLeft: number, roundsLeft: number): number {
   return Math.max(1, Math.ceil(readsLeft / Math.max(1, roundsLeft)));
 }
 
-/** Ask for a few more results than reads so triage has something to choose from. */
+/** Ask for a few more results than reads so the pool has a choice. */
 function searchN(deps: ToolDeps, share: number): number {
   const rawMax = Number.isFinite(deps.config.search.nMax) ? deps.config.search.nMax : 10;
   const nMax = Math.min(10, Math.max(1, Math.floor(rawMax)));
@@ -572,143 +557,38 @@ function mergeOutcome(state: LoopState, outcome: SearchOutcome): number {
   return newDomains.size;
 }
 
-function toCandidate(item: SeenResult): Candidate {
-  return { title: item.title, url: item.url, snippet: item.snippet, engine: item.engine };
-}
-
-/** Integer indices that address the candidate list, de-duplicated, in caller order. */
-function sanitizeKeep(keep: unknown, length: number): number[] {
-  if (!Array.isArray(keep)) return [];
-  const seen = new Set<number>();
-  const out: number[] = [];
-  for (const value of keep) {
-    if (typeof value !== "number" || !Number.isInteger(value)) continue;
-    if (value < 0 || value >= length || seen.has(value)) continue;
-    seen.add(value);
-    out.push(value);
-  }
-  return out;
-}
-
-/**
- * P14 page gate for a research round.
- *
- * One call ranks up to `PAGE_BATCH_MAX` candidates: refused (`worth:false`)
- * sources are dropped, survivors are ordered by trust (a forum thread after the
- * docs page it cites) while keeping the SERP order as the tie-break.
- *
- * Returns `null` when there is no gate or it abstains — the caller then keeps
- * the fixed order. A gate that refuses *everything* is not a failure: it returns
- * an empty keep list, the round spends no read, and the refused URLs are marked
- * in `state.refused` so the loop cannot pick them again (that would be a wall of
- * slop read one page at a time). The bundle still cites the SERP snippets.
- */
-async function pageGateOrder(
-  query: string,
-  batch: readonly Candidate[],
-  deps: ToolDeps,
-): Promise<{ keep: number[]; judged: number; skipped: number; refused: string[] } | null> {
-  const gateOn = deps.config.reflex.enabled || deps.config.reflex.pageGate;
-  if (!gateOn || deps.reflex === undefined || typeof deps.reflex.judgePages !== "function") {
-    return null;
-  }
-  const subjects = batch.slice(0, PAGE_BATCH_MAX).map((item) => ({
-    url: item.url,
-    title: item.title,
-    snippet: item.snippet,
-  }));
-  let verdicts: PageVerdict[] | null;
-  try {
-    verdicts = await deps.reflex.judgePages(query, subjects);
-  } catch {
-    return null;
-  }
-  if (verdicts === null || verdicts.length === 0) return null;
-
-  const judged = verdicts.length;
-  const survivors: Array<{ index: number; trust: number }> = [];
-  const refused: string[] = [];
-  let skipped = 0;
-  for (let index = 0; index < judged; index += 1) {
-    const verdict = verdicts[index];
-    if (verdict === undefined) {
-      // No verdict for this slot: keep it, the gate only removes what it judged.
-      survivors.push({ index, trust: 0.5 });
-      continue;
-    }
-    if (!verdict.worth) {
-      skipped += 1;
-      const refusedUrl = batch[index]?.url;
-      if (refusedUrl !== undefined) refused.push(refusedUrl);
-      continue;
-    }
-    survivors.push({ index, trust: verdict.trust ?? 0.5 });
-  }
-  survivors.sort((a, b) => b.trust - a.trust || a.index - b.index);
-  return { keep: survivors.map((entry) => entry.index), judged, skipped, refused };
-}
-
 /**
  * The candidates to read this round, best first. Current-round results come
  * before leftovers from earlier queries, because the rewritten query is the tool's
- * best guess at what is still missing.
- *
- * Triage is advisory: an exception, an empty keep list or a malformed verdict
- * falls back to the fixed order (`first k`), so a broken reflex can never turn a
- * working search into zero reads. The P14 page gate then removes sources that
- * are not worth a browser trip and ranks the rest by trust, inside the already
- * triaged set so the two decisions compose instead of fighting.
+ * best guess at what is still missing. No quality gate filters this list: the
+ * budget and the merge order are the only rules (ADR-0001 D1).
  */
-async function pickCandidates(
-  query: string,
-  state: LoopState,
-  k: number,
-  reflexOn: boolean,
-  deps: ToolDeps,
-): Promise<Candidate[]> {
+function pickCandidates(state: LoopState, k: number): SeenResult[] {
   if (k <= 0) return [];
-  const unread = [...state.seen.values()].filter((item) => !state.read.has(item.url) && !state.refused.has(item.url));
+  const unread = [...state.seen.values()].filter((item) => !state.read.has(item.url));
   const fresh = unread.filter((item) => state.roundUrls.has(item.url));
   const stale = unread.filter((item) => !state.roundUrls.has(item.url));
-  const ordered = [...fresh, ...stale];
-  if (ordered.length === 0) return [];
-  const candidates = ordered.map(toCandidate);
-
-  let keep = candidates.map((_, index) => index).slice(0, k);
-  if (reflexOn && deps.reflex !== undefined) {
-    try {
-      const verdict = await deps.reflex.triage(query, candidates);
-      const requested = sanitizeKeep(verdict?.keep, candidates.length);
-      if (requested.length > 0) keep = requested.slice(0, k);
-    } catch {
-      // Fail-open: the fixed order is the budget, not a guess.
-    }
-  }
-
-  const gated = await pageGateOrder(query, keep.map((index) => candidates[index]!), deps);
-  if (gated !== null) {
-    state.gateJudged += gated.judged;
-    state.gateSkipped += gated.skipped;
-    for (const url of gated.refused) state.refused.add(url);
-    keep = gated.keep.map((index) => keep[index]!);
-  }
-
-  return keep.map((index) => candidates[index]!);
+  return [...fresh, ...stale].slice(0, k);
 }
 
 // ---------------------------------------------------------------------------
 // Coverage
 // ---------------------------------------------------------------------------
 
-function isCoverageVerdict(value: unknown): value is CoverageVerdict {
-  if (!isRecord(value) || typeof value.enough !== "boolean") return false;
-  const next = value.next;
-  return next === "refine" || next === "read_more" || next === "stop";
+interface Evidence {
+  url: string;
+  title?: string;
+  excerpt: string;
+}
+
+type CoverageNext = "refine" | "read_more" | "stop";
+interface CoverageVerdict {
+  enough: boolean;
+  next: CoverageNext;
 }
 
 /**
- * Deterministic coverage judge, used when `reflex.enabled` is false (and as the
- * fail-open fallback, and as the honesty floor on a model verdict).
+ * Deterministic coverage judge.
  *
  * SPEC §9.2 asked for "two independent domains plus one page that carries a
  * query term". That declared `enough:yes` while the claims were off-topic, so
@@ -739,25 +619,6 @@ function fixedCoverage(
   return { enough: false, next: unread ? "read_more" : "refine" };
 }
 
-/**
- * A model verdict cannot declare `enough:yes` while the claims ignore the query.
- * The floor is deterministic, so it holds for every backend (and for rules).
- */
-function applyCoverageFloor(
-  verdict: CoverageVerdict,
-  query: string,
-  claimTexts: readonly string[],
-  unread: boolean,
-  searchesLeft: number,
-): CoverageVerdict {
-  if (!verdict.enough) return verdict;
-  if (claimsCoverage(query, claimTexts) >= MIN_CLAIM_COVERAGE) return verdict;
-  return {
-    enough: false,
-    next: unread ? "read_more" : searchesLeft > 0 ? "refine" : "stop",
-  };
-}
-
 function evidenceOf(state: LoopState): Evidence[] {
   return state.reads.map((record) => ({
     url: record.url,
@@ -766,28 +627,14 @@ function evidenceOf(state: LoopState): Evidence[] {
   }));
 }
 
-async function judgeCoverage(
+function judgeCoverage(
   query: string,
   state: LoopState,
   newDomains: number,
-  reflexOn: boolean,
-  deps: ToolDeps,
   claimTexts: readonly string[],
   unread: boolean,
-  searchesLeft: number,
-): Promise<CoverageVerdict> {
-  const evidence = evidenceOf(state);
-  let verdict: CoverageVerdict | undefined;
-  if (reflexOn && deps.reflex !== undefined) {
-    try {
-      const candidate = await deps.reflex.coverage(query, evidence);
-      if (isCoverageVerdict(candidate)) verdict = candidate;
-    } catch {
-      // Fail-open: the fixed rule is the floor.
-    }
-  }
-  verdict ??= fixedCoverage(query, evidence, newDomains, claimTexts, unread);
-  return applyCoverageFloor(verdict, query, claimTexts, unread, searchesLeft);
+): CoverageVerdict {
+  return fixedCoverage(query, evidenceOf(state), newDomains, claimTexts, unread);
 }
 
 // ---------------------------------------------------------------------------
@@ -1069,10 +916,6 @@ export function createWebResearchTool(
     );
 
     const { search, read } = resolveSeams();
-    const reflex = deps.reflex;
-    // One research call is one model budget, exactly like one `web_search`.
-    reflex?.beginSearch?.();
-    const reflexOn = deps.config.reflex.enabled && reflex !== undefined;
     // Read through a call: TypeScript narrows `signal?.aborted` after the first
     // guard, but the property legitimately flips while a seam is awaiting.
     const aborted = (): boolean => signal?.aborted === true;
@@ -1086,9 +929,6 @@ export function createWebResearchTool(
       reads: [],
       searches: 0,
       readCount: 0,
-      gateJudged: 0,
-      gateSkipped: 0,
-      refused: new Set(),
     };
 
     const tried = new Set<string>([queryKey(input.q)]);
@@ -1100,7 +940,7 @@ export function createWebResearchTool(
     let verdict: CoverageVerdict = { enough: false, next: "read_more" };
 
     const unreadLeft = (): boolean =>
-      [...state.seen.keys()].some((url) => !state.read.has(url) && !state.refused.has(url));
+      [...state.seen.keys()].some((url) => !state.read.has(url));
 
     for (;;) {
       if (aborted()) throw cancelled("navigate");
@@ -1138,7 +978,7 @@ export function createWebResearchTool(
       // --- read top-k -----------------------------------------------------
       if (readLimit > 0 && state.readCount < readLimit && roundReadsLeft > 0) {
         const k = Math.min(roundReadsLeft, readLimit - state.readCount);
-        const candidates = await pickCandidates(query, state, k, reflexOn, deps);
+        const candidates = pickCandidates(state, k);
         for (const candidate of candidates) {
           if (aborted()) throw cancelled("read");
           if (state.readCount >= readLimit) break;
@@ -1182,16 +1022,7 @@ export function createWebResearchTool(
       const maxClaims = readLimit > 0 ? Math.max(1, readLimit) : 1;
       const claimTexts = buildClaims(state, input.q, maxClaims).map((claim) => claim.text);
       const unread = unreadLeft();
-      verdict = await judgeCoverage(
-        input.q,
-        state,
-        roundNewDomains,
-        reflexOn,
-        deps,
-        claimTexts,
-        unread,
-        spec.searches - state.searches,
-      );
+      verdict = judgeCoverage(input.q, state, roundNewDomains, claimTexts, unread);
       if (verdict.enough || verdict.next === "stop") break;
       // `read_more` is honoured before a search: the candidates are already in
       // the pool, and a rewrite can wait until they are exhausted (V13.3).
@@ -1230,9 +1061,6 @@ export function createWebResearchTool(
       truncated: fitted.truncated || capCutReads,
       coverage: { enough: verdict.enough, next: verdict.next },
       evidence: fitted.evidence,
-      ...(state.gateJudged > 0
-        ? { gate: { judged: state.gateJudged, skipped: state.gateSkipped } }
-        : {}),
       ...(state.lastError === undefined ? {} : { error: state.lastError }),
     };
 
@@ -1249,7 +1077,6 @@ export function createWebResearchTool(
         chars: details.chars,
         truncated: details.truncated,
         enough: details.coverage.enough,
-        ...(details.gate === undefined ? {} : { gateJudged: details.gate.judged, gateSkipped: details.gate.skipped }),
       })
       .catch(() => undefined);
 
@@ -1262,7 +1089,7 @@ export function createWebResearchTool(
     description: WEB_RESEARCH_DESCRIPTION,
     parameters: webResearchSchema,
     exposure: "deferred",
-    annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+    annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: false },
     execute,
   };
 }

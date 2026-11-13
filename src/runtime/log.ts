@@ -168,7 +168,7 @@ function messageOf(error: unknown): string {
  * real cycles only. A WeakSet would also turn harmless shared references into
  * `[circular]`, so we track the current ancestor chain instead.
  *
- * Redaction happens here, at write time: callers (tools, reflex, browser) must
+ * Redaction happens here, at write time: callers (tools, browser) must
  * not have to remember which fields are sensitive, and a crash dump of the log
  * must never contain a cookie or an Authorization header.
  */
@@ -196,7 +196,7 @@ function serialize(row: Record<string, unknown>, clock: Clock): string {
     return `${JSON.stringify({ ts: new Date(clock.now()).toISOString(), error: "unserializable row" })}\n`;
   }
 
-  // A row that already carries `ts` keeps it (DecisionLogRow); generic logs get
+  // A row that already carries `ts` keeps it; generic logs get
   // one so every line is sortable without the caller knowing the convention.
   if (row.ts !== undefined) return `${json}\n`;
 

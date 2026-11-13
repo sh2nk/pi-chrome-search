@@ -29,7 +29,7 @@ import type { Dirent } from "node:fs";
 import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { Config } from "../config.ts";
+import type { Config } from "../config/index.ts";
 import { ENGINE_IDS } from "../engines/types.ts";
 import type { EngineId, SerpTimings } from "../engines/types.ts";
 import { isWebSearchError } from "./error-codes.ts";
@@ -434,14 +434,6 @@ export function createArtifacts(options: ArtifactsOptions): Artifacts {
   const clock = options.clock;
 
   /**
-   * Config is read per call (not captured) so `enabled`/retention changes take
-   * effect without rebuilding the object; the paths and modes stay ours.
-   */
-  function limits(): Config["artifacts"] {
-    return options.config.artifacts;
-  }
-
-  /**
    * FS failures are `E_CONFIG` naming the path: the agent must be able to tell
    * "your disk/root is the problem" from "the SERP layout changed". The original
    * message is not embedded — it can contain file contents on some platforms and
@@ -581,7 +573,7 @@ export function createArtifacts(options: ArtifactsOptions): Artifacts {
    * directory"; the sentinel is the contract this module actually implements.)
    */
   async function save(input: ArtifactInput): Promise<string> {
-    if (!limits().enabled) return "";
+    if (!options.config.artifacts.enabled) return "";
 
     const ts = clock.now();
     // `serp.engine` is the fallback so a save triggered by a parsed SERP names
@@ -668,7 +660,10 @@ export function createArtifacts(options: ArtifactsOptions): Artifacts {
   }
 
   async function prune(): Promise<PruneResult> {
-    const { keep, maxBytes } = limits();
+    // Read per call (not captured) so retention changes take effect without
+    // rebuilding the object; the paths and modes stay ours.
+    const keep = options.config.artifacts.keep;
+    const maxBytes = options.config.artifacts.maxBytes;
 
     const dirs = (await listArtifactDirs()).sort((a, b) => {
       const left = orderOf(a.name);

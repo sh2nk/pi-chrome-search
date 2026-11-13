@@ -17,7 +17,8 @@
  *   R13 host facts live only in src/runtime/host.ts (PO1–PO4)
  *   R14 documentation budgets (README ≤90, AGENTS ≤150, SPEC ≤320, PLAN ≤260, docs/*.md ≤120,
  *       docs total ≤400)
- *   R15 docs↔code drift (DEFAULT_CONFIG keys, error codes, registered tools)
+ *   R15 docs↔code drift (error codes, registered tools)
+ *   R16 generated config docs and every config leaf read by production code
  *
  * Code is read with comments blanked and literals kept, so a comment documenting "never launch
  * Playwright" is not a violation while `import "playwright"` still is.
@@ -309,51 +310,56 @@ for (const rel of docs) {
 if (docsTotal > DOC_BUDGET.docsTotal) docFindings.push({ file: "docs/", line: docsTotal, rule: "budget", detail: `> ${DOC_BUDGET.docsTotal}` });
 add("R14", "documentation budgets", docFindings, "README.md, AGENTS.md, SPEC.md, PLAN.md, docs/*.md");
 
-/** Dotted key paths of `export const DEFAULT_CONFIG = { … }`, walked by brace depth. */
-function configKeys() {
-  const text = readText("src/config.ts") ?? "";
-  const start = text.indexOf("export const DEFAULT_CONFIG");
-  if (start === -1) return [];
-  const body = text.slice(start);
-  const keys = [];
-  const names = [""];
-  let depth = 0;
-  let lastKey = null;
-  let i = body.indexOf("{") + 1;
-  while (i > 0 && i < body.length) {
-    const ch = body[i];
-    if (ch === '"' || ch === "'" || ch === "`") {
-      const quote = ch;
-      i += 1;
-      while (i < body.length && body[i] !== quote) i += body[i] === "\\" ? 2 : 1;
-      i += 1;
-      continue;
+/** Every leaf of the default config, as dotted paths. */
+function configLeaves(value, prefix = "", out = []) {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    for (const [key, child] of Object.entries(value)) {
+      configLeaves(child, prefix === "" ? key : `${prefix}.${key}`, out);
     }
-    if (ch === "{") {
-      depth += 1; names[depth] = lastKey ?? ""; lastKey = null; i += 1; continue;
-    }
-    if (ch === "}") {
-      if (depth === 0) break;
-      depth -= 1; lastKey = null; i += 1; continue;
-    }
-    const key = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/.exec(body.slice(i, i + 80));
-    if (key !== null) {
-      lastKey = key[1];
-      const prefix = names[depth] ?? "";
-      keys.push(prefix === "" ? lastKey : `${prefix}.${lastKey}`);
-      i += key[0].length;
-      continue;
-    }
-    i += 1;
+  } else {
+    out.push(prefix);
   }
-  return keys;
+  return out;
 }
 
-const drift = [];
-const configDoc = readText("docs/config.md") ?? "";
-for (const key of configKeys()) {
-  if (!configDoc.includes(key)) drift.push({ file: "docs/config.md", line: 0, rule: "config-key", detail: key });
+const { DEFAULT_CONFIG } = await import("../src/config/defaults.ts");
+const { renderConfigDoc } = await import("../src/config/doc.ts");
+const configSource = srcFiles
+  .filter((rel) => !rel.startsWith("src/config/"))
+  .map((rel) => stripComments(readText(rel) ?? ""))
+  .join("\n");
+
+const ENGINE_SEGMENT = new Set(["google", "duckduckgo", "yandex"]);
+function escapeRe(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+/** `config.pacing[engine]` and `config.engines[id].enabled` are real read paths. */
+function configReadPattern(path) {
+  let pattern = "config";
+  for (const segment of path.split(".")) {
+    pattern += ENGINE_SEGMENT.has(segment)
+      ? `(?:\\.(?:google|duckduckgo|yandex)|\\[\\s*[^\\]]+\\s*\\])`
+      : `\\.${escapeRe(segment)}`;
+  }
+  return new RegExp(`${pattern}(?![A-Za-z0-9_])`);
+}
+
+const configFindings = [];
+const expectedConfigDoc = renderConfigDoc();
+if ((readText("docs/config.md") ?? "") !== expectedConfigDoc) {
+  configFindings.push({
+    file: "docs/config.md", line: 0, rule: "generated",
+    detail: "stale; run node scripts/gen-config-doc.mjs",
+  });
+}
+for (const leaf of configLeaves(DEFAULT_CONFIG)) {
+  if (!configReadPattern(leaf).test(configSource)) {
+    configFindings.push({ file: "src/config/", line: 0, rule: "dead-key", detail: leaf });
+  }
+}
+add("R16", "generated config docs and every leaf read (values, enums, ranges)", configFindings, "docs/config.md, src/");
+
+const drift = [];
 const errorDoc = readText("docs/errors.md") ?? "";
 for (const match of (readText("src/runtime/error-codes.ts") ?? "").matchAll(/\bE_[A-Z_]+\b/g)) {
   if (!errorDoc.includes(match[0])) drift.push({ file: "docs/errors.md", line: 0, rule: "error-code", detail: match[0] });
@@ -366,7 +372,7 @@ for (const rel of toolFiles) {
 for (const tool of tools) {
   if (!readme.includes(`\`${tool}\``)) drift.push({ file: "README.md", line: 0, rule: "tool", detail: tool });
 }
-add("R15", "docs ↔ code drift", drift, "docs/config.md, docs/errors.md, README.md");
+add("R15", "docs ↔ code drift", drift, "docs/errors.md, README.md");
 
 // --------------------------------------------------------------------------- report
 

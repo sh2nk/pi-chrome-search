@@ -18,7 +18,7 @@
  *   `config.engines.<id>.enabled`, the tool-facing answer)
  */
 
-import type { Config } from "../config.ts";
+import type { Config } from "../config/index.ts";
 import { duckduckgoEngine } from "./duckduckgo.ts";
 import { googleEngine } from "./google.ts";
 import { yandexEngine } from "./yandex.ts";

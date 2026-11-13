@@ -32,22 +32,20 @@ import { humanSearch, type HumanSearchResult } from "../cdp/humanize.ts";
 import { pageLockFor } from "../cdp/page-lock.ts";
 import { waitForAi, type AiWaitResult } from "../cdp/ai-wait.ts";
 import type { CdpPage } from "../cdp/types.ts";
-import type { Config } from "../config.ts";
+import type { Config } from "../config/index.ts";
 import { compactSerps } from "../extract/compact.ts";
 import { createGotoResolver } from "../extract/goto.ts";
-import { isHttpUrl, normalizeUrl, parseLink } from "../extract/urls.ts";
+import { parseLink } from "../extract/urls.ts";
 import {
   ENGINE_IDS,
   type AiState,
   type Engine,
   type EngineId,
   type EngineSelection,
-  type Freshness,
   type Query,
   type RawSerp,
   type Wall,
 } from "../engines/types.ts";
-import type { Candidate, Reflex, Route } from "../reflex/types.ts";
 import { serpKey } from "../runtime/cache.ts";
 import type { ErrorCode, FailureDetails, Stage } from "../runtime/error-codes.ts";
 import { isWebSearchError } from "../runtime/error-codes.ts";
@@ -79,9 +77,6 @@ export const webSearchSchema = Type.Object({
     Type.Union([Type.Literal("auto"), engineIdSchema, Type.Array(engineIdSchema, { minItems: 1, maxItems: 3 })]),
   ),
   summary: Type.Optional(Type.Boolean()),
-  freshness: Type.Optional(
-    Type.Union([Type.Literal("d"), Type.Literal("w"), Type.Literal("m"), Type.Literal("y")]),
-  ),
   page: Type.Optional(Type.Integer({ minimum: 1 })),
   format: Type.Optional(Type.Union([Type.Literal("md"), Type.Literal("json")])),
 });
@@ -174,7 +169,7 @@ export interface WebSearchTool {
   description: string;
   parameters: typeof webSearchSchema;
   exposure: "direct";
-  annotations: { readOnlyHint: true; openWorldHint: true; idempotentHint: true };
+  annotations: { readOnlyHint: false; openWorldHint: true; idempotentHint: false };
   /** Search operators the model can use without a tool-level date filter (S3.6). */
   promptGuidelines?: readonly string[];
   execute(
@@ -205,7 +200,7 @@ export const WEB_SEARCH_GUIDELINES: readonly string[] = [
 
 /**
  * Codes a sibling engine can plausibly cure. Everything else (E_PARSE, E_TIMEOUT,
- * E_CANCELLED, E_RATE_LIMITED, E_CONFIG) is a property of the request or the
+ * E_CANCELLED, E_CONFIG) is a property of the request or the
  * session, so fanning out would waste the user's pacing budget and hide the cause.
  */
 const FALLBACK_CODES: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
@@ -216,9 +211,6 @@ const FALLBACK_CODES: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
   "E_CDP_UNAVAILABLE",
   "E_TARGET_LOST",
 ]);
-
-/** SPEC §7.1: yandex gets exactly one retry, after the user has had 3 s to solve a captcha. */
-const WALL_RETRY_MS = 3_000;
 
 /** Every defensive validation failure shares this hint: the fix is in the call, not the file. */
 const INPUT_HINT =
@@ -236,14 +228,8 @@ interface NormalizedInput {
   n: number;
   engines: EngineSelection;
   summary: boolean;
-  freshness?: Freshness;
   page: number;
   format: "md" | "json";
-  /**
-   * Locale suggested by a reflex route. Applied per engine only when the config
-   * did not pin one; absent when the caller has no reflex or the flag is off.
-   */
-  routed?: { lang?: string; region?: string };
 }
 
 type Validation = { ok: true; value: NormalizedInput } | { ok: false; message: string };
@@ -313,14 +299,6 @@ function normalizeInput(raw: unknown, config: Config): Validation {
   }
   const summary = raw.summary !== false;
 
-  if (raw.freshness !== undefined) {
-    const allowed: readonly string[] = ["d", "w", "m", "y"];
-    if (typeof raw.freshness !== "string" || !allowed.includes(raw.freshness)) {
-      return { ok: false, message: `freshness: expected one of d|w|m|y, got ${JSON.stringify(raw.freshness)}` };
-    }
-  }
-  const freshness = raw.freshness as Freshness | undefined;
-
   if (raw.format !== undefined && raw.format !== "md" && raw.format !== "json") {
     return { ok: false, message: `format: expected "md" or "json", got ${JSON.stringify(raw.format)}` };
   }
@@ -336,7 +314,7 @@ function normalizeInput(raw: unknown, config: Config): Validation {
 
   return {
     ok: true,
-    value: { q: text, n, engines, summary, ...(freshness === undefined ? {} : { freshness }), page, format },
+    value: { q: text, n, engines, summary, page, format },
   };
 }
 
@@ -364,33 +342,28 @@ function resolveLocale(value: string): string | undefined {
  * DuckDuckGo would ask for a page the adapter cannot build (and would key page 2
  * separately while returning page 1).
  *
- * A routed locale (P5-D) is a *suggestion*: `config.engines.*` is the user's own
- * pinning, so a route may only fill a locale the config left as `auto`. A config
- * value always wins — a model must not silently change the user's UI language.
+ * `config.engines.*` is the user's own pinning; a value left as `auto` omits the
+ * parameter rather than inventing one.
  */
 function buildQuery(engine: EngineId, input: NormalizedInput, config: Config): Query {
   const query: Query = { text: input.q, n: input.n, summary: input.summary };
-  if (input.freshness !== undefined) query.freshness = input.freshness;
   if (engine !== "duckduckgo") query.page = input.page;
-
-  const routedLang = resolveLocale(input.routed?.lang ?? "");
-  const routedRegion = resolveLocale(input.routed?.region ?? "");
 
   switch (engine) {
     case "google": {
-      const lang = resolveLocale(config.engines.google.lang) ?? routedLang;
-      const region = resolveLocale(config.engines.google.gl) ?? routedRegion;
+      const lang = resolveLocale(config.engines.google.lang);
+      const region = resolveLocale(config.engines.google.gl);
       if (lang !== undefined) query.lang = lang;
       if (region !== undefined) query.region = region;
       break;
     }
     case "duckduckgo": {
-      const region = resolveLocale(config.engines.duckduckgo.kl) ?? routedRegion;
+      const region = resolveLocale(config.engines.duckduckgo.kl);
       if (region !== undefined) query.region = region;
       break;
     }
     case "yandex": {
-      const region = resolveLocale(config.engines.yandex.lr) ?? routedRegion;
+      const region = resolveLocale(config.engines.yandex.lr);
       if (region !== undefined) query.region = region;
       break;
     }
@@ -688,7 +661,7 @@ function panelCounters(deps: ToolDeps): PanelCounter[] {
   for (const id of ENGINE_IDS) {
     try {
       const stats = deps.limiter.stats(id);
-      counters.push({ engine: id, today: stats.today, cap: stats.dailyCap });
+      counters.push({ engine: id, today: stats.today });
     } catch {
       // Observability only: the panel shows what it can.
     }
@@ -752,6 +725,7 @@ async function resolveGotoResults(
   const resolver = createGotoResolver({
     cache: deps.cache,
     clock: deps.clock,
+    ttlMs: deps.config.cache.gotoTtlMs,
     ...(deps.fetchImpl === undefined ? {} : { fetchImpl: deps.fetchImpl }),
     cookieSource: (urls) => page.cookiesFor([...urls]),
     navigateFallback: async (wrapperUrl) => {
@@ -806,234 +780,6 @@ async function notifySearching(update: UpdateFn | undefined, engine: EngineId): 
     await update({ content: [{ type: "text", text: `searching ${engine}…` }], details: {} });
   } catch {
     // A UI callback must never abort a search that is already pacing itself.
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Reflex hooks (P5-D)
-// ---------------------------------------------------------------------------
-
-/**
- * SPEC §9.3 triage trigger: `multi-engine-or-n>10`. A single-engine `n=5` search
- * must not pay classifier latency; `n` above the schema ceiling is unreachable
- * through `execute` today but the predicate stays honest for codemode callers
- * and for `reflex.triage.when` staying a config expression.
- */
-export const TRIAGE_N_THRESHOLD = 10;
-
-/** The trigger expressions `reflex.triage.when` accepts. */
-export type TriageWhen = "multi-engine-or-n>10" | "multi-engine" | "n>10" | "always" | "never";
-
-const TRIAGE_WHEN_VALUES: ReadonlySet<string> = new Set([
-  "multi-engine-or-n>10",
-  "multi-engine",
-  "n>10",
-  "always",
-  "never",
-]);
-
-/**
- * `reflex.triage.when` is a config expression, not decoration: a user who sets
- * `"never"` must not pay classifier latency, and `"always"` must not silently
- * fall back to the default. An unknown string keeps the documented default.
- */
-export function triageWanted(when: string, multiEngine: boolean, n: number): boolean {
-  const mode = TRIAGE_WHEN_VALUES.has(when) ? (when as TriageWhen) : "multi-engine-or-n>10";
-  switch (mode) {
-    case "always":
-      return true;
-    case "never":
-      return false;
-    case "multi-engine":
-      return multiEngine;
-    case "n>10":
-      return n > TRIAGE_N_THRESHOLD;
-    default:
-      return multiEngine || n > TRIAGE_N_THRESHOLD;
-  }
-}
-
-/**
- * A swallowed reflex error must still be visible; the search itself is unaffected.
- * `kind: "reflex_error"` keeps these rows out of the decision schema (a decision
- * row must carry verdict/confidence/model/usage/costUsd, which a throw has none of).
- */
-function logReflexFailure(deps: ToolDeps, decision: string, error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
-  try {
-    void Promise.resolve(
-      deps.log.write({ kind: "reflex_error", decision, message: message.slice(0, 200) }),
-    ).catch(() => undefined);
-  } catch {
-    // Observability must never fail the search that triggered it.
-  }
-}
-
-/**
- * `Yandex` is last by policy (D10) because a captcha wall costs the user a manual
- * solve. A route may list it anywhere; the tool caps the damage here rather than
- * trusting the model with the ordering rule.
- */
-function yandexLast(order: readonly EngineId[]): EngineId[] {
-  const rest = order.filter((id) => id !== "yandex");
-  return order.includes("yandex") ? [...rest, "yandex"] : rest;
-}
-
-function clampN(value: number, config: Config): number {
-  const requested = Number.isFinite(value) ? Math.floor(value) : config.search.n;
-  return Math.min(Math.max(1, requested), effectiveMaxN(config));
-}
-
-interface RoutePlan {
-  input: NormalizedInput;
-  order: EngineId[];
-  /**
-   * True when the route asked for several engines, i.e. a coverage set the tool
-   * merges (explicit-list semantics). A single-engine route keeps D10 semantics:
-   * try it, fall back on failure, stop at the first success.
-   */
-  merge: boolean;
-}
-
-/**
- * Apply a routed preference to the request. Only `"auto"` is routed (the caller
- * who named engines already decided), and only fields the caller left unset are
- * filled: `n: 3` from the agent beats `n: 5` from a classifier.
- */
-function planRoute(route: Route, input: NormalizedInput, raw: WebSearchInput, deps: ToolDeps): RoutePlan | undefined {
-  const usable = deps.engines.select(yandexLast(route.engines));
-  if (usable.length === 0) return undefined;
-
-  const next: NormalizedInput = { ...input };
-  const routed: { lang?: string; region?: string } = {};
-  if (typeof route.lang === "string" && route.lang !== "") routed.lang = route.lang;
-  if (typeof route.region === "string" && route.region !== "") routed.region = route.region;
-  if (routed.lang !== undefined || routed.region !== undefined) next.routed = routed;
-
-  if (route.freshness !== undefined && raw.freshness === undefined) next.freshness = route.freshness;
-  if (typeof route.n === "number" && raw.n === undefined) next.n = clampN(route.n, deps.config);
-  if (typeof route.summary === "boolean" && raw.summary === undefined) next.summary = route.summary;
-
-  // A single-engine route is a *preference*, not a restriction: keep the other
-  // enabled engines behind it so one wall cannot turn a routed search into a
-  // failure. A multi-engine route is a coverage set and is used as given.
-  let order = usable;
-  if (usable.length === 1) {
-    const primary = usable[0]!;
-    order = [primary, ...deps.engines.select("auto").filter((id) => id !== primary)];
-  }
-
-  return { input: next, order, merge: usable.length > 1 };
-}
-
-/**
- * Route + plan in one guarded step. A reflex can only ever *suggest*: any throw,
- * malformed route or unusable engine list leaves the canonical D10 order intact.
- */
-async function routedPlan(
-  reflex: Reflex,
-  input: NormalizedInput,
-  raw: WebSearchInput,
-  deps: ToolDeps,
-): Promise<RoutePlan | undefined> {
-  try {
-    const route = await reflex.route(input.q);
-    // A route crosses a model boundary: anything but a usable engine list means
-    // "no opinion", and the canonical order applies.
-    if (typeof route !== "object" || route === null || !Array.isArray(route.engines)) return undefined;
-    return planRoute(route, input, raw, deps);
-  } catch (error) {
-    logReflexFailure(deps, "route", error);
-    return undefined;
-  }
-}
-
-/**
- * The merged candidate list, mirroring `compact.ts`'s merge key (normalised URL,
- * ads and non-http hrefs dropped) so triage indices address what will actually
- * be shown. First occurrence wins, exactly like the compactor.
- */
-function mergedCandidates(serps: readonly RawSerp[]): Candidate[] {
-  const seen = new Set<string>();
-  const items: Candidate[] = [];
-  for (const serp of serps) {
-    for (const raw of serp.results) {
-      if (raw.isAd === true) continue;
-      const href = typeof raw.url === "string" ? raw.url.trim() : "";
-      if (!href || !isHttpUrl(href)) continue;
-      const normalized = normalizeUrl(href);
-      if (normalized === null || seen.has(normalized)) continue;
-      seen.add(normalized);
-      items.push({
-        title: typeof raw.title === "string" ? raw.title : "",
-        url: normalized,
-        snippet: typeof raw.snippet === "string" ? raw.snippet : "",
-        engine: raw.engine ?? serp.engine,
-      });
-    }
-  }
-  return items;
-}
-
-/** URLs selected by triage; null when the verdict cannot be applied safely. */
-function keptUrls(candidates: readonly Candidate[], keep: unknown): Set<string> | null {
-  if (!Array.isArray(keep)) return null;
-  const urls = new Set<string>();
-  for (const index of keep) {
-    if (typeof index !== "number" || !Number.isInteger(index)) continue;
-    const candidate = candidates[index];
-    if (candidate === undefined) continue;
-    urls.add(candidate.url);
-  }
-  return urls.size === 0 ? null : urls;
-}
-
-/**
- * Keep only the selected candidates. Engine order inside a SERP is preserved:
- * `compact.ts` owns display order (D10 merge order), and a model must not
- * reshuffle the user's engines. Dropping the unselected tail is the whole
- * token-saving point.
- */
-function triagedSerps(serps: readonly RawSerp[], urls: ReadonlySet<string>): RawSerp[] {
-  const out: RawSerp[] = [];
-  for (const serp of serps) {
-    const results = serp.results.filter((item) => {
-      const href = typeof item.url === "string" ? item.url.trim() : "";
-      if (!href) return false;
-      const normalized = normalizeUrl(href);
-      return normalized !== null && urls.has(normalized);
-    });
-    // A SERP that lost every result still carries the AI summary; keep it for
-    // that, but do not claim an engine that contributes nothing else.
-    if (results.length === 0 && serp.ai === undefined) continue;
-    out.push({ ...serp, results });
-  }
-  return out;
-}
-
-/**
- * Triage is advisory but applied: an exception, an unusable verdict or an empty
- * keep list returns the unrefined SERPs. Recall loss is the expensive mistake,
- * so the input is never replaced with nothing.
- */
-async function refineSerps(
-  reflex: Reflex,
-  query: string,
-  serps: readonly RawSerp[],
-  deps: ToolDeps,
-): Promise<readonly RawSerp[]> {
-  try {
-    const candidates = mergedCandidates(serps);
-    if (candidates.length === 0) return serps;
-    const triage = await reflex.triage(query, candidates);
-    const urls = keptUrls(candidates, triage?.keep);
-    if (urls === null) return serps;
-    const filtered = triagedSerps(serps, urls);
-    if (filtered.length === 0 || filtered.every((serp) => serp.results.length === 0)) return serps;
-    return filtered;
-  } catch (error) {
-    logReflexFailure(deps, "triage", error);
-    return serps;
   }
 }
 
@@ -1136,7 +882,7 @@ async function runEngineLive(
   };
 
   /** One artifact for the wall the caller actually sees, then surface and fail. */
-  const reportWall = async (wall: Wall, retried: boolean): Promise<never> => {
+  const reportWall = async (wall: Wall): Promise<never> => {
     const artifact = await saveFailureArtifact(deps, {
       code: "E_WALL",
       stage: "navigate",
@@ -1144,10 +890,7 @@ async function runEngineLive(
       url: page.url(),
       query: query.text,
       page,
-      extra: {
-        wall: { kind: wall.kind, url: wall.url, markers: [...wall.markers] },
-        ...(retried ? { retried: true } : {}),
-      },
+      extra: { wall: { kind: wall.kind, url: wall.url, markers: [...wall.markers] } },
     });
     await surface(page);
     throw wallFailure(engine.id, wall, artifact);
@@ -1195,7 +938,7 @@ async function runEngineLive(
     } catch (error) {
       const failure = asFailure(error, "navigate", engine.id, signal);
       const wall = await wallOnNavigationFailure(failure.details);
-      if (wall !== null) await reportWall(wall, false);
+      if (wall !== null) await reportWall(wall);
       throw failure;
     }
   } else {
@@ -1204,7 +947,7 @@ async function runEngineLive(
     } catch (error) {
       const failure = asFailure(error, "navigate", engine.id, signal);
       const wall = await wallOnNavigationFailure(failure.details);
-      if (wall !== null) await reportWall(wall, false);
+      if (wall !== null) await reportWall(wall);
       throw failure;
     }
   }
@@ -1216,49 +959,9 @@ async function runEngineLive(
     throw asFailure(error, "extract", engine.id, signal);
   }
 
-  if (wall !== null) {
-    let retried = false;
-
-    if (engine.retryOnWall === true && deps.config.captcha.retryYandexOnce) {
-      // The user solves the captcha in the visible window; we only wait, never click.
-      await surface(page);
-      try {
-        await deps.clock.sleep(WALL_RETRY_MS, signal);
-      } catch (error) {
-        throw asFailure(error, "navigate", engine.id, signal);
-      }
-      await navigateAndSettle(page, engine, query, signal);
-
-      try {
-        wall = await engine.detectWall(page);
-      } catch (error) {
-        throw asFailure(error, "extract", engine.id, signal);
-      }
-      retried = true;
-
-      // `captcha.waitMs` is the configurable extra grace after the fixed retry:
-      // a human may need longer than 3 s. One more look, no navigation, no clicks.
-      if (wall !== null && deps.config.captcha.waitMs > 0) {
-        await surface(page);
-        try {
-          await deps.clock.sleep(deps.config.captcha.waitMs, signal);
-        } catch (error) {
-          throw asFailure(error, "navigate", engine.id, signal);
-        }
-        try {
-          wall = await engine.detectWall(page);
-        } catch (error) {
-          throw asFailure(error, "extract", engine.id, signal);
-        }
-      }
-    }
-
-    if (wall !== null) {
-      // Capturing before the retry would leave an orphan directory when the
-      // retry clears it, so the snapshot happens once, here.
-      await reportWall(wall, retried);
-    }
-  }
+  // ADR-0001 D5: a wall is reported at once. No retry, no timer, no automatic
+  // re-navigation; the human solves it and retries.
+  if (wall !== null) await reportWall(wall);
 
   // PLAN-v2 P8-A: wait for the native summary *before* extracting. Bounded by
   // `search.aiWaitMs`, and skipped entirely by `summary:false` and by adapters
@@ -1410,37 +1113,17 @@ export function createWebSearchTool(
     if (!validation.ok) {
       return failureResult(fail("E_CONFIG", "config", { hint: INPUT_HINT, message: validation.message }));
     }
-    let input = validation.value;
+    const input = validation.value;
     if (signal?.aborted === true) {
       return failureResult(fail("E_CANCELLED", "navigate", { message: "aborted by the caller" }));
     }
 
-    // One user search = one budget. The policy also resets on a query change,
-    // but an explicit reset keeps two identical searches independent.
-    const reflex = deps.reflex;
-    try {
-      reflex?.beginSearch?.();
-    } catch {
-      // Telemetry plumbing must never turn a good search into a failure.
-    }
-    const reflexOn = deps.config.reflex.enabled && reflex !== undefined;
-
     let order: EngineId[];
-    let merge = Array.isArray(input.engines);
+    const merge = Array.isArray(input.engines);
     try {
       order = deps.engines.select(input.engines);
     } catch (error) {
       return failureResult(asFailure(error, "resolve"));
-    }
-    if (reflexOn && reflex !== undefined && input.engines === "auto") {
-      // `auto` is the only routable mode: a caller who named engines already
-      // decided, and their order is the contract (D9).
-      const plan = await routedPlan(reflex, input, params, deps);
-      if (plan !== undefined) {
-        input = plan.input;
-        order = plan.order;
-        merge = plan.merge;
-      }
     }
     if (order.length === 0) {
       return failureResult(
@@ -1483,7 +1166,6 @@ export function createWebSearchTool(
         text: query.text,
         n: query.n,
         ...(query.page === undefined ? {} : { page: query.page }),
-        ...(query.freshness === undefined ? {} : { freshness: query.freshness }),
         ...(query.lang === undefined ? {} : { lang: query.lang }),
         ...(query.region === undefined ? {} : { region: query.region }),
         summary: query.summary,
@@ -1555,20 +1237,9 @@ export function createWebSearchTool(
       return failureResult(firstFailure ?? fail("E_EMPTY", "extract"));
     }
 
-    // Triage (SPEC §9.3) only for a merged or wide request: a plain single-engine
-    // search must not pay classifier latency. A thrown reflex is logged and the
-    // unrefined SERPs are returned, so the model can never break a working search.
-    const multiEngine = merge && order.length >= 2;
-    const refined =
-      reflexOn &&
-      reflex !== undefined &&
-      triageWanted(deps.config.reflex.triage.when, multiEngine, input.n)
-        ? await refineSerps(reflex, input.q, serps, deps)
-        : serps;
-
     const elapsedMs = deps.clock.now() - startedAt;
     const multiEngineSearch = merge && order.length > 1;
-    const compact = compactSerps(refined, {
+    const compact = compactSerps(serps, {
       n: input.n,
       summaryMaxChars: deps.config.search.summaryMaxChars,
       snippetMaxChars: deps.config.search.snippetMaxChars,
@@ -1590,7 +1261,7 @@ export function createWebSearchTool(
         ? serializeJsonWithin(compact.data, deps.config.search.outputMaxChars)
         : null;
     const text = json === null ? compact.text : json.text;
-    const contributed = [...new Set(refined.map((serp) => serp.engine))];
+    const contributed = [...new Set(serps.map((serp) => serp.engine))];
     const rendered = json === null ? compact.items.length : json.results;
     const truncated = json === null ? compact.truncated : json.truncated;
     const shownAi = json === null ? compact.ai !== undefined : json.ai;
@@ -1604,8 +1275,8 @@ export function createWebSearchTool(
           ? compact.aiState
           : "none";
     const aiChars = json === null ? compact.aiChars : json.aiChars;
-    const aiWaitMs = refined.reduce((sum, serp) => sum + (serp.timings.aiWaitMs ?? 0), 0);
-    const settleMs = refined.reduce((sum, serp) => sum + (serp.timings.settleMs ?? 0), 0);
+    const aiWaitMs = serps.reduce((sum, serp) => sum + (serp.timings.aiWaitMs ?? 0), 0);
+    const settleMs = serps.reduce((sum, serp) => sum + (serp.timings.settleMs ?? 0), 0);
     const accounting =
       json === null ? compact.data.perEngine : json.perEngine;
     const unresolved =
@@ -1655,7 +1326,7 @@ export function createWebSearchTool(
     description: WEB_SEARCH_DESCRIPTION,
     parameters: webSearchSchema,
     exposure: "direct",
-    annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+    annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: false },
     promptGuidelines: WEB_SEARCH_GUIDELINES,
     execute,
   };

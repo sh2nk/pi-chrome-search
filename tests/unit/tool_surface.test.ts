@@ -21,7 +21,7 @@ import { test } from "node:test";
 
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
-import { type Config, DEFAULT_CONFIG } from "../../src/config.ts";
+import { type Config, DEFAULT_CONFIG } from "../../src/config/index.ts";
 import { DEFAULT_ENGINES, createDefaultRegistry, createEngineRegistry, describeRegistry, registerAdapter } from "../../src/engines/index.ts";
 import { ENGINE_IDS, type Engine, type EngineId } from "../../src/engines/types.ts";
 import { ensureToolReachability, default as register } from "../../src/index.ts";
@@ -209,17 +209,15 @@ test("README's tool table is generated from the same definitions", () => {
 // Annotations and callable shape
 // ---------------------------------------------------------------------------
 
-test("only genuinely inert tools are declared read-only", () => {
-  for (const name of ["web_search", "web_read", "image_search"]) {
-    const tool = TOOLS.find((candidate) => candidate.name === name);
-    assert.ok(tool !== undefined, `${name} must be registered`);
-    assert.equal(tool.annotations.readOnlyHint, true, `${name} must be read-only`);
+test("S9.6: annotations describe the browser side effects", () => {
+  // Every tool navigates the user's browser (and the doctor may write files), so
+  // none of them is read-only. None is observably free on a repeat: there is no
+  // cache hit that makes a second call cost nothing.
+  for (const tool of TOOLS) {
+    assert.equal(tool.annotations.readOnlyHint, false, `${tool.name} navigates the browser`);
+    assert.equal(tool.annotations.idempotentHint, false, `${tool.name} is not free on repeat`);
+    assert.equal(tool.annotations.openWorldHint, true, `${tool.name} talks to the live browser`);
   }
-
-  const doctor = TOOLS.find((tool) => tool.name === "web_doctor");
-  assert.ok(doctor !== undefined, "web_doctor must be registered");
-  assert.equal(doctor.annotations.readOnlyHint, false, "web_doctor's fix mutates: not read-only");
-  assert.equal(doctor.annotations.openWorldHint, true, "web_doctor talks to the live browser");
 });
 
 test("every tool has a callable execute and a parameter schema", () => {

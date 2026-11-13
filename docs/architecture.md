@@ -6,7 +6,7 @@ browser, no automation profile, no paid search API.
 ```
 pi process
 └── src/index.ts                     registers 5 tools + /web-doctor + /web-focus
-    ├── config.ts                    loadConfig() → ~/.pi/agent/web-search.json
+    ├── config/                     defaults, schema, env overrides, load → web-search.json
     ├── tools/
     │   ├── web_search.ts    direct   SERP → compact Markdown/JSON (≤2500 chars)
     │   ├── web_read.ts      direct   page → Markdown (≤6000 chars, offset)
@@ -38,8 +38,8 @@ pi process
 
 ## Decisions that must not be re-litigated
 
-- **Attach only.** `mode:"launch"` exists for tests; production never starts a browser. Launching
-  with a fresh profile is exactly what gets the user's account captcha'd.
+- **Attach only.** There is no launch mode. Starting a browser with a fresh profile is exactly what
+  gets the user's account captcha'd.
 - **One owned window, one work tab per engine.** Closing the last tab would close the window, so the
   anchor tab exists; tabs we did not open are never closed.
 - **No headless, no fingerprint work.** No UA/locale/timezone override, no `navigator.*` patching, no
@@ -50,12 +50,11 @@ pi process
   marker with a deadline.
 - **AI states are three-valued.** `answer` (≥200 chars of prose), `lead` (block present, no answer),
   `none`. A query echo is never rendered as an answer.
-- **Reflex triage stays off** (`reflex.enabled:false`): the benchmark showed no honest token win. The
-  page-quality gate (`reflex.pageGate:true`) ships independently: one batched classifier call in
-  `web_research` drops/ranks sources at ~$0.00008 per decision; `web_read` uses the rules floor only.
-  A metric that improves by returning less is not a metric.
-- **Rates are human.** Per-engine spacing with jitter, daily soft caps, one search at a time per
-  engine; caps surface as `E_RATE_LIMITED`, never as silent throttling.
+- **No quality gate.** No classifier, no rules gate, no page-quality score: the model chooses what
+  to read and the tool reports what it got (ADR-0001 D1). The SSRF guard is a security boundary,
+  not a quality opinion, and stays.
+- **Rates are human.** Per-engine spacing with jitter and one search at a time per engine; there are
+  no daily caps and no persisted rate state (ADR-0001 D8).
 
 ## Read pipeline (`web_read`)
 

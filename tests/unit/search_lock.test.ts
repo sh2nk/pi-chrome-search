@@ -22,7 +22,7 @@ import test from "node:test";
 
 import { humanSearch } from "../../src/cdp/humanize.ts";
 import type { CdpPage } from "../../src/cdp/types.ts";
-import { DEFAULT_CONFIG, type Config } from "../../src/config.ts";
+import { DEFAULT_CONFIG, type Config } from "../../src/config/index.ts";
 import { createEngineRegistry } from "../../src/engines/index.ts";
 import type { Engine, RawSerp } from "../../src/engines/types.ts";
 import type { Cache, Limiter, Logger, Artifacts } from "../../src/runtime/types.ts";
@@ -98,11 +98,10 @@ function testConfig(): Config {
   const config: Config = structuredClone(DEFAULT_CONFIG);
   config.humanize = "always";
   config.window.focus = "never";
-  config.reflex.enabled = false;
   config.cache.serpTtlMs = 0;
-  config.engines.google = { ...config.engines.google, enabled: true, dailyCap: 0 };
-  config.engines.duckduckgo = { ...config.engines.duckduckgo, enabled: false, dailyCap: 0 };
-  config.engines.yandex = { ...config.engines.yandex, enabled: false, dailyCap: 0 };
+  config.engines.google = { ...config.engines.google, enabled: true };
+  config.engines.duckduckgo = { ...config.engines.duckduckgo, enabled: false };
+  config.engines.yandex = { ...config.engines.yandex, enabled: false };
   for (const id of ["google", "duckduckgo", "yandex"] as const) config.pacing[id] = [0, 0];
   return config;
 }
@@ -111,7 +110,7 @@ function testConfig(): Config {
 function depsFor(page: CdpPage, config: Config, clock: FakeClock): ToolDeps {
   const limiter: Limiter = {
     async acquire() {},
-    stats: (engine) => ({ engine, lastAt: null, today: 0, dailyCap: 0 }),
+    stats: (engine) => ({ engine, lastAt: null, today: 0 }),
   };
   const log: Logger = { async write() {}, path: () => "/dev/null" };
   const artifacts: Artifacts = {

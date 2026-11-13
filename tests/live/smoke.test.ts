@@ -19,7 +19,7 @@ import { test } from "node:test";
 
 import { createConnector } from "../../src/cdp/browser.ts";
 import { discoverEndpoint } from "../../src/cdp/discovery.ts";
-import { loadConfig } from "../../src/config.ts";
+import { loadConfig } from "../../src/config/index.ts";
 import { createDefaultRegistry } from "../../src/engines/index.ts";
 import type { EngineId } from "../../src/engines/types.ts";
 import { createArtifacts } from "../../src/runtime/artifacts.ts";
@@ -71,7 +71,7 @@ async function runOnce(engine: EngineId, q: string): Promise<SmokeResult> {
     engines: createDefaultRegistry(config),
     cdp: connector,
     cache: createCache({ maxEntries: config.cache.maxEntries, clock }),
-    limiter: createLimiter({ config, clock, statePath: join(stateDir, "state.json") }),
+    limiter: createLimiter({ config, clock }),
     artifacts: createArtifacts({ config, clock }),
     log,
     clock,

@@ -4,7 +4,7 @@
  * The bootstrap tab used to be `about:blank`: a blank page in the user's face
  * that told them nothing. It is now a local `assets/anchor.html` document (no
  * network, no cookies, our own CSS) painted with the current engine, query,
- * stage, pace, daily counters, last error and session id. Everything the panel
+ * stage, pace, session counters, last error and session id. Everything the panel
  * shows is work this process is already doing — nothing is read from the
  * profile and nothing is sent anywhere.
  *
@@ -27,7 +27,7 @@
 
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import type { PacingWindow } from "../config.ts";
+import type { PacingWindow } from "../config/index.ts";
 import type { EngineId } from "../engines/types.ts";
 import type { Clock } from "./types.ts";
 
@@ -57,7 +57,6 @@ export type PanelStage =
 export interface PanelCounter {
   engine: EngineId;
   today: number;
-  cap: number;
 }
 
 export interface PanelError {
@@ -143,7 +142,6 @@ function cleanCounters(value: readonly PanelCounter[] | undefined): PanelCounter
     counters.push({
       engine: entry.engine,
       today: cleanNumber(entry.today),
-      cap: cleanNumber(entry.cap),
     });
   }
   return counters;

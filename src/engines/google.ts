@@ -39,7 +39,6 @@ import type {
   Engine,
   EngineId,
   EngineInteraction,
-  Freshness,
   Query,
   RawSerp,
   SerpItem,
@@ -103,7 +102,6 @@ const FIRST_PAGE = 1;
 
 /** `hl`/`gl` accept a BCP-47-ish code; anything else (including "auto") is dropped. */
 const LANGUAGE_CODE = /^[a-z]{2,3}(?:-[a-z0-9]{1,8})*$/i;
-const FRESHNESS_VALUES: readonly Freshness[] = ["d", "w", "m", "y"];
 
 // ---------------------------------------------------------------------------
 // Wall markers (exact fragments, reported verbatim in `Wall.markers`)
@@ -195,10 +193,6 @@ function pageNumber(value: number | undefined): number {
   return Math.max(FIRST_PAGE, Math.floor(value));
 }
 
-function freshnessOf(value: Freshness | undefined): Freshness | undefined {
-  return value !== undefined && FRESHNESS_VALUES.includes(value) ? value : undefined;
-}
-
 /**
  * Pure and deterministic: the same `Query` always yields the same string (no
  * clock, no config, no random experiment bucket). Parameter order is fixed by
@@ -215,9 +209,6 @@ function buildSearchUrl(q: Query): string {
 
   const page = pageNumber(q.page);
   if (page > FIRST_PAGE) params.set("start", String(RESULTS_PER_PAGE * (page - FIRST_PAGE)));
-
-  const freshness = freshnessOf(q.freshness);
-  if (freshness !== undefined) params.set("tbs", `qdr:${freshness}`);
 
   return `${SEARCH_URL}?${params.toString()}`;
 }
@@ -731,7 +722,7 @@ export interface WallEvidence {
   /** `a h3` anchors: a normal SERP has them, a wall page has none. */
   organics: number;
   /** Captcha containers that matched, by selector (diagnostics, not prose). */
-  captcha: string[];
+  captchaNodes: string[];
   /** Consent containers that matched, by selector. */
   consent: string[];
 }
@@ -752,15 +743,15 @@ export interface WallEvidence {
 export function wallEvidenceFromDocument(doc: Document): WallEvidence {
   const CAPTCHA_SELECTORS = ["#captcha-form", ".g-recaptcha", "#recaptcha"];
   const CONSENT_SELECTORS = ['form[action*="consent.google.com"]'];
-  const captcha: string[] = [];
+  const captchaNodes: string[] = [];
   const consent: string[] = [];
   for (const selector of CAPTCHA_SELECTORS) {
-    if (doc.querySelector(selector) !== null) captcha.push(selector);
+    if (doc.querySelector(selector) !== null) captchaNodes.push(selector);
   }
   for (const selector of CONSENT_SELECTORS) {
     if (doc.querySelector(selector) !== null) consent.push(selector);
   }
-  return { organics: doc.querySelectorAll("a h3").length, captcha, consent };
+  return { organics: doc.querySelectorAll("a h3").length, captchaNodes, consent };
 }
 
 // ---------------------------------------------------------------------------
@@ -853,7 +844,7 @@ function detectWallFromPage(url: string, text: string, evidence: WallEvidence | 
   const haystack = text.toLowerCase();
   const organics = evidence === null ? null : evidence.organics;
   const emptySerp = organics === 0;
-  const captchaNodes = evidence === null ? [] : evidence.captcha;
+  const captchaNodes = evidence === null ? [] : evidence.captchaNodes;
   const consentNodes = evidence === null ? [] : evidence.consent;
 
   const sorryUrl = path.indexOf(SORRY_URL_MARKER) === 0;
@@ -898,10 +889,10 @@ function asWallEvidence(value: unknown): WallEvidence | null {
     if (!Array.isArray(input)) return null;
     return input.filter((entry): entry is string => typeof entry === "string");
   };
-  const captcha = selectorList(value.captcha);
+  const captchaNodes = selectorList(value.captchaNodes);
   const consent = selectorList(value.consent);
-  if (captcha === null || consent === null) return null;
-  return { organics: Math.max(0, Math.floor(organics)), captcha, consent };
+  if (captchaNodes === null || consent === null) return null;
+  return { organics: Math.max(0, Math.floor(organics)), captchaNodes, consent };
 }
 
 async function detectGoogleWall(page: CdpPage): Promise<Wall | null> {
