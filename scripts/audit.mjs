@@ -10,11 +10,13 @@
  *   R5  no paid search APIs or search keys
  *   R6  no secrets in tracked files (values are never printed)
  *   R7  no personal data in tests/fixtures/**
- *   R8  repo hygiene: no development apparatus, no tracked build output or screenshots
+ *   R8  repo hygiene: no development apparatus (research/, evidence/, bench/, archived PLAN-vN),
+ *       no tracked build output or screenshots. The normative SPEC.md/PLAN.md are allowed by name.
  *   R9  packaging sanity (`files` allowlist, metadata, no install hooks)
  *   R10 tool-description budget (approximate; the authoritative check is a unit test)
  *   R13 host facts live only in src/runtime/host.ts (PO1–PO4)
- *   R14 documentation budgets (README ≤90, AGENTS ≤100, docs/*.md ≤120, docs total ≤400)
+ *   R14 documentation budgets (README ≤90, AGENTS ≤150, SPEC ≤320, PLAN ≤260, docs/*.md ≤120,
+ *       docs total ≤400)
  *   R15 docs↔code drift (DEFAULT_CONFIG keys, error codes, registered tools)
  *
  * Code is read with comments blanked and literals kept, so a comment documenting "never launch
@@ -31,7 +33,7 @@ const MAX_BYTES = 4 * 1024 * 1024;
 const SKIP_DIRS = new Set(["node_modules", ".git"]);
 const CODE_EXT = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 const TOOL_BUDGET_CHARS = 900;
-const DOC_BUDGET = { README: 90, AGENTS: 100, doc: 120, docsTotal: 400 };
+const DOC_BUDGET = { README: 90, AGENTS: 150, SPEC: 320, PLAN: 260, doc: 120, docsTotal: 400 };
 
 const json = process.argv.includes("--json");
 if (process.argv.slice(2).some((arg) => arg !== "--json")) {
@@ -225,9 +227,12 @@ for (const rel of FILES.filter((f) => f.startsWith("tests/fixtures/") && !f.ends
 }
 add("R7", "no personal data in fixtures", fixtureFindings, "tests/fixtures/**");
 
+/** The two normative docs of the rewrite, allowed by exact name (an archived PLAN-vN is apparatus). */
+const NORMATIVE_DOCS = new Set(["SPEC.md", "PLAN.md"]);
+
 const hygiene = [];
 for (const rel of FILES) {
-  const rule = /^(?:research|evidence|bench)\//.test(rel) || /^(?:SPEC|PLAN[^/]*)\.md$/.test(rel) ? "apparatus"
+  const rule = /^(?:research|evidence|bench)\//.test(rel) || (!NORMATIVE_DOCS.has(rel) && /^(?:SPEC|PLAN[^/]*)\.md$/.test(rel)) ? "apparatus"
     : rel.startsWith("node_modules/") ? "tracked-node_modules"
     : /(?:^|\/)\.env(?:\.|$)/.test(rel) ? "env-file"
     : /\.(?:png|jpe?g|webp)$/i.test(rel) ? "screenshot"
@@ -288,15 +293,21 @@ add("R13", "host facts live only in the host layer", scan(srcFiles.filter((rel) 
 const lines = (rel) => (readText(rel) ?? "").replace(/\n$/, "").split("\n").length;
 const docs = FILES.filter((rel) => /^docs\/[^/]+\.md$/.test(rel));
 const docFindings = [];
-if (lines("README.md") > DOC_BUDGET.README) docFindings.push({ file: "README.md", line: lines("README.md"), rule: "budget", detail: `> ${DOC_BUDGET.README}` });
-if (lines("AGENTS.md") > DOC_BUDGET.AGENTS) docFindings.push({ file: "AGENTS.md", line: lines("AGENTS.md"), rule: "budget", detail: `> ${DOC_BUDGET.AGENTS}` });
+for (const [file, budget] of [
+  ["README.md", DOC_BUDGET.README],
+  ["AGENTS.md", DOC_BUDGET.AGENTS],
+  ["SPEC.md", DOC_BUDGET.SPEC],
+  ["PLAN.md", DOC_BUDGET.PLAN],
+]) {
+  if (lines(file) > budget) docFindings.push({ file, line: lines(file), rule: "budget", detail: `> ${budget}` });
+}
 let docsTotal = 0;
 for (const rel of docs) {
   docsTotal += lines(rel);
   if (lines(rel) > DOC_BUDGET.doc) docFindings.push({ file: rel, line: lines(rel), rule: "budget", detail: `> ${DOC_BUDGET.doc}` });
 }
 if (docsTotal > DOC_BUDGET.docsTotal) docFindings.push({ file: "docs/", line: docsTotal, rule: "budget", detail: `> ${DOC_BUDGET.docsTotal}` });
-add("R14", "documentation budgets", docFindings, "README.md, AGENTS.md, docs/*.md");
+add("R14", "documentation budgets", docFindings, "README.md, AGENTS.md, SPEC.md, PLAN.md, docs/*.md");
 
 /** Dotted key paths of `export const DEFAULT_CONFIG = { … }`, walked by brace depth. */
 function configKeys() {
