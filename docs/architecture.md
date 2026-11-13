@@ -14,8 +14,10 @@ pi process
     │   ├── web_research.ts  deferred search→read→claims loop
     │   └── web_doctor.ts    deferred diagnostics (+ /web-doctor command)
     ├── engines/            google.ts, duckduckgo.ts, yandex.ts, images.ts
-    ├── cdp/                discovery, session (raw WS), browser (window/tab/lock),
-    │                       humanize (typing/settle), ai-wait, page-lock, raise
+    ├── cdp/                client (raw WS/reconnect), page (navigation commit,
+    │                       document access), humanize, ai-wait, bytes, raise
+    ├── session/            lifecycle, discovery, cross-process lock, tab pool,
+    │                       FIFO page lock and the doctor's probe seam
     ├── extract/            compact (caps/dedup/URLs), read (readability), urls
     │                       (/goto, tracking params), claims, goto, pdf
     └── runtime/            cache, limiter, errors, error-codes, artifacts, doctor,
@@ -24,16 +26,19 @@ pi process
 
 ## Request flow (`web_search`)
 
-1. Resolve config, acquire the session lock (`~/.pi/agent/web-search.lock`, PID + heartbeat).
-2. Discover the CDP endpoint (see `docs/engines.md` §Discovery), attach over one WebSocket.
-3. Ensure the extension's **one owned window**; its anchor tab is `assets/anchor.html` — a local
-   control panel painted with one-off `Runtime.evaluate` (engine, query, stage, pace, counters).
-4. Per engine: FIFO page lock for that engine tab (one writer per tab, shared with `web_read` and
+1. One session object (`src/session/session.ts`) runs `idle → connecting → ready`; it acquires the
+   cross-process lock (`~/.pi/agent/web-search.lock`, PID + heartbeat), discovers the endpoint and
+   attaches over one WebSocket. A dropped socket gets one reconnect; the Allow prompt is waited out
+   and then reported as `E_CDP_AWAITING_ALLOW` (S8.4).
+2. The tab pool creates the extension's **one owned window**; its anchor tab is `assets/anchor.html`
+   — a local control panel painted with one-off `Runtime.evaluate` (engine, query, stage, pace,
+   counters). Each engine gets one work tab, each read slot its own tab.
+3. Per engine: FIFO page lock for that tab (one writer per tab, shared with `web_read` and
    `/web-doctor`) → pacing/limiter → typed or direct SERP URL → `settle()` (marker, not a sleep) →
    `detectWall()` → `extract()` → `ai.probe()/wait` for the native AI block.
-5. `extract/compact.ts` merges engines, dedups URLs, strips tracking params and applies the two
+4. `extract/compact.ts` merges engines, dedups URLs, strips tracking params and applies the two
    budgets (results floor first, AI to the remainder).
-6. Every failure is a `WebSearchError` with `code`, `stage`, `retryable`, `hint` and, for page
+5. Every failure is a `WebSearchError` with `code`, `stage`, `retryable`, `hint` and, for page
    states, an artifact directory under `~/.pi/agent/web-search/artifacts/<ts>-<engine>-<hash>/`.
 
 ## Decisions that must not be re-litigated
@@ -46,8 +51,8 @@ pi process
   `Page.addScriptToEvaluateOnNewDocument`. One-off `Runtime.evaluate` for extraction and the panel.
 - **No captcha solving.** A wall is `E_WALL` with the window surfaced; the user solves it.
 - **Readiness is a DOM marker, not `loadEventFired`.** A real SERP never fires a correlated load
-  event; the client commits on `frameNavigated` with a fresh `loaderId`, then the adapter waits for a
-  marker with a deadline.
+  event; `src/cdp/page.ts` commits on `frameNavigated` with a fresh `loaderId`, then the adapter
+  waits for a marker with a deadline.
 - **AI states are three-valued.** `answer` (≥200 chars of prose), `lead` (block present, no answer),
   `none`. A query echo is never rendered as an answer.
 - **No quality gate.** No classifier, no rules gate, no page-quality score: the model chooses what
@@ -59,7 +64,7 @@ pi process
 ## Read pipeline (`web_read`)
 
 Exclusive FIFO lock per read slot (`read.pool` 1..3) → SSRF guard (checked again on redirect) →
-navigate → marker settle → `currentUrl()` before and after extraction (a moved document is
+navigate → readiness → `currentUrl()` before and after extraction (a moved document is
 `E_NAVIGATION_MISMATCH`, not a stranger's page) → readability → Markdown with `offset`/`nextOffset`.
 `maxChars` above `read.maxCharsCeiling` is clamped and reported; an offset past the end is
 `E_OFFSET_RANGE`. Failures of kind parse/timeout/blocked/mismatch always leave an artifact.

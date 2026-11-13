@@ -8,7 +8,7 @@
  *
  * `acquire` is serialized in-process per engine: concurrent callers queue, so
  * the second one computes its gap after the first one updated `lastAt`. The
- * page lock in `src/cdp/page-lock.ts` supplies the same guarantee for the tab.
+ * page lock in `src/session/page-lock.ts` supplies the same guarantee for the tab.
  */
 
 import type { Config } from "../config/index.ts";

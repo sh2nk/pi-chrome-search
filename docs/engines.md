@@ -18,7 +18,7 @@ session: open `chrome://inspect/#remote-debugging`, tick **Discover network targ
 `/json/version` may stay disabled in that mode — the `DevToolsActivePort` file is authoritative.
 
 The DevTools WebSocket handshake completes only after the user clicks Allow. Until then the socket
-hangs, which is not a dead browser: the connector waits `cdp.attachWaitMs` (60 s), notifies the
+hangs, which is not a dead browser: the session waits `cdp.attachWaitMs` (60 s), notifies the
 desktop once, and reports `E_CDP_AWAITING_ALLOW` (retryable) when the wait expires. `ECONNREFUSED` /
 `ENOTFOUND` fail immediately — nothing is listening, so waiting would be a lie.
 

@@ -17,8 +17,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createConnector } from "../../src/cdp/browser.ts";
-import { discoverEndpoint } from "../../src/cdp/discovery.ts";
+import { createSession, discoverEndpoint } from "../../src/session/index.ts";
 import { loadConfig } from "../../src/config/index.ts";
 import { createDefaultRegistry } from "../../src/engines/index.ts";
 import type { EngineId } from "../../src/engines/types.ts";
@@ -59,7 +58,7 @@ async function runOnce(engine: EngineId, q: string): Promise<SmokeResult> {
   const stateDir = join(env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent"), "web-search");
   const clock = createSystemClock();
   const log = createLogger({ path: join(stateDir, "decisions.jsonl"), clock });
-  const connector = createConnector({
+  const connector = createSession({
     config,
     clock,
     log,

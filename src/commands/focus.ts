@@ -8,12 +8,12 @@
  * that is the one case where focusing opens something.
  */
 
-import type { Connector } from "../cdp/browser.ts";
+import type { Session } from "../session/index.ts";
 import { toFailure } from "../runtime/errors.ts";
 import type { NotifyContext } from "./doctor.ts";
 
 export interface FocusDeps {
-  connector?: Connector;
+  connector?: Session;
 }
 
 export type FocusDepsFactory = () => FocusDeps | Promise<FocusDeps>;

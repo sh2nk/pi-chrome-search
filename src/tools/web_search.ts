@@ -29,7 +29,7 @@
 import { Type, type Static } from "typebox";
 
 import { humanSearch, type HumanSearchResult } from "../cdp/humanize.ts";
-import { pageLockFor } from "../cdp/page-lock.ts";
+import { pageLockFor } from "../session/index.ts";
 import { waitForAi, type AiWaitResult } from "../cdp/ai-wait.ts";
 import type { CdpPage } from "../cdp/types.ts";
 import type { Config } from "../config/index.ts";

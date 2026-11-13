@@ -24,7 +24,7 @@
 import { Type, type Static } from "typebox";
 
 import type { CdpPage } from "../cdp/types.ts";
-import { pageLockFor } from "../cdp/page-lock.ts";
+import { pageLockFor } from "../session/index.ts";
 import type { Config } from "../config/index.ts";
 import {
   IMAGE_ENGINE_IDS,

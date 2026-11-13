@@ -31,9 +31,8 @@
 
 import { readFile, unlink } from "node:fs/promises";
 
-import type { Connector, ConnectorInfo } from "../cdp/browser.ts";
-import { defaultLockPath, parseLockRecord, pidAlive } from "../cdp/browser.ts";
-import { pageLockFor } from "../cdp/page-lock.ts";
+import { defaultLockPath, pageLockFor, parseLockRecord, pidAlive } from "../session/index.ts";
+import type { Session, SessionInfo } from "../session/index.ts";
 import type { CdpSource } from "../cdp/types.ts";
 import type { Config, FocusPolicy, FollowPolicy, HumanizeMode } from "../config/index.ts";
 import type { Engine, EngineId, EngineRegistry, Query, WallKind } from "../engines/types.ts";
@@ -100,7 +99,7 @@ export const DOCTOR_PROBE_QUERY = "pi-chrome-search doctor probe";
 
 export interface EngineProbeOptions {
   config: Config;
-  connector: Connector;
+  connector: Session;
   registry: EngineRegistry;
   clock: Clock;
   /**
@@ -229,7 +228,7 @@ export function createEngineProbe(options: EngineProbeOptions): EngineProbe {
 export interface DoctorDeps {
   config: Config;
   configPath: string;
-  connector?: Connector;
+  connector?: Session;
   /**
    * P11: the CLI's Allow-attention coordinator. Its outcome (wait duration,
    * notification adapter, raise adapter) is rendered next to the verdict; the
@@ -375,7 +374,7 @@ async function readLockRecord(path: string): Promise<ParsedLock | null> {
   }
 }
 
-function lockPathOf(connector: Connector | undefined, env: NodeJS.ProcessEnv): string {
+function lockPathOf(connector: Session | undefined, env: NodeJS.ProcessEnv): string {
   if (connector !== undefined) {
     try {
       return connector.lockPath();
@@ -386,7 +385,7 @@ function lockPathOf(connector: Connector | undefined, env: NodeJS.ProcessEnv): s
   return defaultLockPath(env);
 }
 
-async function collectLock(connector: Connector | undefined, env: NodeJS.ProcessEnv): Promise<DoctorLock> {
+async function collectLock(connector: Session | undefined, env: NodeJS.ProcessEnv): Promise<DoctorLock> {
   const path = lockPathOf(connector, env);
   const record = await readLockRecord(path);
   if (record === null) return { locked: false, path, owner: "none" };
@@ -435,7 +434,7 @@ export interface DoctorFixOptions {
   connectGraceMs?: number;
 }
 
-function isConnected(connector: Connector | undefined): boolean {
+function isConnected(connector: Session | undefined): boolean {
   if (connector === undefined) return false;
   try {
     return connector.isConnected();
@@ -453,7 +452,7 @@ type ConnectOutcome = { ok: true; late: boolean } | { ok: false; code: string };
  * the original code.
  */
 async function boundedConnect(
-  connector: Connector,
+  connector: Session,
   config: Config,
   options: DoctorFixOptions = {},
 ): Promise<ConnectOutcome> {
@@ -631,7 +630,7 @@ function failedCdp(status: CdpStatus, details: FailureDetails, lock: DoctorLock)
   };
 }
 
-function endpointOf(info: ConnectorInfo): DoctorEndpoint {
+function endpointOf(info: SessionInfo): DoctorEndpoint {
   return {
     port: nonNegativeInt(info.endpoint.port),
     wsUrl: safeText(info.endpoint.wsUrl, "ws://127.0.0.1"),
@@ -671,7 +670,7 @@ async function collectCdp(deps: DoctorDeps): Promise<DoctorCdp> {
     }
   }
 
-  let info: ConnectorInfo | null;
+  let info: SessionInfo | null;
   try {
     info = connector.info();
   } catch (error) {

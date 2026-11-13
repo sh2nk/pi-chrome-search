@@ -6,7 +6,7 @@
  * and prints it. The CLI owns the three things the report module must not do
  * itself:
  *
- *  - **A real connector.** A fresh `createConnector` with the system clock and a
+ *  - **A real connector.** A fresh `createSession` with the system clock and a
  *    JSONL log under `~/.pi/agent/web-search/doctor.jsonl`. The log is created
  *    only when this process builds the connector (an injected test connector
  *    must not write into the user's agent dir).
@@ -29,10 +29,8 @@
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { createConnector } from "../cdp/browser.ts";
-import type { Connector, ConnectorOptions } from "../cdp/browser.ts";
-import { defaultLockPath } from "../cdp/browser.ts";
-import { discoverEndpoint } from "../cdp/discovery.ts";
+import { createSession, defaultLockPath, discoverEndpoint } from "../session/index.ts";
+import type { Session, SessionOptions } from "../session/index.ts";
 import { loadConfig, resolveConfigPath } from "../config/index.ts";
 import type { Config } from "../config/index.ts";
 import { createDefaultRegistry } from "../engines/index.ts";
@@ -83,8 +81,8 @@ export interface DoctorCliDeps {
   clock?: Clock;
   loadConfig?: (opts: { path?: string; env: NodeJS.ProcessEnv }) => Config;
   /** Pre-built connector (tests). When set, no logger is created. */
-  connector?: Connector;
-  createConnector?: (options: ConnectorOptions) => Connector;
+  connector?: Session;
+  createSession?: (options: SessionOptions) => Session;
   registry?: EngineRegistry;
   cache?: Cache;
   artifacts?: Artifacts;
@@ -257,13 +255,13 @@ export async function runDoctorCli(
   // connector (tests, or a caller with its own log) never gets a file here.
   let log: Logger | undefined = deps.log;
 
-  let connector: Connector;
+  let connector: Session;
   try {
     if (deps.connector !== undefined) {
       connector = deps.connector;
     } else {
       log ??= createLogger({ path: join(stateDir(env), "doctor.jsonl"), clock });
-      connector = (deps.createConnector ?? createConnector)({
+      connector = (deps.createSession ?? createSession)({
         config,
         discover: () =>
           discoverEndpoint({
@@ -385,7 +383,7 @@ export async function runDoctorCli(
   return report.verdict === "blocked" ? DOCTOR_BLOCKED_EXIT_CODE : 0;
 }
 
-async function releaseQuietly(connector: Connector): Promise<void> {
+async function releaseQuietly(connector: Session): Promise<void> {
   try {
     if (connector.isConnected()) await connector.releaseAll();
   } catch {

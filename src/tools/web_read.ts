@@ -18,7 +18,7 @@
 
 import { Type, type Static } from "typebox";
 
-import { pageLockFor, readSlotKeys } from "../cdp/page-lock.ts";
+import { pageLockFor, readSlotKeys } from "../session/index.ts";
 import type { CdpPage, PageKey } from "../cdp/types.ts";
 import type { Config } from "../config/index.ts";
 import {

@@ -104,6 +104,35 @@ export interface BrowserInfo {
   jsVersion: string;
 }
 
+/** Clock surface the client needs; `runtime/types.ts` `Clock` satisfies it. */
+export interface CdpClock {
+  now(): number;
+  sleep(ms: number, signal?: AbortSignal): Promise<void>;
+}
+
+export type CdpEventHandler = (params: Record<string, unknown>, sessionId?: string) => void;
+
+/**
+ * The raw transport seam. `CdpClient` in `client.ts` is the production
+ * implementation; the session tests inject a fake through `connectClient` so
+ * connect refusal, Allow waits, drops and closed tabs are offline scenarios.
+ */
+export interface CdpClient {
+  readonly clock?: CdpClock;
+  isConnected(): boolean;
+  version(): Promise<BrowserInfo>;
+  targets(): Promise<CdpTarget[]>;
+  attach(targetId: string): Promise<{ targetId: string; sessionId: string }>;
+  detach(sessionId: string): Promise<void>;
+  createTarget(url: string, opts?: { newWindow?: boolean; background?: boolean }): Promise<string>;
+  closeTarget(targetId: string): Promise<void>;
+  send<T>(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<T>;
+  on(method: string, handler: CdpEventHandler): () => void;
+  close(): Promise<void>;
+  sessionIdFor(targetId: string): string | undefined;
+  targetUrlFor(targetId: string): string | undefined;
+}
+
 export interface CdpTarget {
   id: string;
   type: string;
@@ -119,7 +148,7 @@ export interface CdpConnectionInfo {
   webdriver: boolean;
 }
 
-/** Implemented by cdp/browser.ts (P1-D). Tools never touch raw sockets. */
+/** Implemented by `src/session/`. (PLAN P3.) Tools never touch raw sockets. */
 export interface CdpConnector {
   connect(): Promise<CdpConnectionInfo>;
   /** One owned work tab per engine, reused across calls. */

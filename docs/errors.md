@@ -31,5 +31,5 @@ user verbatim. `E_*` codes never mean "something failed"; they name what to do n
 `meta.json`). Decisions: `~/.pi/agent/web-search/decisions.jsonl`.
 
 Reserved codes (thrown by production code, dedicated offline test lands in the named phase):
-`E_TARGET_LOST` (P3), `E_EMPTY_PAGE` (P5), `E_NAVIGATION_MISMATCH` (P5), `E_OFFSET_RANGE` (P5),
-`E_CDP_AWAITING_ALLOW` (P3). `RESERVED_CODES` in `src/runtime/error-codes.ts` carries the same list.
+`E_EMPTY_PAGE` (P5), `E_NAVIGATION_MISMATCH` (P5), `E_OFFSET_RANGE` (P5). `RESERVED_CODES` in
+`src/runtime/error-codes.ts` carries the same list.

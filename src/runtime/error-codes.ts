@@ -155,11 +155,9 @@ export const RETRYABLE: Record<ErrorCode, boolean> = {
  * named phase lands its test, so a reservation cannot become a permanent pass.
  */
 export const RESERVED_CODES: Partial<Record<ErrorCode, string>> = {
-  E_TARGET_LOST: "P3 transport: a tab closed under a live call",
   E_EMPTY_PAGE: "P5 read: a thin document after readiness",
   E_NAVIGATION_MISMATCH: "P5 read: URL changed between navigation and extraction",
   E_OFFSET_RANGE: "P5 read: offset past totalChars",
-  E_CDP_AWAITING_ALLOW: "P3 transport: the Allow prompt outlived the attach wait",
 };
 
 export class WebSearchError extends Error {

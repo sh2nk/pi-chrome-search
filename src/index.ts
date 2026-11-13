@@ -10,8 +10,7 @@ import { join } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
-import { createConnector, type Connector } from "./cdp/browser.ts";
-import { discoverEndpoint } from "./cdp/discovery.ts";
+import { createSession, discoverEndpoint, type Session } from "./session/index.ts";
 import { handleDoctorCommand } from "./commands/doctor.ts";
 import { handleFocusCommand } from "./commands/focus.ts";
 import { loadConfig, resolveConfigPath, type Config } from "./config/index.ts";
@@ -41,7 +40,7 @@ export interface Runtime {
   cache: Cache;
   limiter: Limiter;
   artifacts: Artifacts;
-  connector: Connector;
+  connector: Session;
   registry: EngineRegistry;
 }
 
@@ -66,7 +65,7 @@ function createRuntime(): Runtime {
       void log.write({ level: "info", event: "awaiting_allow", message: line }).catch(() => undefined);
     },
   });
-  const connector = createConnector({
+  const connector = createSession({
     config,
     clock,
     log,
