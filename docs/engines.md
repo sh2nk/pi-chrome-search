@@ -108,9 +108,10 @@ second is the 2026 layout: the first alone returned empty snippets on a live SER
 Price/availability/rating/location shown outside the snippet go into `SerpItem.facts` (rendered after
 the snippet; whole facts dropped past 120 chars), copied from the page and never composed, so a fact
 cannot claim more than the SERP did. Nodes: Avito `item-price-value`/`-location`/`-date` (item-level,
-`avito-serp`); Google a leaf whose whole text is a price (`От 4 057,00 ₽`) plus `aria-label*=" из 5"`
-(`google-facts`); Yandex `.EReviewsLabel .A11yHidden` + `.EReviewsLabel-Reviews` — a *shop* rating and
-its count (`yandex-rating`). Article results carry none.
+`avito-serp`); Google a leaf that is *only* a price — any recognised currency, at most a four-letter
+prefix — plus an `aria-label` shaped `<score> … 5` or `5 … <score>` (`google-facts`, one case per
+locale in the test); Yandex `.EReviewsLabel .A11yHidden` + `.EReviewsLabel-Reviews`, a *shop* rating and
+its count (`yandex-rating`). Article results carry none, and an unknown currency yields no fact.
 
 ## AI states (all engines, except Avito)
 

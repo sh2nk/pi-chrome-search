@@ -167,7 +167,8 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
   `notice` — our constant, never page text, so a SERP cannot inject prose into it.
 - **S7.7 Card facts are reported, not invented.** Price/availability/rating/location shown outside the
   snippet go into `SerpItem.facts`, rendered after it; whole facts are dropped past the cap (never a
-  half-cut price), and only for a selector with a fixture (S13.4).
+  half-cut price), and only for a selector with a fixture (S13.4). Recognition is by shape — a leaf
+  that is only a price, a label shaped `<score> … 5` — not by a locale's words or a currency's name.
 
 ## 8. Time
 
@@ -297,9 +298,8 @@ Changing one requires owner approval.
   home, pacing 6–12 s. The disabled hint names `config.engines.avito.enabled` and the `web-search.json`
   path, because the expected workflow is a user asking their agent to enable it.
 - **D13** Card facts (`SerpItem.facts`, S7.7) and `RawSerp.notice` (S7.6) are additive: price/
-  availability/rating/location become short strings copied from the card (never composed), and a
-  fallback result set gets one adapter-authored line. Avito reports item price/place/age; Google a
-  from-price plus the rating row; Yandex a *shop* rating plus its review count (fixtures per engine).
+  availability/rating/location become short strings copied from the card, never composed; a fallback
+  result set gets one authored line. Avito: price/place/age; Google: price + rating; Yandex: shop rating.
 
 ## Appendix — v1 defect ledger (why each requirement exists)
 

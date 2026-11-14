@@ -457,6 +457,127 @@ test("S7.7 google-facts: the rich row becomes facts, copied verbatim", async () 
   );
 });
 
+/**
+ * `lang`/`gl` are config keys, so a localized SERP is a supported input. The two
+ * fact rules therefore key on invariant shapes, not on Russian words: a price is
+ * "digits + one currency token + at most a four-letter prefix", a rating is
+ * `<score> … 5` in the row's `aria-label`, copied whole. These cases are the
+ * contract; an unknown currency yields no fact rather than a guess.
+ */
+test("S7.7 card facts are locale- and currency-agnostic on google", () => {
+  const CASES: { name: string; price: string; rating: string; expected: string[] }[] = [
+    {
+      name: "ru-RU",
+      price: "От 4 057,00 ₽",
+      rating: "Оценка: 4,9 из 5, (302) отзыва пользователей",
+      expected: ["От 4 057,00 ₽", "Оценка: 4,9 из 5, (302) отзыва пользователей"],
+    },
+    {
+      name: "en-US",
+      price: "$1,299.00",
+      rating: "Rated 4.9 out of 5, (302) reviews",
+      expected: ["$1,299.00", "Rated 4.9 out of 5, (302) reviews"],
+    },
+    {
+      name: "de-DE",
+      price: "1.299,00 €",
+      rating: "Bewertung: 4,9 von 5 (302 Rezensionen)",
+      expected: ["1.299,00 €", "Bewertung: 4,9 von 5 (302 Rezensionen)"],
+    },
+    {
+      name: "pl-PL",
+      price: "1 299,00 zł",
+      rating: "Ocena 4,9 na 5 (302 opinii)",
+      expected: ["1 299,00 zł", "Ocena 4,9 na 5 (302 opinii)"],
+    },
+    { name: "en-IN", price: "₹1,299", rating: "Rated 4.9 out of 5 (302)", expected: ["₹1,299", "Rated 4.9 out of 5 (302)"] },
+    { name: "ja-JP", price: "¥12,000", rating: "5 段階中 4.9 の評価", expected: ["¥12,000", "5 段階中 4.9 の評価"] },
+    { name: "uk-UA", price: "1 299 ₴", rating: "Оцінка 4,9 з 5", expected: ["1 299 ₴", "Оцінка 4,9 з 5"] },
+    { name: "kk-KZ", price: "12 990 ₸", rating: "4,9/5 (302)", expected: ["12 990 ₸", "4,9/5 (302)"] },
+    { name: "pt-BR", price: "R$ 99,90", rating: "Avaliação 4,9 de 5", expected: ["R$ 99,90", "Avaliação 4,9 de 5"] },
+    // CJK puts the score and the scale in one label; the shape `<score> … 5` holds.
+    { name: "zh-CN", price: "1,299 元", rating: "4.9 分（5 分制）", expected: ["1,299 元", "4.9 分（5 分制）"] },
+    { name: "tr-TR", price: "1.299,00 TL", rating: "5 üzerinden 4,9", expected: ["1.299,00 TL", "5 üzerinden 4,9"] },
+    { name: "de-CH", price: "CHF 99.00", rating: "Bewertet 4,9 von 5", expected: ["CHF 99.00", "Bewertet 4,9 von 5"] },
+  ];
+
+  for (const testCase of CASES) {
+    const html = [
+      '<html><body><div id="rso"><div data-hveid="o1">',
+      '<a href="https://shop.example/p"><h3>Product</h3></a>',
+      '<div class="VwiC3b">A snippet that merely mentions 41 246 ₽ and 4,9 из 5.</div>',
+      '<div class="row">',
+      `<span>${testCase.price}</span>`,
+      `<span aria-label="${testCase.rating}">4,9</span>`,
+      "</div></div></div></body></html>",
+    ].join("");
+    const document = fixtureDocument(html, SERP_URL);
+    const serp = runInPage(EXTRACT_IN_PAGE, document, { n: 1, summary: false }) as ExtractedSerp;
+    const item = serp.results[0];
+    assert.ok(item !== undefined, testCase.name);
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(item.facts ?? [])) as unknown,
+      testCase.expected,
+      testCase.name,
+    );
+    assert.equal(
+      item.snippet.includes("4,9 из 5"),
+      true,
+      "the snippet keeps its prose: facts never come from it",
+    );
+  }
+});
+
+test("S7.7 a price-shaped leaf that is really prose stays out of facts", () => {
+  const PROSE = [
+    "41 246 ₽. С банками", // a price followed by a sentence
+    "Цена по запросу", // no digits at all
+    "4 057 ₽ · 4,9(302)", // two facts glued by the page's separator
+    "1 299,00 XZ", // a currency we do not know: no fact, never a guess
+    "от 4 057 рублей", // a word we cannot separate from prose
+    "Подробнее о ценах на 5 товаров",
+  ];
+  for (const price of PROSE) {
+    const html = [
+      '<html><body><div id="rso"><div data-hveid="o1">',
+      '<a href="https://shop.example/p"><h3>Product</h3></a>',
+      `<div class="row"><span>${price}</span></div>`,
+      "</div></div></body></html>",
+    ].join("");
+    const document = fixtureDocument(html, SERP_URL);
+    const serp = runInPage(EXTRACT_IN_PAGE, document, { n: 1, summary: false }) as ExtractedSerp;
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(serp.results[0]?.facts ?? [])) as unknown,
+      [],
+      JSON.stringify(price),
+    );
+  }
+});
+
+test("S7.7 an aria-label without a rating shape is not a rating", () => {
+  const LABELS = [
+    "Об этом результате",
+    "About this result",
+    "Открыть 5 изображений",
+    "4,9 из 5, плюс очень длинное описание, которое уже не подпись карточки, а абзац текста",
+  ];
+  for (const label of LABELS) {
+    const html = [
+      '<html><body><div id="rso"><div data-hveid="o1">',
+      '<a href="https://shop.example/p"><h3>Product</h3></a>',
+      `<div class="row"><span aria-label="${label}">4,9</span></div>`,
+      "</div></div></body></html>",
+    ].join("");
+    const document = fixtureDocument(html, SERP_URL);
+    const serp = runInPage(EXTRACT_IN_PAGE, document, { n: 1, summary: false }) as ExtractedSerp;
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(serp.results[0]?.facts ?? [])) as unknown,
+      [],
+      JSON.stringify(label),
+    );
+  }
+});
+
 test("S7.7 google-ai: an article SERP carries no facts at all", async () => {
   const { page } = fixturePage("google-ai");
   const serp = await googleEngine.extract(page, makeQuery({ n: 8, summary: false, text: "трансформер" }));

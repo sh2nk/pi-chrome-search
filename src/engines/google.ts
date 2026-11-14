@@ -605,28 +605,76 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
    * — and nothing in the DOM says which number is a price and which is a
    * rating, so both are read from what the page itself labels:
    *
-   *  - the rating is the `aria-label` of the row ("Оценка: 4,9 из 5, (302)
-   *    отзыва пользователей"), copied verbatim: a rating Google computes is
-   *    Google's statement, not ours;
-   *  - the price is a leaf whose *entire* text is a price ("От 4 057,00 ₽"). The
-   *    full-text rule is what keeps "43 610,00 ₽" out of a snippet's prose.
+   *  - the rating is the row's `aria-label` ("Оценка: 4,9 из 5, (302) отзыва
+   *    пользователей"), copied verbatim: a rating Google computes is Google's
+   *    statement, not ours;
+   *  - the price is a leaf whose *entire* text is one price. The full-text rule
+   *    is what keeps "41 246 ₽" inside a sentence out of `facts`.
    *
-   * Both are absent on an article result, so facts are conditional by design.
+   * Both rules are locale- and currency-agnostic on purpose (`lang` is a config
+   * key, so a German or Polish SERP is a supported input, not a surprise):
+   *  - a price is recognised by shape — one currency token (symbol, ISO code or
+   *    a short suffix like `zł`/`Kč`/`kr`), digits, separators, and at most a
+   *    four-letter prefix ("От", "From", "ab"). Anything wordier is prose. A
+   *    locale whose prefix is longer loses the price fact instead of getting a
+   *    wrong one;
+   *  - a rating is recognised by its invariant shape, `<score> … 5`, in any
+   *    language ("4,9 из 5", "4.9 out of 5", "4,9 von 5", "4,9 sur 5"), and is
+   *    then copied whole, so the reader gets the page's own words.
    */
   function cardFacts(scope: Element | null): string[] {
     if (scope === null) return [];
     const facts: string[] = [];
-    const PRICE = /^(От\s+)?\d[\d\s\u00a0\u202f]*([.,]\d{2})?\s?₽$/;
+
+    /**
+     * Symbols and ISO codes seen on Google's own currency list, plus the
+     * word-suffix currencies whose symbol follows the amount. Deliberately a
+     * closed list: an unknown currency means "no price fact", never a guess.
+     */
+    const CURRENCY =
+      /[$€£¥₹₽₩₪₺₴₸₾₼₫₱฿]|\b(?:USD|EUR|RUB|GBP|UAH|BYN|KZT|PLN|CZK|SEK|NOK|DKK|CHF|JPY|CNY|INR|TRY|GEL|AMD|AZN|UZS|KGS|TJS|MDL|RSD|BGN|HUF|RON|ILS|AED|SAR|BRL|KRW|THB|VND|PHP|IDR|MYR|SGD|HKD|TWD|MXN|CAD|AUD|NZD|ARS|CLP|COP|PEN)\b|zł|Kč|kr|TL|RMB|руб|грн|сум|тенге|лари|драм|ман|円|元|圓/iu;
+    const CURRENCY_ALL =
+      /[$€£¥₹₽₩₪₺₴₸₾₼₫₱฿]|(?:USD|EUR|RUB|GBP|UAH|BYN|KZT|PLN|CZK|SEK|NOK|DKK|CHF|JPY|CNY|INR|TRY|GEL|AMD|AZN|UZS|KGS|TJS|MDL|RSD|BGN|HUF|RON|ILS|AED|SAR|BRL|KRW|THB|VND|PHP|IDR|MYR|SGD|HKD|TWD|MXN|CAD|AUD|NZD|ARS|CLP|COP|PEN)|zł|Kč|kr|TL|RMB|руб|грн|сум|тенге|лари|драм|ман|円|元|圓/giu;
+    /** Letters a price may carry besides the currency: "От", "From", "ab". */
+    const PRICE_PREFIX = /^[A-Za-zА-Яа-яЁё]{0,4}$/;
+
+    function looksLikePrice(text: string): boolean {
+      if (text === "" || text.length > 26) return false;
+      if (!/[0-9]/.test(text)) return false;
+      if (!CURRENCY.test(text)) return false;
+      const rest = text
+        .replace(CURRENCY_ALL, " ")
+        // Digits, grouping/decimals, ranges ("–") and noise like "~".
+        .replace(/[0-9\s.,'\u00a0\u202f\u2013\u2014~≈-]/g, " ")
+        .trim();
+      return PRICE_PREFIX.test(rest);
+    }
+
     for (const node of Array.from(scope.querySelectorAll("span, b"))) {
       if (node.children.length > 0) continue;
       const text = normalize(node.textContent);
-      if (text === "" || text.length > 24 || !PRICE.test(text)) continue;
+      if (!looksLikePrice(text)) continue;
       facts.push(text);
       break;
     }
-    const ratingNode = scope.querySelector('[aria-label*=" из 5"], [aria-label*="out of 5"]');
-    const rating = ratingNode === null ? "" : normalize(ratingNode.getAttribute("aria-label"));
-    if (rating !== "") facts.push(rating);
+
+    /**
+     * `<score> … 5` — the scale is the only language-independent part of a
+     * rating label; the words around it differ per locale and are kept as-is.
+     * A label longer than a fact (60 chars, the same ceiling `asFacts` applies)
+     * is a paragraph that happens to contain numbers, not a card label.
+     *
+     * Both orders exist: "4,9 из 5" (ru/de/pl) and "5 üzerinden 4,9" /
+     * "5 段階中 4.9" (tr/ja). The reverse form is anchored to the start of the
+     * label, so a stray "5" inside a sentence cannot qualify.
+     */
+    const RATING = /[0-9][.,][0-9][^0-9]{1,14}5(?![0-9])|^5[^0-9]{1,14}[0-9][.,][0-9]/;
+    for (const node of Array.from(scope.querySelectorAll("[aria-label]"))) {
+      const label = normalize(node.getAttribute("aria-label"));
+      if (label === "" || label.length > 60 || !RATING.test(label)) continue;
+      facts.push(label);
+      break;
+    }
     return facts;
   }
 
