@@ -176,11 +176,15 @@ test("S6.3: --json --no-probe prints a schema-valid report and exits 0", async (
   assert.equal(report.verdict, "degraded", "probes were skipped, so the doctor is not healthy");
   assert.equal((report.cdp as Record<string, unknown>).status, "ok");
   const engines = report.engines as Array<Record<string, unknown>>;
-  assert.equal(engines.length, 4);
-  // avito ships disabled (SPEC D12) — that is a config choice, the other three
+  assert.equal(engines.length, 5);
+  // Both marketplaces ship disabled (SPEC D12/D14) — that is a config choice,
+  // the other three
   // were skipped because the probe was not requested.
   for (const engine of engines) {
-    assert.equal(engine.verdict, engine.id === "avito" ? "disabled" : "skipped");
+    assert.equal(
+      engine.verdict,
+      engine.id === "avito" || engine.id === "ozon" ? "disabled" : "skipped",
+    );
   }
   assert.equal(run.stderr, "", "a JSON run keeps stdout parseable and stderr quiet");
 });
@@ -199,7 +203,9 @@ test("S6.3: a probed report carries wall/canary/error shapes the schema allows",
   const engines = (run.report as Record<string, unknown>).engines as Array<Record<string, unknown>>;
   assert.deepEqual(
     engines.map((engine) => engine.verdict),
-    ["ok", "layout_changed", "wall", "disabled"],
+    // google ok, duckduckgo layout_changed, yandex wall, then the two special
+    // engines that ship disabled (D12/D14): a config choice, not a fault.
+    ["ok", "layout_changed", "wall", "disabled", "disabled"],
   );
 });
 
@@ -281,7 +287,7 @@ test("S6.3: web_doctor returns compact text plus the report sections, not the wh
 
   assert.equal(result.details.verdict, "ok");
   assert.equal(result.details.cdp.status, "ok");
-  assert.equal(result.details.engines.length, 4);
+  assert.equal(result.details.engines.length, 5);
   const text = result.content.map((block) => block.text).join("\n");
   assert.match(text, /^web_doctor: ok — cdp ok/m);
   assert.match(text, /^ {2}google ok \(1 results, ai=no, 25ms\)$/m);

@@ -153,6 +153,15 @@ const JSON_SECRET_FIELDS = [
   "usg",
   "sa",
   "cd",
+  // Ozon's server-rendered bootstrap JSON carries a per-session `userToken`, a
+  // per-request `ozonid-*` capability map and the `x-o3-*` antibot params. They
+  // are not cookies, but they are exactly as replayable, so the 2026-11-16
+  // captures had to lose them before review.
+  "userToken",
+  "o3Params",
+  "x-o3-xcid",
+  "x-o3-requestid",
+  "my-profile0",
 ];
 
 const JSON_SECRET_FIELD_PATTERN = JSON_SECRET_FIELDS.join("|");

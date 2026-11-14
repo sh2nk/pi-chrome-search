@@ -63,11 +63,24 @@ export interface AvitoConfig {
   location: string;
 }
 
+export interface OzonConfig {
+  /**
+   * OFF by default (SPEC §15 D14), for the same reason as Avito: a marketplace
+   * is a special engine and a fresh install must not visit it by itself.
+   *
+   * There is no `location`: Ozon's region is a cookie-backed UI choice, not a
+   * URL parameter, so a config key for it would be a key that cannot work
+   * (S7.5).
+   */
+  enabled: boolean;
+}
+
 export interface EnginesConfig {
   google: GoogleConfig;
   duckduckgo: DuckDuckGoConfig;
   yandex: YandexConfig;
   avito: AvitoConfig;
+  ozon: OzonConfig;
 }
 
 export type PacingWindow = [number, number];
@@ -76,8 +89,9 @@ export interface PacingConfig {
   google: PacingWindow;
   duckduckgo: PacingWindow;
   yandex: PacingWindow;
-  /** Slowest window: Avito is the most aggressive of the four about automation. */
+  /** Slowest windows: both marketplaces are aggressive about automation. */
   avito: PacingWindow;
+  ozon: PacingWindow;
 }
 
 export interface SearchConfig {
@@ -149,8 +163,15 @@ export const DEFAULT_CONFIG: Config = {
     duckduckgo: { enabled: true, kl: "auto" },
     yandex: { enabled: true, lr: "auto" },
     avito: { enabled: false, location: "all" },
+    ozon: { enabled: false },
   },
-  pacing: { google: [2500, 5000], yandex: [5000, 9000], duckduckgo: [2000, 4000], avito: [6000, 12000] },
+  pacing: {
+    google: [2500, 5000],
+    yandex: [5000, 9000],
+    duckduckgo: [2000, 4000],
+    avito: [6000, 12000],
+    ozon: [6000, 12000],
+  },
   search: {
     budgetMs: 60000,
     n: 5,

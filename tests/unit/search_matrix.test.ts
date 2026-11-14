@@ -29,11 +29,18 @@ async function search(
 }
 
 test("S4.2: the matrix is exactly the SPEC table", () => {
-  assert.deepEqual(SUPPORT_MATRIX.n, { google: "yes", duckduckgo: "yes", yandex: "yes", avito: "yes" });
-  assert.deepEqual(SUPPORT_MATRIX.page, { google: "yes", duckduckgo: "flag", yandex: "yes", avito: "yes" });
-  // Avito has no native AI block (SPEC D12), so `summary` is flagged there and
-  // reported as `ignored.summary` instead of being silently dropped (S7.1).
-  assert.deepEqual(SUPPORT_MATRIX.summary, { google: "yes", duckduckgo: "yes", yandex: "yes", avito: "flag" });
+  assert.deepEqual(SUPPORT_MATRIX.n, { google: "yes", duckduckgo: "yes", yandex: "yes", avito: "yes", ozon: "yes" });
+  assert.deepEqual(SUPPORT_MATRIX.page, { google: "yes", duckduckgo: "flag", yandex: "yes", avito: "yes", ozon: "yes" });
+  // Neither marketplace has a native AI block (SPEC D12/D14), so `summary` is
+  // flagged there and reported as `ignored.summary` instead of being silently
+  // dropped (S7.1).
+  assert.deepEqual(SUPPORT_MATRIX.summary, {
+    google: "yes",
+    duckduckgo: "yes",
+    yandex: "yes",
+    avito: "flag",
+    ozon: "flag",
+  });
 });
 
 test("S3.6/S4.2: q reaches every engine verbatim, operators included", async () => {

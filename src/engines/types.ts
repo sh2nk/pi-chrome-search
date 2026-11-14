@@ -18,9 +18,9 @@ export const PRIMARY_ENGINES = ["google", "duckduckgo", "yandex"] as const;
 /**
  * Special engines answer one site, not the web (SPEC §15 D11). They are never
  * part of `auto`: a marketplace listing is not an answer to "search the web",
- * so a caller must name the engine (`engines: "avito"`) to get it.
+ * so a caller must name the engine (`engines: "avito"`, `engines: "ozon"`).
  */
-export const SPECIAL_ENGINES = ["avito"] as const;
+export const SPECIAL_ENGINES = ["avito", "ozon"] as const;
 
 export type PrimaryEngineId = (typeof PRIMARY_ENGINES)[number];
 export type SpecialEngineId = (typeof SPECIAL_ENGINES)[number];
@@ -37,6 +37,7 @@ export const ENGINE_CLASS: Readonly<Record<EngineId, EngineClass>> = Object.free
   duckduckgo: "primary",
   yandex: "primary",
   avito: "special",
+  ozon: "special",
 });
 
 /** True when `auto` may pick this engine (SPEC S4.7). */
@@ -272,21 +273,21 @@ export type ArgumentSupport = "yes" | "flag";
 export const SUPPORT_MATRIX: Readonly<
   Record<SupportArgument, Readonly<Record<EngineId, ArgumentSupport>>>
 > = Object.freeze({
-  n: Object.freeze({ google: "yes", duckduckgo: "yes", yandex: "yes", avito: "yes" }),
+  n: Object.freeze({ google: "yes", duckduckgo: "yes", yandex: "yes", avito: "yes", ozon: "yes" }),
   // DuckDuckGo has no pagination in this adapter: page > 1 is served as page 1
   // and must be reported as `ignored.page`, never silently dropped (S4.2, S7.1).
-  // Avito paginates with `&p=` (verified live: the page-2 link carries `p=2`).
-  page: Object.freeze({ google: "yes", duckduckgo: "flag", yandex: "yes", avito: "yes" }),
-  // Avito has no native AI block at all (SPEC D12): asking is reported as
-  // `ignored.summary`, never answered with an invented summary.
-  summary: Object.freeze({ google: "yes", duckduckgo: "yes", yandex: "yes", avito: "flag" }),
+  // Avito paginates with `&p=` and Ozon with `&page=` (both verified live).
+  page: Object.freeze({ google: "yes", duckduckgo: "flag", yandex: "yes", avito: "yes", ozon: "yes" }),
+  // Neither marketplace has a native AI block (SPEC D12/D14): asking is reported
+  // as `ignored.summary`, never answered with an invented summary.
+  summary: Object.freeze({ google: "yes", duckduckgo: "yes", yandex: "yes", avito: "flag", ozon: "flag" }),
 });
 
 export interface EngineRegistry {
   /** Throws E_UNSUPPORTED when the adapter is missing or disabled. */
   get(id: EngineId): Engine;
   has(id: EngineId): boolean;
-  /** Enabled engines in canonical order; yandex last. */
+  /** Enabled engines in canonical order; the primaries first, special engines last. */
   enabled(): EngineId[];
   /**
    * Resolve a user selection to a try-order (D9/D10): `auto` uses the canonical order

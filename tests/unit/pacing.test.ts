@@ -37,6 +37,7 @@ const DOCUMENTED: Record<EngineId, PacingWindow> = {
   duckduckgo: [2000, 4000],
   yandex: [5000, 9000],
   avito: [6000, 12_000],
+  ozon: [6000, 12_000],
 };
 
 function pacingConfig(overrides: Partial<Record<EngineId, PacingWindow>> = {}): Config {
@@ -78,7 +79,7 @@ test("S10.1 the shipped pacing windows are the documented ones", () => {
   assert.deepEqual(DEFAULT_CONFIG.pacing, DOCUMENTED);
   assert.deepEqual(
     [...ENGINE_IDS],
-    ["google", "duckduckgo", "yandex", "avito"],
+    ["google", "duckduckgo", "yandex", "avito", "ozon"],
     "primary engines first, yandex last among them, special engines after",
   );
 });

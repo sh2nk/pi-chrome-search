@@ -23,6 +23,7 @@ import { resolveConfigPath } from "../config/env.ts";
 import { avitoEngine } from "./avito.ts";
 import { duckduckgoEngine } from "./duckduckgo.ts";
 import { googleEngine } from "./google.ts";
+import { ozonEngine } from "./ozon.ts";
 import { yandexEngine } from "./yandex.ts";
 import { WebSearchError } from "../runtime/error-codes.ts";
 import {
@@ -49,6 +50,7 @@ export const DEFAULT_ENGINES: EngineMap = Object.freeze({
   duckduckgo: duckduckgoEngine,
   yandex: yandexEngine,
   avito: avitoEngine,
+  ozon: ozonEngine,
 });
 
 /**
