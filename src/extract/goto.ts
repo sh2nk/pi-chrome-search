@@ -26,7 +26,7 @@
  * appear in no returned field and no log row.
  */
 
-import { DEFAULT_CONFIG } from "../config.ts";
+import { DEFAULT_CONFIG } from "../config/index.ts";
 import { gotoKey } from "../runtime/cache.ts";
 import { fail } from "../runtime/errors.ts";
 import type { Cache, Clock } from "../runtime/types.ts";
@@ -478,7 +478,7 @@ export function createGotoResolver(options: GotoResolverOptions): GotoResolver {
         if (target === null) return unresolved(wrapper, "bad-location", status);
         // A Google-valued Location means /sorry, consent or another wrapper.
         // Following it would turn this resolver into a redirect follower, and
-        // looping on /sorry is exactly the burst that earns a captcha.
+        // looping on /sorry is exactly the burst that earns a wall.
         if (isGoogleOwnedHost(hostOf(target))) {
           return unresolved(wrapper, "unexpected-redirect", status);
         }
@@ -513,4 +513,126 @@ export function createGotoResolver(options: GotoResolverOptions): GotoResolver {
       return unresolved(wrapper, `http-${status}`, status);
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Bounded batch resolution (SPEC S8.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrappers are cheap same-origin redirects, but a SERP can carry ten of them and
+ * v1 resolved them one at a time with a 5 s timeout each: up to 50 s on one
+ * page. Three concurrent resolutions plus one total deadline makes the stage
+ * bounded regardless of result count.
+ */
+export const GOTO_CONCURRENCY = 3;
+/** Whole-batch deadline, still clamped by whatever is left of the call budget. */
+export const GOTO_BATCH_TIMEOUT_MS = 8_000;
+
+export interface GotoBatchOptions {
+  resolver: GotoResolver;
+  wrappers: readonly string[];
+  concurrency?: number;
+  /** Total deadline for the batch; defaults to `GOTO_BATCH_TIMEOUT_MS`. */
+  deadlineMs?: number;
+  /** The caller's abort; it wins over the batch timer. */
+  signal?: AbortSignal;
+}
+
+export interface GotoBatchResult {
+  /** One entry per unique wrapper, resolved or not. */
+  byWrapper: Map<string, GotoResolution>;
+  resolved: number;
+  unresolved: number;
+  /** True when the batch deadline elapsed before every wrapper was attempted. */
+  timedOut: boolean;
+}
+
+function normalizePositiveInt(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.floor(value));
+}
+
+function batchDeadline(
+  parent: AbortSignal | undefined,
+  timeoutMs: number,
+): { signal: AbortSignal; cleanup: () => void; timedOut: () => boolean } {
+  const controller = new AbortController();
+  let timedOut = false;
+  const handle = setTimeout(() => {
+    timedOut = true;
+    controller.abort(fail("E_TIMEOUT", "resolve", { message: "the /goto batch deadline elapsed" }));
+  }, timeoutMs);
+  handle.unref?.();
+  const signal = parent === undefined ? controller.signal : AbortSignal.any([parent, controller.signal]);
+  return {
+    signal,
+    cleanup: () => clearTimeout(handle),
+    timedOut: () => timedOut,
+  };
+}
+
+/**
+ * Resolve wrappers with bounded concurrency and one total deadline.
+ *
+ * A batch deadline means "stop resolving and keep the wrappers": a link the
+ * caller cannot verify is marked unresolved, which is still a usable result. A
+ * caller abort is different and is rethrown, so a cancelled search is never
+ * reported as a success with silently unresolved links.
+ */
+export async function resolveGotoBatch(options: GotoBatchOptions): Promise<GotoBatchResult> {
+  const unique = [...new Set(options.wrappers.map((wrapper) => wrapper.trim()).filter((wrapper) => wrapper !== ""))];
+  const byWrapper = new Map<string, GotoResolution>();
+  if (unique.length === 0) return { byWrapper, resolved: 0, unresolved: 0, timedOut: false };
+
+  const caller = options.signal;
+  const callerAborted = (): boolean => caller?.aborted === true;
+  const deadlineMs = normalizePositiveInt(options.deadlineMs, GOTO_BATCH_TIMEOUT_MS);
+  const concurrency = Math.min(normalizePositiveInt(options.concurrency, GOTO_CONCURRENCY), unique.length);
+  const deadline = batchDeadline(options.signal, deadlineMs);
+
+  let next = 0;
+  const unresolvedFor = (wrapperUrl: string, reason: string): GotoResolution => ({
+    url: null,
+    wrapperUrl,
+    method: "unresolved",
+    reason,
+  });
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next;
+      next += 1;
+      const wrapper = unique[index];
+      if (wrapper === undefined) return;
+      if (callerAborted()) throw caller?.reason;
+      if (deadline.timedOut()) {
+        byWrapper.set(wrapper, unresolvedFor(wrapper, "batch-timeout"));
+        continue;
+      }
+      try {
+        byWrapper.set(wrapper, await options.resolver.resolve(wrapper, deadline.signal));
+      } catch (error) {
+        if (callerAborted()) throw error;
+        byWrapper.set(wrapper, unresolvedFor(wrapper, deadline.timedOut() ? "batch-timeout" : "resolve-failed"));
+      }
+    }
+  };
+
+  try {
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  } finally {
+    deadline.cleanup();
+  }
+
+  let resolved = 0;
+  let unresolved = 0;
+  for (const wrapper of unique) {
+    const resolution = byWrapper.get(wrapper) ?? unresolvedFor(wrapper, "not-attempted");
+    if (!byWrapper.has(wrapper)) byWrapper.set(wrapper, resolution);
+    if (resolution.url !== null) resolved += 1;
+    else unresolved += 1;
+  }
+
+  return { byWrapper, resolved, unresolved, timedOut: deadline.timedOut() };
 }

@@ -1,7 +1,7 @@
 /**
- * Exclusive, FIFO page locks (P9-A).
+ * Exclusive, FIFO page locks (PLAN P3).
  *
- * The connector hands out work tabs idempotently (`acquirePage("read")` always
+ * The session hands out work tabs idempotently (`acquirePage("read")` always
  * returns the same tab), which is exactly what a *serialized* tool needs and
  * exactly what a parallel one must not rely on: four concurrent `web_read`
  * calls used to navigate the same tab and all extract the last body. The tab
@@ -13,11 +13,10 @@
  *    request cannot starve the queue (`prev` is captured at enqueue time).
  *  - **No lock leak.** The task runs in `try/finally`; a throwing task releases
  *    the next waiter, and an aborted caller never holds a key forever.
- *  - **Per connector, not global.** The lock is keyed by connector identity so
- *    two pi sessions (two connectors) do not serialise each other; the browser
- *    lock file already arbitrates the truly global case. This only works while
- *    the connector is the one instance the tools share (the runtime builds it
- *    once) — a connector rebuilt per call would hand out a fresh lock per call.
+ *  - **Per session, not global.** The lock is keyed by session identity so two
+ *    pi sessions do not serialise each other; the cross-process lock file
+ *    already arbitrates the truly global case. This only works while the session
+ *    is the one instance the tools share (the runtime builds it once).
  *
  * The pool (`config.read.pool`) is a set of independent keys (`read`, `read#2`,
  * …): `pick()` returns the least-loaded one *synchronously*, so two callers who
@@ -100,17 +99,17 @@ export function createKeyedLock(): KeyedLock {
 }
 
 /**
- * One lock per connector. A `WeakMap` keeps solved sessions out of memory and
- * makes the lock reachable from every tool instance built over the same
- * connector (the `web_research` tool builds its own `web_read` inside).
+ * One lock per session. A `WeakMap` keeps solved sessions out of memory and
+ * makes the lock reachable from every tool instance built over the same session
+ * (the `web_research` tool builds its own `web_read` inside).
  */
 const locks = new WeakMap<object, KeyedLock>();
 
-export function pageLockFor(connector: object): KeyedLock {
-  const existing = locks.get(connector);
+export function pageLockFor(session: object): KeyedLock {
+  const existing = locks.get(session);
   if (existing !== undefined) return existing;
   const created = createKeyedLock();
-  locks.set(connector, created);
+  locks.set(session, created);
   return created;
 }
 

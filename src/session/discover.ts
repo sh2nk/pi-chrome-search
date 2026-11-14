@@ -1,5 +1,5 @@
 /**
- * CDP endpoint discovery (SPEC §5.1).
+ * CDP endpoint discovery (SPEC S8.4).
  *
  * Precedence: `PI_CHROME_CDP_WS` → `PI_CHROME_CDP_PORTS` → `DevToolsActivePort`
  * in the well-known profile dirs → plain port scan. The file step never probes
@@ -26,12 +26,12 @@ import {
   tildify,
   type BrowserBrand,
 } from "../runtime/host.ts";
-import type { CdpEndpoint, CdpSource } from "./types.ts";
+import type { CdpEndpoint, CdpSource } from "../cdp/types.ts";
 
 /** Chrome answers `/json/version` instantly on loopback or not at all. */
 export const DEFAULT_PROBE_TIMEOUT_MS = 1500;
 
-/** SPEC §5.1: 9222 is the last-resort candidate when no file exists. */
+/** SPEC S8.4: 9222 is the last-resort candidate when no file exists. */
 export const DEFAULT_PORTS: readonly number[] = [9222];
 
 /**

@@ -9,8 +9,8 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
-import { type DevToolsActivePortEndpoint, type DevToolsActivePortResult, type DiscoverOptions, type FetchJson, type ReadTextFile, discoverEndpoint, parseDevToolsActivePort } from "../../src/cdp/discovery.ts";
-import { createKeyedLock, pageLockFor, readSlotKeys } from "../../src/cdp/page-lock.ts";
+import { type DevToolsActivePortEndpoint, type DevToolsActivePortResult, type DiscoverOptions, type FetchJson, type ReadTextFile, discoverEndpoint, parseDevToolsActivePort } from "../../src/session/discover.ts";
+import { createKeyedLock, pageLockFor, readSlotKeys } from "../../src/session/page-lock.ts";
 import { type ErrorCode, WebSearchError, isWebSearchError } from "../../src/runtime/error-codes.ts";
 
 // ---------------------------------------------------------------------------

@@ -83,7 +83,7 @@
   </section>
 
   <section class="card">
-    <h2>Daily counters</h2>
+    <h2>Session counters</h2>
     <table>
       <tbody>
         <tr><td>google</td><td class="num" id="count-google">—</td></tr>
@@ -135,7 +135,7 @@
       var cell = counters[entry.engine];
       if (!cell) continue;
       seen[entry.engine] = true;
-      cell.textContent = String(entry.today) + " / " + String(entry.cap);
+      cell.textContent = String(entry.today);
     }
     for (var name in counters) {
       if (!seen[name] && counters[name]) counters[name].textContent = "—";

@@ -10,12 +10,15 @@
  *   R5  no paid search APIs or search keys
  *   R6  no secrets in tracked files (values are never printed)
  *   R7  no personal data in tests/fixtures/**
- *   R8  repo hygiene: no development apparatus, no tracked build output or screenshots
+ *   R8  repo hygiene: no development apparatus (research/, evidence/, bench/, archived PLAN-vN),
+ *       no tracked build output or screenshots. The normative SPEC.md is allowed by name.
  *   R9  packaging sanity (`files` allowlist, metadata, no install hooks)
  *   R10 tool-description budget (approximate; the authoritative check is a unit test)
  *   R13 host facts live only in src/runtime/host.ts (PO1–PO4)
- *   R14 documentation budgets (README ≤90, AGENTS ≤100, docs/*.md ≤120, docs total ≤400)
- *   R15 docs↔code drift (DEFAULT_CONFIG keys, error codes, registered tools)
+ *   R14 documentation budgets (README ≤90, AGENTS ≤150, SPEC ≤320, docs/*.md ≤120,
+ *       docs total ≤400)
+ *   R15 generated README/errors docs, error codes and registered tools agree with the code
+ *   R16 generated config docs and every config leaf read by production code
  *
  * Code is read with comments blanked and literals kept, so a comment documenting "never launch
  * Playwright" is not a violation while `import "playwright"` still is.
@@ -30,8 +33,8 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MAX_BYTES = 4 * 1024 * 1024;
 const SKIP_DIRS = new Set(["node_modules", ".git"]);
 const CODE_EXT = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
-const TOOL_BUDGET_CHARS = 900;
-const DOC_BUDGET = { README: 90, AGENTS: 100, doc: 120, docsTotal: 400 };
+const TOOL_BUDGET_CHARS = 1200;
+const DOC_BUDGET = { README: 90, AGENTS: 150, SPEC: 320, doc: 120, docsTotal: 400 };
 
 const json = process.argv.includes("--json");
 if (process.argv.slice(2).some((arg) => arg !== "--json")) {
@@ -225,9 +228,12 @@ for (const rel of FILES.filter((f) => f.startsWith("tests/fixtures/") && !f.ends
 }
 add("R7", "no personal data in fixtures", fixtureFindings, "tests/fixtures/**");
 
+/** The normative SPEC.md is allowed by exact name (a leftover PLAN is apparatus). */
+const NORMATIVE_DOCS = new Set(["SPEC.md"]);
+
 const hygiene = [];
 for (const rel of FILES) {
-  const rule = /^(?:research|evidence|bench)\//.test(rel) || /^(?:SPEC|PLAN[^/]*)\.md$/.test(rel) ? "apparatus"
+  const rule = /^(?:research|evidence|bench)\//.test(rel) || (!NORMATIVE_DOCS.has(rel) && /^(?:SPEC|PLAN[^/]*)\.md$/.test(rel)) ? "apparatus"
     : rel.startsWith("node_modules/") ? "tracked-node_modules"
     : /(?:^|\/)\.env(?:\.|$)/.test(rel) ? "env-file"
     : /\.(?:png|jpe?g|webp)$/i.test(rel) ? "screenshot"
@@ -288,66 +294,94 @@ add("R13", "host facts live only in the host layer", scan(srcFiles.filter((rel) 
 const lines = (rel) => (readText(rel) ?? "").replace(/\n$/, "").split("\n").length;
 const docs = FILES.filter((rel) => /^docs\/[^/]+\.md$/.test(rel));
 const docFindings = [];
-if (lines("README.md") > DOC_BUDGET.README) docFindings.push({ file: "README.md", line: lines("README.md"), rule: "budget", detail: `> ${DOC_BUDGET.README}` });
-if (lines("AGENTS.md") > DOC_BUDGET.AGENTS) docFindings.push({ file: "AGENTS.md", line: lines("AGENTS.md"), rule: "budget", detail: `> ${DOC_BUDGET.AGENTS}` });
+for (const [file, budget] of [
+  ["README.md", DOC_BUDGET.README],
+  ["AGENTS.md", DOC_BUDGET.AGENTS],
+  ["SPEC.md", DOC_BUDGET.SPEC],
+]) {
+  if (lines(file) > budget) docFindings.push({ file, line: lines(file), rule: "budget", detail: `> ${budget}` });
+}
 let docsTotal = 0;
 for (const rel of docs) {
   docsTotal += lines(rel);
   if (lines(rel) > DOC_BUDGET.doc) docFindings.push({ file: rel, line: lines(rel), rule: "budget", detail: `> ${DOC_BUDGET.doc}` });
 }
 if (docsTotal > DOC_BUDGET.docsTotal) docFindings.push({ file: "docs/", line: docsTotal, rule: "budget", detail: `> ${DOC_BUDGET.docsTotal}` });
-add("R14", "documentation budgets", docFindings, "README.md, AGENTS.md, docs/*.md");
+add("R14", "documentation budgets", docFindings, "README.md, AGENTS.md, SPEC.md, docs/*.md");
 
-/** Dotted key paths of `export const DEFAULT_CONFIG = { … }`, walked by brace depth. */
-function configKeys() {
-  const text = readText("src/config.ts") ?? "";
-  const start = text.indexOf("export const DEFAULT_CONFIG");
-  if (start === -1) return [];
-  const body = text.slice(start);
-  const keys = [];
-  const names = [""];
-  let depth = 0;
-  let lastKey = null;
-  let i = body.indexOf("{") + 1;
-  while (i > 0 && i < body.length) {
-    const ch = body[i];
-    if (ch === '"' || ch === "'" || ch === "`") {
-      const quote = ch;
-      i += 1;
-      while (i < body.length && body[i] !== quote) i += body[i] === "\\" ? 2 : 1;
-      i += 1;
-      continue;
+/** Every leaf of the default config, as dotted paths. */
+function configLeaves(value, prefix = "", out = []) {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    for (const [key, child] of Object.entries(value)) {
+      configLeaves(child, prefix === "" ? key : `${prefix}.${key}`, out);
     }
-    if (ch === "{") {
-      depth += 1; names[depth] = lastKey ?? ""; lastKey = null; i += 1; continue;
-    }
-    if (ch === "}") {
-      if (depth === 0) break;
-      depth -= 1; lastKey = null; i += 1; continue;
-    }
-    const key = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/.exec(body.slice(i, i + 80));
-    if (key !== null) {
-      lastKey = key[1];
-      const prefix = names[depth] ?? "";
-      keys.push(prefix === "" ? lastKey : `${prefix}.${lastKey}`);
-      i += key[0].length;
-      continue;
-    }
-    i += 1;
+  } else {
+    out.push(prefix);
   }
-  return keys;
+  return out;
 }
+
+const { DEFAULT_CONFIG } = await import("../src/config/defaults.ts");
+const { renderConfigDoc } = await import("../src/config/doc.ts");
+const configSource = srcFiles
+  .filter((rel) => !rel.startsWith("src/config/"))
+  .map((rel) => stripComments(readText(rel) ?? ""))
+  .join("\n");
+
+const ENGINE_SEGMENT = new Set(["google", "duckduckgo", "yandex"]);
+function escapeRe(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+/** `config.pacing[engine]` and `config.engines[id].enabled` are real read paths. */
+function configReadPattern(path) {
+  let pattern = "config";
+  for (const segment of path.split(".")) {
+    pattern += ENGINE_SEGMENT.has(segment)
+      ? `(?:\\.(?:google|duckduckgo|yandex)|\\[\\s*[^\\]]+\\s*\\])`
+      : `\\.${escapeRe(segment)}`;
+  }
+  return new RegExp(`${pattern}(?![A-Za-z0-9_])`);
+}
+
+const configFindings = [];
+const expectedConfigDoc = renderConfigDoc();
+if ((readText("docs/config.md") ?? "") !== expectedConfigDoc) {
+  configFindings.push({
+    file: "docs/config.md", line: 0, rule: "generated",
+    detail: "stale; run node scripts/gen-config-doc.mjs",
+  });
+}
+for (const leaf of configLeaves(DEFAULT_CONFIG)) {
+  if (!configReadPattern(leaf).test(configSource)) {
+    configFindings.push({ file: "src/config/", line: 0, rule: "dead-key", detail: leaf });
+  }
+}
+add("R16", "generated config docs and every leaf read (values, enums, ranges)", configFindings, "docs/config.md, src/");
 
 const drift = [];
-const configDoc = readText("docs/config.md") ?? "";
-for (const key of configKeys()) {
-  if (!configDoc.includes(key)) drift.push({ file: "docs/config.md", line: 0, rule: "config-key", detail: key });
-}
+const { renderErrorsDoc } = await import("../src/runtime/errors-doc.ts");
+const { createTools } = await import("../src/tools/index.ts");
+const { README_TOOLS_END, README_TOOLS_START, renderReadmeToolTable } = await import("../src/tools/surface.ts");
 const errorDoc = readText("docs/errors.md") ?? "";
+if (errorDoc !== renderErrorsDoc()) {
+  drift.push({ file: "docs/errors.md", line: 0, rule: "generated", detail: "stale; run node scripts/gen-errors-doc.mjs" });
+}
 for (const match of (readText("src/runtime/error-codes.ts") ?? "").matchAll(/\bE_[A-Z_]+\b/g)) {
   if (!errorDoc.includes(match[0])) drift.push({ file: "docs/errors.md", line: 0, rule: "error-code", detail: match[0] });
 }
 const readme = readText("README.md") ?? "";
+const generatedTools = createTools({
+  getDeps: () => {
+    throw new Error("audit: rendering the surface must not resolve tool dependencies");
+  },
+  getDoctorDeps: () => {
+    throw new Error("audit: rendering the surface must not resolve tool dependencies");
+  },
+});
+const toolsBlock = `${README_TOOLS_START}\n${renderReadmeToolTable(generatedTools)}\n${README_TOOLS_END}`;
+if (readme.match(new RegExp(`${README_TOOLS_START}[\\s\\S]*?${README_TOOLS_END}`))?.[0] !== toolsBlock) {
+  drift.push({ file: "README.md", line: 0, rule: "generated", detail: "stale; run node scripts/gen-readme.mjs" });
+}
 const tools = new Set();
 for (const rel of toolFiles) {
   for (const match of (readText(rel) ?? "").matchAll(/^\s{2}name:\s*"([a-z_]+)"/gm)) tools.add(match[1]);
@@ -355,7 +389,7 @@ for (const rel of toolFiles) {
 for (const tool of tools) {
   if (!readme.includes(`\`${tool}\``)) drift.push({ file: "README.md", line: 0, rule: "tool", detail: tool });
 }
-add("R15", "docs ↔ code drift", drift, "docs/config.md, docs/errors.md, README.md");
+add("R15", "generated README/errors docs and docs ↔ code drift", drift, "docs/errors.md, README.md");
 
 // --------------------------------------------------------------------------- report
 

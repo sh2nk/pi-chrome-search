@@ -1,90 +1,51 @@
 # pi-chrome-search
 
-[![npm](https://img.shields.io/npm/v/pi-chrome-search)](https://www.npmjs.com/package/pi-chrome-search)
-[![pi](https://img.shields.io/badge/pi-package-6f42c1)](https://pi.dev/packages)
-[![ci](https://github.com/sh2nk/pi-chrome-search/actions/workflows/ci.yml/badge.svg)](https://github.com/sh2nk/pi-chrome-search/actions/workflows/ci.yml)
-[![license](https://img.shields.io/npm/l/pi-chrome-search)](LICENSE)
-[![node](https://img.shields.io/badge/node-%3E%3D26-brightgreen)](package.json)
-
-Free web search for [pi](https://pi.dev) through your own visible Chrome: same profile, same cookies,
-same IP. Compact Markdown from Google, DuckDuckGo and Yandex, with each engine's native AI summary
-(AI Overview, Search Assist, Alice). The window stays visible on purpose, so you can watch the search
-and solve a captcha yourself. No keys, no paid APIs, no headless mode, no spoofing, no captcha solving.
-Needs Node ≥26 and Chrome 136+.
+Web search and page reading for [pi](https://pi.dev), through your own visible Chrome. Same profile,
+cookies and IP. Google, DuckDuckGo and Yandex return compact Markdown and their native AI summary when
+there is one. No keys, no paid APIs, no headless mode, no fingerprint spoofing. Node 26+, Chrome 136+.
 
 ## Install
 
 ```bash
-pi install npm:pi-chrome-search   # adds the package to ~/.pi/agent/settings.json
-pi -e npm:pi-chrome-search        # or one session only; run /reload in pi afterwards
+pi install npm:pi-chrome-search
 ```
 
-## Enable CDP (once per Chrome session)
+Chrome 136+ enables debugging only after an explicit click:
 
-Chrome 136+ ignores `--remote-debugging-port` for the default profile: debugging is enabled from
-inside the browser, with an explicit **Allow** click.
-
-1. Open `chrome://inspect/#remote-debugging` in the Chrome window the agent should use.
+1. Open `chrome://inspect/#remote-debugging`.
 2. Tick **Discover network targets**, then click **Allow**.
-3. Check the endpoint file (port, then `ws` path): `cat ~/.config/google-chrome/DevToolsActivePort`.
 
-Discovery order: `PI_CHROME_CDP_WS` → `PI_CHROME_CDP_PORTS` → `DevToolsActivePort` → `cdp.ports`.
-`curl 127.0.0.1:9222/json/version` may stay empty here; the file is authoritative.
+The window stays visible. The extension attaches to it and never launches, restarts or closes Chrome.
 
 ## Tools
 
-`web_search` is `direct`; the rest are `deferred` (via tool search or `codemode`, no per-prompt cost).
+`web_search` and `web_read` are direct. The other three sit behind `tool_search`.
 
-| Tool | Arguments |
-|---|---|
-| `web_search` | `q`; `n` 1-10 (5); `engines` `auto`\|id\|list; `summary`; `freshness` `d\|w\|m\|y`; `page`; `format` `md\|json` |
-| `web_read` | `url` (public http/https); `offset`; `maxChars` (6000, ceiling 20000); `format` `md\|text` |
-| `image_search` | `q`; `n` ≤12 (4); `engine` `google\|yandex`; `attach` (≤4 image blocks) |
-| `web_research` | `q`; `budget` `quick` (1 search + 2 reads), `normal` (2+4), `deep` (4+8) |
-| `web_doctor` | `probe` (true); `fix` (false: reconnect, close owned tabs, prune artifacts) |
+<!-- tools:start -->
+| Tool | Exposure | Arguments |
+|---|---|---|
+| `web_search` | direct | `q` string; `n?` integer 1..10; `engines?` "auto" or ("google" or "duckduckgo" or "yandex") or list of ("google" or "duckduckgo" or "yandex") 1..3; `summary?` boolean; `page?` integer >=1; `format?` "md" or "json" |
+| `web_read` | direct | `url` string; `offset?` integer >=0; `maxChars?` integer >=1; `format?` "md" or "text" |
+| `image_search` | deferred | `q` string; `n?` integer 1..12; `engine?` "google" or "yandex"; `attach?` boolean or "bytes" |
+| `web_research` | deferred | `q` string; `budget?` "quick" or "normal" or "deep" |
+| `web_doctor` | deferred | `probe?` boolean; `fix?` boolean |
+<!-- tools:end -->
 
-Output is capped at 2500 chars (summary ≤1200, snippet ≤140). The AI block reports `ai:yes` only for
-≥200 chars of prose, `ai:lead` for a block without an answer, `ai:no` when absent.
+A call has one 60 second deadline. DuckDuckGo has no pagination: `page > 1` is reported as
+`ignored.page`. Every unresolved link stays marked `unresolved`.
 
-## Configuration
+## Limits
 
-`~/.pi/agent/web-search.json` (or `$PI_CODING_AGENT_DIR/web-search.json`), optional and strict: an
-unknown key fails as `E_CONFIG`. Every key and env override: [`docs/config.md`](docs/config.md).
+No headless browsing, automation profile, captcha solving, proxy rotation, cookie export, telemetry or
+paid search API. Google and Yandex forbid automated access in their terms. If a captcha appears, solve it
+in the window or stop.
 
-## When it fails
+## Failures
 
-| Code | Action |
-|---|---|
-| `E_CDP_UNAVAILABLE` | Open `chrome://inspect/#remote-debugging`, tick **Discover network targets**, click **Allow**, or set `PI_CHROME_CDP_WS` |
-| `E_CDP_AWAITING_ALLOW` | The prompt is waiting; click it, the call resumes on its own (60 s) |
-| `E_WALL` | Captcha or consent page: solve it in the visible window, then retry |
-| `E_BUSY` | Another pi session holds the lock in `~/.pi/agent/`: close it or wait |
-| `E_PARSE` | A selector canary broke: compare the artifact `page.txt` with [`docs/engines.md`](docs/engines.md) |
+Every failure is an `E_*` code with a stage, a retry flag and a hint you can act on. The full table is in
+[errors.md](https://github.com/sh2nk/pi-chrome-search/blob/main/docs/errors.md). Start with
+`/web-doctor` or `node src/cli/doctor.ts --json`.
 
-All 19 codes: [`docs/errors.md`](docs/errors.md). Start with `/web-doctor` or `node src/cli/doctor.ts --json`.
+Config reference: [config.md](https://github.com/sh2nk/pi-chrome-search/blob/main/docs/config.md).
 
-## Security and ToS
-
-Searches run in your browser, as you. `web_read` refuses loopback, private, `file:` and `data:` URLs,
-re-checked on redirect. No telemetry; artifacts are sanitized and git-ignored. The optional page gate
-sends URL, title and snippet of at most 10 sources (never page text), `reflex.localOnly` keeps it local.
-
-Google and Yandex forbid automated access in their terms. This project does not claim compliance and
-must not be run as a service. A captcha means solve it in the window or stop.
-
-## Development
-
-```bash
-git clone https://github.com/sh2nk/pi-chrome-search && cd pi-chrome-search && npm install
-pi install .                         # register this checkout, no copy
-pi -e ./src/index.ts                 # or one throwaway session
-npm run lint                         # typecheck + audit
-npm test                             # offline contract suite
-PI_CHROME_LIVE=1 npm run test:live   # one query per engine, no retries
-```
-
-Decisions: [`docs/architecture.md`](docs/architecture.md). Selectors: [`docs/engines.md`](docs/engines.md).
-
-## License
-
-MIT, see [`LICENSE`](LICENSE).
+MIT.

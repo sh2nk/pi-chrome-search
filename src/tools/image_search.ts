@@ -24,8 +24,9 @@
 import { Type, type Static } from "typebox";
 
 import type { CdpPage } from "../cdp/types.ts";
-import { pageLockFor } from "../cdp/page-lock.ts";
-import type { Config } from "../config.ts";
+import { announceWork } from "../runtime/panel.ts";
+import { pageLockFor } from "../session/index.ts";
+import type { Config } from "../config/index.ts";
 import {
   IMAGE_ENGINE_IDS,
   buildImagesUrl,
@@ -102,7 +103,7 @@ export interface ImageSearchTool {
   description: string;
   parameters: typeof imageSearchSchema;
   exposure: "deferred";
-  annotations: { readOnlyHint: true; openWorldHint: true; idempotentHint: true };
+  annotations: { readOnlyHint: false; openWorldHint: true; idempotentHint: false };
   execute(
     toolCallId: string,
     params: ImageSearchInput,
@@ -445,9 +446,22 @@ async function search(
   // Same tab, same FIFO lock as `web_search`: an image query and a web search on
   // one engine must never navigate (or type into) the same tab at once. A
   // validation or config error never waits on a lock.
-  return await pageLockFor(deps.cdp).run(engine, () =>
-    searchLocked(deps, input, signal, resolve),
-  );
+  return await pageLockFor(deps.cdp).run(engine, async () => {
+    // S12.5: an image query is visible on the anchor and raises its own tab under
+    // `window.follow`, exactly like a text search. Announced inside the lock so a
+    // queued caller cannot claim the panel before it owns the tab.
+    await announceWork(deps.cdp, { stage: "navigate", engine, query: input.q });
+    const result = await searchLocked(deps, input, signal, resolve);
+    if ("isError" in result) {
+      await announceWork(deps.cdp, { stage: "error", engine, error: { code: result.details.code } });
+      // A wall keeps the page and the work tab in front for the human (D5); any
+      // other failure hands the screen back to the anchor after `window.idleMs`.
+      if (result.details.code !== "E_WALL") await announceWork(deps.cdp, { stage: "done", engine });
+    } else {
+      await announceWork(deps.cdp, { stage: "done", engine });
+    }
+    return result;
+  });
 }
 
 async function searchLocked(
@@ -620,7 +634,7 @@ export function createImageSearchTool(
     description: IMAGE_SEARCH_DESCRIPTION,
     parameters: imageSearchSchema,
     exposure: "deferred",
-    annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+    annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: false },
     execute,
   };
 }

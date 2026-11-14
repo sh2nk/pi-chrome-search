@@ -1,0 +1,46 @@
+{
+  "name": "research-basic",
+  "query": "cdp attach browser",
+  "searches": [
+    {
+      "query": "cdp attach browser",
+      "engines": ["duckduckgo"],
+      "hits": [
+        {
+          "title": "Attach over CDP",
+          "url": "https://docs.example.test/cdp/attach",
+          "snippet": "How to attach to a running browser over the Chrome DevTools Protocol."
+        },
+        {
+          "title": "Attaching a browser session",
+          "url": "https://blog.example.test/posts/cdp-session",
+          "snippet": "A field note about keeping one browser session per profile."
+        },
+        {
+          "title": "Attach over CDP",
+          "url": "https://docs.example.test/cdp/attach?utm_source=newsletter",
+          "snippet": "The same attach page with a tracking parameter; dedup must collapse it."
+        },
+        {
+          "title": "DevTools protocol overview",
+          "url": "https://reference.example.test/devtools/browser",
+          "snippet": "Protocol reference for browser targets, sessions and tabs."
+        }
+      ]
+    }
+  ],
+  "reads": {
+    "https://docs.example.test/cdp/attach": {
+      "title": "Attach over CDP",
+      "text": "# Attach over CDP\n\nThe browser exposes a DevTools endpoint that a client can attach to without launching a new instance. The client connects over the WebSocket endpoint advertised by the browser process.\n\nA tab is attached with a flat session so commands and events carry a session identifier."
+    },
+    "https://blog.example.test/posts/cdp-session": {
+      "title": "Attaching a browser session",
+      "text": "# Attaching a browser session\n\nA long lived browser session keeps cookies and logins available to the client that attaches to it. Reusing that session avoids a second sign in and keeps the profile warm.\n\nSession identifiers change when the browser restarts."
+    },
+    "https://reference.example.test/devtools/browser": {
+      "title": "DevTools protocol overview",
+      "text": "# DevTools protocol overview\n\nBrowser targets describe tabs, pages and workers. A flat session multiplexes them over a single connection.\n\nEvents are delivered in the order the browser emitted them."
+    }
+  }
+}

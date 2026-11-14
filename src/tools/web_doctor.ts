@@ -75,7 +75,7 @@ export interface WebDoctorTool {
   description: string;
   parameters: typeof webDoctorSchema;
   exposure: "deferred";
-  annotations: { readOnlyHint: false; openWorldHint: true; idempotentHint: true };
+  annotations: { readOnlyHint: false; openWorldHint: true; idempotentHint: false };
   execute(
     toolCallId: string,
     params: WebDoctorInput,
@@ -210,7 +210,7 @@ export function createWebDoctorTool(getDeps: WebDoctorDepsGetter): WebDoctorTool
     description: WEB_DOCTOR_DESCRIPTION,
     parameters: webDoctorSchema,
     exposure: "deferred",
-    annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: true },
+    annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: false },
     execute,
   };
 }

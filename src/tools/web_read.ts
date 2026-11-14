@@ -1,5 +1,5 @@
 /**
- * `web_read` — deferred page reading (SPEC §7.2, PLAN P4-A).
+ * `web_read` — direct page reading, the second half of search → read (S3, S5).
  *
  * The tool is a thin orchestrator over frozen contracts, like `web_search`:
  * validate the URL through the SSRF guard, acquire the work tab, navigate,
@@ -10,10 +10,6 @@
  * - the guard runs before `acquirePage`, so a private URL causes no navigation;
  * - it runs again on `page.url()`, because the first check cannot see redirects.
  *
- * When `config.reflex.enabled` is true, the P14 page gate (and, for a pre-P14
- * reflex, the P5 read gate) may decline the page before a tab is spent; a
- * disabled reflex is not consulted at all.
- *
  * Output is Markdown (or plain text) produced by `extract/read.ts`; raw HTML is
  * never returned. The audit log records `host + path` only — a read URL may
  * carry a session token or a personal query, and the log is not the place for
@@ -22,9 +18,10 @@
 
 import { Type, type Static } from "typebox";
 
-import { pageLockFor, readSlotKeys } from "../cdp/page-lock.ts";
+import { pageLockFor, readSlotKeys } from "../session/index.ts";
 import type { CdpPage, PageKey } from "../cdp/types.ts";
-import type { Config } from "../config.ts";
+import { READINESS_SOFT_DEADLINE_MS, waitForDocumentReadiness } from "../cdp/readiness.ts";
+import type { Config } from "../config/index.ts";
 import {
   extractPdfText,
   renderPdfWindow,
@@ -32,18 +29,20 @@ import {
 } from "../extract/pdf.ts";
 import {
   READ_MAX_CHARS_CEILING,
+  blocksToText,
   extractReadableDocument,
   renderReadableDocument,
   type ReadBlock,
   type ReadInline,
   type ReadableDocument,
 } from "../extract/read.ts";
-import type { PageVerdict, Reflex } from "../reflex/types.ts";
 import { saveFailureArtifact } from "../runtime/artifacts.ts";
+import { createCallBudget, raceSignal, type CallBudget } from "../runtime/budget.ts";
 import type { FailureDetails, Stage, WebSearchError } from "../runtime/error-codes.ts";
 import { isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, renderToolFailure, toFailure } from "../runtime/errors.ts";
 import type { FailureFallback, FailureJson, ToolTextBlock } from "../runtime/errors.ts";
+import { announceWork } from "../runtime/panel.ts";
 import { assertPublicUrl, type ResolveHost } from "../runtime/ssrf.ts";
 import type { ToolDeps } from "./types.ts";
 
@@ -104,14 +103,14 @@ export interface WebReadFailure {
 
 export type WebReadResult = WebReadSuccess | WebReadFailure;
 
-/** The object shape pi registers (P4-D wires it into the extension). */
+/** The object shape pi registers; it is direct because reading is half the product (S3). */
 export interface WebReadTool {
   name: "web_read";
   label: string;
   description: string;
   parameters: typeof webReadSchema;
-  exposure: "deferred";
-  annotations: { readOnlyHint: true; openWorldHint: true; idempotentHint: true };
+  exposure: "direct";
+  annotations: { readOnlyHint: false; openWorldHint: true; idempotentHint: false };
   execute(
     toolCallId: string,
     params: WebReadInput,
@@ -127,7 +126,7 @@ export interface WebReadTool {
  * parameters and the hard security rule, and nothing else.
  */
 export const WEB_READ_DESCRIPTION =
-  "Read a public page via the user's Chrome as clean Markdown. PDFs become text with page markers; scans are refused. 6000 chars default; offset/maxChars <=20000. Private/local URLs refused.";
+  "Read one public http(s) page in the user's visible Chrome as compact, paged Markdown or text. Pass a web_search result URL. PDFs become text; scanned PDFs are refused. Private/local URLs refused.";
 
 export interface WebReadOptions {
   /**
@@ -140,33 +139,6 @@ export interface WebReadOptions {
 /** Validation hint: the fix is in the call, not in a config file. */
 const INPUT_HINT =
   "check the web_read arguments: url (public http/https), offset >= 0, maxChars >= 1, format md|text";
-
-const UNSUPPORTED_HINT = "the page produced no readable text; try a different URL";
-
-/**
- * `E_UNSUPPORTED` is the least misleading code in the frozen taxonomy for a
- * declined read: the page was not refused as private (`E_BLOCKED_URL`), not
- * walled, not unparseable — the reflex simply judged it not worth a page load.
- * The hint names the escape hatch so a wrong verdict is actionable.
- */
-const READ_GATE_HINT =
-  "the reflex read gate declined this page (spam/ad host, login or checkout, or unlikely to answer); " +
-  "read another URL or set reflex.enabled=false to turn the gate off";
-
-/**
- * P14 hint. A quality skip is not a transport failure: the URL is fine, the
- * judge does not expect it to answer. Naming the escape hatch keeps a wrong
- * verdict actionable without inviting the caller to retry in a loop.
- */
-const PAGE_GATE_HINT =
-  "the reflex page gate judged this page not worth a read (farm/aggregator host, off-topic section, " +
-  "deceptive URL or thin content); read another URL or set reflex.enabled=false to turn the gate off";
-
-/** One printable line: kind plus the rules/model reasons that decided it. */
-function pageGateMessage(verdict: PageVerdict): string {
-  const reasons = verdict.reasons.slice(0, 3).join(", ");
-  return `page gate declined this URL: ${verdict.kind}${reasons === "" ? "" : ` (${reasons})`}`;
-}
 
 /**
  * Reads get their own work tabs (`PageKey` in `src/cdp/types.ts`): a long article
@@ -371,40 +343,6 @@ function auditDomain(finalUrl: URL): string {
   return value.length > 300 ? `${value.slice(0, 299)}…` : value;
 }
 
-/**
- * The read gate (P5-D + P14). `web_read` has no query and no SERP metadata, so
- * the URL itself is the only honest subject.
- *
- * P14 runs first: `judgePages` screens farm/aggregator hosts, off-topic
- * sections, deceptive URLs and (with an excerpt, which a read does not have yet)
- * thin content, and the classifier may add a skip. When the gate is absent
- * (pre-P14 reflex) or abstains, the older `gateRead` still answers, so the two
- * generations compose instead of duplicating a model call.
- *
- * Fail-open: a reflex that throws is a reflex problem, never a reason to refuse
- * a page the caller explicitly asked for.
- */
-async function pageGateVerdict(reflex: Reflex, url: string): Promise<PageVerdict | null> {
-  if (typeof reflex.judgePages !== "function") return null;
-  try {
-    // Rules only: an explicit URL has already been chosen, so the gate is the
-    // safety floor (punycode, abused TLD, scam, login) and this read pays no
-    // classifier latency or cost. `web_research` uses the classifier.
-    const verdicts = await reflex.judgePages(url, [{ url }], { backend: "rules" });
-    return verdicts === null ? null : (verdicts[0] ?? null);
-  } catch {
-    return null;
-  }
-}
-
-async function readGateAllows(reflex: Reflex, url: string): Promise<boolean> {
-  try {
-    return await reflex.gateRead(url, { title: url, url, snippet: "", engine: "read" });
-  } catch {
-    return true;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Failure snapshots + the post-navigate proof
 // ---------------------------------------------------------------------------
@@ -416,6 +354,7 @@ async function readGateAllows(reflex: Reflex, url: string): Promise<boolean> {
  */
 const ARTIFACT_CODES: ReadonlySet<string> = new Set([
   "E_PARSE",
+  "E_EMPTY_PAGE",
   "E_TIMEOUT",
   "E_BLOCKED_URL",
   "E_NAVIGATION_MISMATCH",
@@ -477,6 +416,28 @@ async function failWithArtifact(
 }
 
 /**
+ * Budget exhaustion is `E_TIMEOUT` at stage `budget` with an artifact (S8.1).
+ * The page is already open at every call site, so the snapshot is cheap and
+ * tells the reader what the tab was showing when the deadline hit.
+ */
+async function checkReadBudget(
+  deps: ToolDeps,
+  page: CdpPage,
+  budget: CallBudget,
+  stage: Stage,
+): Promise<void> {
+  try {
+    budget.check(stage);
+  } catch (error) {
+    throw await failWithArtifact(
+      deps,
+      page,
+      asFailure(error, stage, "E_CDP_DISCONNECTED", budget.signal),
+    );
+  }
+}
+
+/**
  * Same-document check for the post-navigate proof. A fragment or a trailing
  * slash is not a different page; a host, path or query change is.
  */
@@ -508,12 +469,26 @@ export function createWebReadTool(
       return failureResult(error, { code: "E_CONFIG", stage: "config" });
     }
 
+    let budget: CallBudget;
+    try {
+      budget = createCallBudget({
+        clock: deps.clock,
+        budgetMs: deps.config.read.budgetMs,
+        ...(signal === undefined ? {} : { parent: signal }),
+        label: "web_read",
+      });
+    } catch (error) {
+      return failureResult(error, { code: "E_CONFIG", stage: "config" });
+    }
+
     // Last-resort barrier: a dependency bug must still reach the agent as a
     // rendered failure with a code and a stage, never as a bare thrown error.
     try {
-      return await read(deps, params, signal);
+      return await read(deps, params, budget);
     } catch (error) {
       return failureResult(error, { code: "E_CDP_DISCONNECTED", stage: "read" });
+    } finally {
+      budget.dispose();
     }
   }
 
@@ -525,14 +500,15 @@ export function createWebReadTool(
   async function read(
     deps: ToolDeps,
     params: WebReadInput,
-    signal: AbortSignal | undefined,
+    budget: CallBudget,
   ): Promise<WebReadResult> {
+    const signal = budget.signal;
     const validation = normalizeInput(params, deps.config);
     if (!validation.ok) {
       throw fail("E_CONFIG", "config", { hint: INPUT_HINT, message: validation.message });
     }
     const input = validation.value;
-    if (signal?.aborted === true) {
+    if (signal.aborted === true) {
       throw fail("E_CANCELLED", "read", { message: "aborted by the caller" });
     }
 
@@ -542,36 +518,48 @@ export function createWebReadTool(
       input.url,
       options.resolve === undefined ? {} : { resolve: options.resolve },
     );
-
-    // Reflex page gate (P14): after the SSRF guard, before a tab is acquired, so
-    // a refused page costs no navigation at all. `reflex.pageGate` turns it on
-    // without the rest of the reflex; with `enabled:false` the policy still
-    // answers from rules, so this costs no model call. A pre-P14 reflex has no
-    // `judgePages`; the older `gateRead` then answers instead (P5-D).
-    if ((deps.config.reflex.enabled || deps.config.reflex.pageGate) && deps.reflex !== undefined) {
-      const verdict = await pageGateVerdict(deps.reflex, requested.href);
-      if (verdict !== null && !verdict.worth) {
-        throw fail("E_UNSUPPORTED", "read", {
-          hint: PAGE_GATE_HINT,
-          message: pageGateMessage(verdict),
-        });
-      }
-      if (verdict === null) {
-        const allowed = await readGateAllows(deps.reflex, requested.href);
-        if (!allowed) {
-          throw fail("E_UNSUPPORTED", "read", {
-            hint: READ_GATE_HINT,
-            message: "the reflex read gate declined this URL",
-          });
-        }
-      }
-    }
+    budget.check("read");
 
     const lock = pageLockFor(deps.cdp);
     const slots = readSlotKeys(deps.config.read.pool);
     const slot = lock.pick(slots) as PageKey;
 
-    return await lock.run(slot, () => readSlot(deps, input, requested, slot, signal));
+    const work = lock.run(slot, () => announcedRead(deps, input, requested, slot, budget));
+    // A queued read must not outlive the call's deadline. The losing task is
+    // left to finish and checks the budget again before touching the tab.
+    return await raceSignal(work, signal);
+  }
+
+  /**
+   * Announce the read on the anchor panel and let `window.follow` raise the slot
+   * tab (S12.2, S12.5). The read half of the product was invisible on the panel:
+   * a reader looking at the window saw the last search's `done` while a tab was
+   * being navigated. A failure keeps its page — no idle hand-back — so the human
+   * can look at what the tool could not read.
+   */
+  async function announcedRead(
+    deps: ToolDeps,
+    input: NormalizedInput,
+    requested: URL,
+    slot: PageKey,
+    budget: CallBudget,
+  ): Promise<WebReadResult> {
+    await announceWork(deps.cdp, { stage: "read", page: slot, query: null });
+    try {
+      const result = await readSlot(deps, input, requested, slot, budget);
+      await announceWork(deps.cdp, { stage: "done", page: slot });
+      return result;
+    } catch (error) {
+      const details = isWebSearchError(error)
+        ? error.details
+        : toFailure(error, { code: "E_CDP_DISCONNECTED", stage: "read" });
+      await announceWork(deps.cdp, {
+        stage: "error",
+        page: slot,
+        error: { code: details.code, ...(details.hint === undefined ? {} : { hint: details.hint }) },
+      });
+      throw error;
+    }
   }
 
   /**
@@ -599,8 +587,10 @@ export function createWebReadTool(
     final: URL,
     requested: URL,
     input: NormalizedInput,
-    signal: AbortSignal | undefined,
+    budget: CallBudget,
   ): Promise<WebReadResult> {
+    const signal = budget.signal;
+    await checkReadBudget(deps, page, budget, "extract");
     const fetcher = deps.cdp.fetchBytes;
     if (fetcher === undefined) {
       throw await failWithArtifact(
@@ -617,11 +607,13 @@ export function createWebReadTool(
     try {
       fetched = await fetcher.call(deps.cdp, final.href, {
         maxBytes: deps.config.read.pdfMaxBytes,
-        ...(signal === undefined ? {} : { signal }),
+        timeoutMs: Math.max(1, budget.remainingMs()),
+        signal,
       });
     } catch (error) {
       throw await failWithArtifact(deps, page, asFailure(error, "read", "E_PDF_UNSUPPORTED", signal));
     }
+    await checkReadBudget(deps, page, budget, "extract");
 
     // Second SSRF pass: a public PDF URL may redirect to a private host, and the
     // bytes came from the *final* hop, not from the URL the caller supplied.
@@ -658,6 +650,7 @@ export function createWebReadTool(
     } catch (error) {
       throw await failWithArtifact(deps, page, asFailure(error, "extract", "E_PDF_UNSUPPORTED", signal));
     }
+    await checkReadBudget(deps, page, budget, "render");
 
     const window = renderPdfWindow(extracted, { offset: input.offset, maxChars: input.maxChars });
     if (input.offset > 0 && input.offset >= window.totalChars) {
@@ -727,22 +720,28 @@ export function createWebReadTool(
     input: NormalizedInput,
     requested: URL,
     slot: PageKey,
-    signal: AbortSignal | undefined,
+    budget: CallBudget,
   ): Promise<WebReadResult> {
+    const signal = budget.signal;
     let page: CdpPage;
     try {
       page = await deps.cdp.acquirePage(slot);
     } catch (error) {
       throw asFailure(error, "connect", "E_CDP_DISCONNECTED", signal);
     }
+    await checkReadBudget(deps, page, budget, "connect");
 
     try {
-      await page.navigate(requested.href, signal === undefined ? {} : { signal });
+      await page.navigate(requested.href, {
+        signal,
+        // One deadline per call: navigate may not outlive what is left (S8.1).
+        timeoutMs: Math.max(1, budget.remainingMs()),
+      });
     } catch (error) {
       throw await failWithArtifact(deps, page, asFailure(error, "navigate", "E_CDP_DISCONNECTED", signal));
     }
 
-    // P9-B: `page.url()` is a target-event cache; a redirect or the typed path
+    // S5.4: `page.url()` is a target-event cache; a redirect or the typed path
     // can leave it stale. Ask the document, then prove it did not move again
     // after the extractor ran (a second writer would be a stranger's page).
     const landed = await safeCurrentUrl(page);
@@ -776,7 +775,7 @@ export function createWebReadTool(
     const mime = await documentContentType(page);
     if (mime === "application/pdf") {
       try {
-        return await readPdf(deps, page, final, requested, input, signal);
+        return await readPdf(deps, page, final, requested, input, budget);
       } finally {
         // Chrome swaps a PDF tab's document into an out-of-process viewer; the
         // flattened session can be detached afterwards. Reusing that tab makes
@@ -786,6 +785,51 @@ export function createWebReadTool(
       }
     }
 
+    // S5.1: `navigate()` returns at an interactive commit, which a client-side
+    // app reaches before its text. Wait for the read bar (text floor or
+    // `complete`) inside the soft deadline, clamped by the call budget.
+    await checkReadBudget(deps, page, budget, "settle");
+    try {
+      await waitForDocumentReadiness(page, {
+        clock: deps.clock,
+        softDeadlineMs: Math.min(READINESS_SOFT_DEADLINE_MS, budget.remainingMs()),
+        signal,
+      });
+    } catch (error) {
+      throw await failWithArtifact(
+        deps,
+        page,
+        asFailure(error, "settle", "E_CDP_DISCONNECTED", signal),
+      );
+    }
+
+    // S5.3: a document may navigate itself while it paints. Re-run the guard on
+    // the URL it actually settled on, and use that value as the pre-extraction
+    // baseline for the stability proof below.
+    const settled = await safeCurrentUrl(page);
+    if (typeof settled !== "string" || settled.trim() === "") {
+      throw await failWithArtifact(
+        deps,
+        page,
+        fail("E_BLOCKED_URL", "read", {
+          hint: "the tab did not report a URL; retry or use a public site",
+          message: "the document settled without a URL",
+        }),
+      );
+    }
+    try {
+      final = await recheckLanding(settled, options);
+    } catch (error) {
+      throw await failWithArtifact(
+        deps,
+        page,
+        isWebSearchError(error)
+          ? error
+          : fail("E_BLOCKED_URL", "read", { message: "the settled URL failed the SSRF guard" }),
+      );
+    }
+    await checkReadBudget(deps, page, budget, "extract");
+
     let raw: unknown;
     try {
       raw = await page.evaluate<unknown>(`(${extractReadableDocument.toString()})(document)`);
@@ -794,7 +838,7 @@ export function createWebReadTool(
     }
 
     const after = await safeCurrentUrl(page);
-    if (!sameDocument(landed, after)) {
+    if (!sameDocument(settled, after)) {
       throw await failWithArtifact(
         deps,
         page,
@@ -815,13 +859,14 @@ export function createWebReadTool(
         }),
       );
     }
-    if (data.blocks.length === 0) {
+    // S5.2: an empty document is a property of the page, not a broken
+    // extractor. `E_PARSE` is reserved for a canary/payload failure.
+    if (data.blocks.length === 0 || blocksToText(data.blocks).trim() === "") {
       throw await failWithArtifact(
         deps,
         page,
-        fail("E_PARSE", "extract", {
-          hint: UNSUPPORTED_HINT,
-          message: "the readability pass found no text blocks",
+        fail("E_EMPTY_PAGE", "extract", {
+          message: "the document rendered no extractable text",
         }),
       );
     }
@@ -875,8 +920,8 @@ export function createWebReadTool(
     label: "Web Read",
     description: WEB_READ_DESCRIPTION,
     parameters: webReadSchema,
-    exposure: "deferred",
-    annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+    exposure: "direct",
+    annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: false },
     execute,
   };
 }

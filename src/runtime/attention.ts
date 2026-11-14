@@ -15,9 +15,9 @@
  * raise is reported and ignored.
  */
 
-import type { AwaitingAllowInfo } from "../cdp/browser.ts";
+import type { AwaitingAllowInfo } from "../session/index.ts";
 import { raiseBrowserWindow, type RaiseOptions, type RaiseResult } from "../cdp/raise.ts";
-import type { Config } from "../config.ts";
+import type { Config } from "../config/index.ts";
 import { notifyDesktop, type NotifyOptions, type NotifyResult } from "./notify.ts";
 
 export interface AttentionOutcome {

@@ -8,8 +8,8 @@
  * touches Chrome.
  *
  * This is also the honest replacement for the "3 engines, ai:yes/no, chars,
- * latency" table: it prints one line per engine in TAP output, and the
- * orchestrator copies that line into `evidence/P7.md`.
+ * latency" table: it prints one line per engine in TAP output, and the line goes
+ * into the PR body (S13.7: evidence never enters the tree).
  */
 
 import assert from "node:assert/strict";
@@ -17,9 +17,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createConnector } from "../../src/cdp/browser.ts";
-import { discoverEndpoint } from "../../src/cdp/discovery.ts";
-import { loadConfig } from "../../src/config.ts";
+import { DEFAULT_AI_WAIT_MS } from "../../src/cdp/ai-wait.ts";
+import { createSession, discoverEndpoint } from "../../src/session/index.ts";
+import { loadConfig } from "../../src/config/index.ts";
 import { createDefaultRegistry } from "../../src/engines/index.ts";
 import type { EngineId } from "../../src/engines/types.ts";
 import { createArtifacts } from "../../src/runtime/artifacts.ts";
@@ -59,7 +59,7 @@ async function runOnce(engine: EngineId, q: string): Promise<SmokeResult> {
   const stateDir = join(env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent"), "web-search");
   const clock = createSystemClock();
   const log = createLogger({ path: join(stateDir, "decisions.jsonl"), clock });
-  const connector = createConnector({
+  const connector = createSession({
     config,
     clock,
     log,
@@ -71,7 +71,7 @@ async function runOnce(engine: EngineId, q: string): Promise<SmokeResult> {
     engines: createDefaultRegistry(config),
     cdp: connector,
     cache: createCache({ maxEntries: config.cache.maxEntries, clock }),
-    limiter: createLimiter({ config, clock, statePath: join(stateDir, "state.json") }),
+    limiter: createLimiter({ config, clock }),
     artifacts: createArtifacts({ config, clock }),
     log,
     clock,
@@ -138,8 +138,12 @@ for (const { engine, q } of QUERIES) {
     if (result.aiState === "answer") {
       assert.ok((result.aiChars ?? 0) >= 200, `${engine}: ai:yes with aiChars=${String(result.aiChars)}`);
     }
-    // V8.4: the wait is bounded; a summary-less page must not pay the full budget.
-    assert.ok((result.aiWaitMs ?? 0) <= 6000, `${engine}: aiWaitMs=${String(result.aiWaitMs)}`);
+    // S8.1: the wait is bounded by `search.aiWaitMs`, with one poll/round trip
+    // of overshoot; a page with no AI block should stop far earlier (grace).
+    assert.ok(
+      (result.aiWaitMs ?? 0) <= DEFAULT_AI_WAIT_MS + 1_000,
+      `${engine}: aiWaitMs=${String(result.aiWaitMs)} exceeded the bounded wait`,
+    );
     assert.ok((result.results ?? 0) >= 1, `${engine} returned no results`);
     assert.ok(result.chars <= MAX_OUTPUT_CHARS, `${engine} returned ${result.chars} chars, cap ${MAX_OUTPUT_CHARS}`);
   });

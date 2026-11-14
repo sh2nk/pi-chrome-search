@@ -7,7 +7,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { classifyBump, classifyCommit, nextVersion, publishMode, releaseSteps } from "../../scripts/release.mjs";
+import {
+  classifyBump,
+  classifyCommit,
+  manualReleaseRequired,
+  nextVersion,
+  planRelease,
+  publishMode,
+  releaseSteps,
+} from "../../scripts/release.mjs";
 
 test("the bump table covers feat/fix/refactor/breaking/docs-only/skip", () => {
   const cases = [
@@ -73,4 +81,27 @@ test("publish precedes the tag, so a failed publish leaves no trace", () => {
   const local = releaseSteps("0.1.1", "none").map(([command, args]) => `${command} ${args.join(" ")}`);
   assert.equal(local.filter((step) => step.startsWith("npm publish")).length, 0);
   assert.ok(local.some((step) => step.startsWith("git tag -a v0.1.1")));
+});
+
+test("a manifest ahead of the last tag is the pending release, never a second bump", () => {
+  const pending = planRelease("2.0.0", "v0.1.1", ["feat!: v2"]);
+  assert.equal(pending.pending, true);
+  assert.equal(pending.next, "2.0.0", "a prepared 2.0.0 must not become 3.0.0");
+  assert.equal(manualReleaseRequired(pending, {}), true);
+  assert.equal(manualReleaseRequired(pending, { RELEASE_MANUAL: "1" }), false);
+
+  const ordinary = planRelease("2.0.0", "v2.0.0", ["fix: typo"]);
+  assert.equal(ordinary.pending, false);
+  assert.equal(ordinary.next, "2.0.1");
+  assert.equal(manualReleaseRequired(ordinary, {}), false);
+});
+
+test("a pending release skips the version bump and the release commit", () => {
+  const steps = releaseSteps("2.0.0", "oidc", { bump: false }).map(
+    ([command, args]) => `${command} ${args.join(" ")}`,
+  );
+  assert.equal(steps.some((step) => step.startsWith("npm version")), false);
+  assert.equal(steps.some((step) => step.startsWith("git commit")), false);
+  assert.ok(steps.some((step) => step.startsWith("npm publish")));
+  assert.ok(steps.some((step) => step.startsWith("git tag -a v2.0.0")));
 });

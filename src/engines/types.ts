@@ -1,5 +1,5 @@
 /**
- * Frozen contract for engine adapters. See PLAN.md Appendix A and the D9 decision
+ * Frozen contract for engine adapters. See SPEC.md §15 D9
  * (SPEC §7.1): `engines` may be a single id or a list.
  *
  * Additive changes only, and only with a `contract:` commit. Adapters are pure
@@ -14,8 +14,6 @@ export type EngineId = "google" | "duckduckgo" | "yandex";
 /** Canonical order. `auto` keeps this order; yandex stays last by policy (D10). */
 export const ENGINE_IDS = ["google", "duckduckgo", "yandex"] as const satisfies readonly EngineId[];
 
-export type Freshness = "d" | "w" | "m" | "y";
-
 export interface Query {
   text: string;
   /** Engine UI language, e.g. "ru". "auto" is resolved by the caller, never by the adapter. */
@@ -25,7 +23,6 @@ export interface Query {
   n: number;
   /** 1-based. Google/Yandex only. */
   page?: number;
-  freshness?: Freshness;
   /** Ask the engine for its native AI summary; `false` only suppresses extraction effort. */
   summary: boolean;
 }
@@ -39,6 +36,12 @@ export interface SerpItem {
   sourceQuery?: string;
   /** Set by the merge layer only when results from several engines are mixed. */
   engine?: EngineId;
+  /**
+   * True when this URL is still an opaque `/goto` wrapper: the destination could
+   * not be verified, so the output must mark it instead of pretending it is a
+   * resolved link (S3.5, S7.4).
+   */
+  unresolved?: boolean;
 }
 
 /**
@@ -181,8 +184,6 @@ export interface EngineInteraction {
 
 export interface Engine {
   readonly id: EngineId;
-  /** Yandex only: the tool layer may retry once after a wall. Adapters never retry themselves. */
-  readonly retryOnWall?: boolean;
   /** Optional human-search metadata; absent means the tool navigates the SERP directly. */
   readonly interaction?: EngineInteraction;
   /** Pure: same Query → same URL. No network, no clock, no config lookups. */
@@ -199,6 +200,28 @@ export interface Engine {
 
 /** Engine selection requested by the tool layer (D9). */
 export type EngineSelection = "auto" | EngineId | EngineId[];
+
+/**
+ * The tool-level arguments whose support differs per engine (SPEC S4.2).
+ *
+ * The matrix is deliberately data, not four `if` statements: the tool layer uses
+ * `page: "flag"` to omit an unsupported parameter and report `ignored`, and the
+ * unit test walks the same table, so the documentation and the behaviour cannot
+ * drift apart. `q` operators are the fourth row of the S4.2 table and pass
+ * through everywhere; they are asserted in the same test, not modelled here.
+ */
+export type SupportArgument = "n" | "page" | "summary";
+export type ArgumentSupport = "yes" | "flag";
+
+export const SUPPORT_MATRIX: Readonly<
+  Record<SupportArgument, Readonly<Record<EngineId, ArgumentSupport>>>
+> = Object.freeze({
+  n: Object.freeze({ google: "yes", duckduckgo: "yes", yandex: "yes" }),
+  // DuckDuckGo has no pagination in this adapter: page > 1 is served as page 1
+  // and must be reported as `ignored.page`, never silently dropped (S4.2, S7.1).
+  page: Object.freeze({ google: "yes", duckduckgo: "flag", yandex: "yes" }),
+  summary: Object.freeze({ google: "yes", duckduckgo: "yes", yandex: "yes" }),
+});
 
 export interface EngineRegistry {
   /** Throws E_UNSUPPORTED when the adapter is missing or disabled. */

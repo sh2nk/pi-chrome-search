@@ -24,7 +24,7 @@
 
 import { isWebSearchError } from "../runtime/error-codes.ts";
 import { fail } from "../runtime/errors.ts";
-import type { CdpSession } from "./session.ts";
+import type { CdpClient } from "./types.ts";
 import type { FetchedBytes, FetchBytesOptions } from "./types.ts";
 
 export const DEFAULT_FETCH_TIMEOUT_MS = 20_000;
@@ -95,7 +95,7 @@ async function withDeadline<T>(work: Promise<T>, timeoutMs: number, url: string)
  * is the final hop, and the tool re-runs the guard on it before using the body.
  */
 export async function captureBytes(
-  session: CdpSession,
+  client: CdpClient,
   url: string,
   options: FetchBytesOptions = {},
 ): Promise<FetchedBytes> {
@@ -113,15 +113,15 @@ export async function captureBytes(
   try {
     // `background: true` keeps the user's foreground tab where it is; Chrome
     // 132+ accepts it and older builds ignore the flag rather than failing.
-    targetId = await session.createTarget("about:blank", { background: true });
-    await session.attach(targetId);
-    sessionId = session.sessionIdFor(targetId);
+    targetId = await client.createTarget("about:blank", { background: true });
+    await client.attach(targetId);
+    sessionId = client.sessionIdFor(targetId);
     if (sessionId === undefined) {
       throw fail("E_CDP_DISCONNECTED", "connect", { message: "the capture target is not attached" });
     }
     const captureSessionId = sessionId;
 
-    await session.send(
+    await client.send(
       "Fetch.enable",
       { patterns: [{ urlPattern: "*", requestStage: "Response" }] },
       captureSessionId,
@@ -157,7 +157,7 @@ export async function captureBytes(
 
           // Redirects are part of the chain; keep following until the body hop.
           if (status >= 300 && status < 400) {
-            void session
+            void client
               .send("Fetch.continueResponse", { requestId }, captureSessionId)
               .catch(() => undefined);
             return;
@@ -165,7 +165,7 @@ export async function captureBytes(
 
           const declared = contentLength(headers);
           if (declared !== undefined && declared > maxBytes) {
-            void session.send("Fetch.failRequest", { requestId, errorReason: "Aborted" }, captureSessionId).catch(
+            void client.send("Fetch.failRequest", { requestId, errorReason: "Aborted" }, captureSessionId).catch(
               () => undefined,
             );
             finish(() =>
@@ -185,7 +185,7 @@ export async function captureBytes(
 
           void (async () => {
             try {
-              const body = await session.send<Record<string, unknown>>(
+              const body = await client.send<Record<string, unknown>>(
                 "Fetch.getResponseBody",
                 { requestId },
                 captureSessionId,
@@ -209,18 +209,18 @@ export async function captureBytes(
             } catch (error) {
               finish(() => reject(error));
             } finally {
-              void session
+              void client
                 .send("Fetch.failRequest", { requestId, errorReason: "Aborted" }, captureSessionId)
                 .catch(() => undefined);
             }
           })();
         };
 
-        onEvent = session.on("Fetch.requestPaused", handler);
+        onEvent = client.on("Fetch.requestPaused", handler);
         // The request is opened by the document, not by `Page.navigate`: the
         // capture target never shows a PDF viewer, so there is no "load" to
         // await and no viewer document to mistake for the payload.
-        void session
+        void client
           .send(
             "Runtime.evaluate",
             {
@@ -248,10 +248,10 @@ export async function captureBytes(
     });
   } finally {
     if (sessionId !== undefined) {
-      await session.send("Fetch.disable", {}, sessionId).catch(() => undefined);
+      await client.send("Fetch.disable", {}, sessionId).catch(() => undefined);
     }
     if (targetId !== undefined) {
-      await session.closeTarget(targetId).catch(() => undefined);
+      await client.closeTarget(targetId).catch(() => undefined);
     }
   }
 }

@@ -12,7 +12,7 @@
  * a 24 h `/goto` resolution is gone at 24 h, not after.
  */
 
-import type { EngineId, Freshness } from "../engines/types.ts";
+import type { EngineId } from "../engines/types.ts";
 import { WebSearchError } from "./error-codes.ts";
 import type { Cache, Clock } from "./types.ts";
 
@@ -120,7 +120,6 @@ export interface SerpKeyInput {
   text: string;
   n: number;
   page?: number;
-  freshness?: Freshness;
   /** Engine UI language (`query.lang`). Part of the key: a lang change changes the SERP. */
   lang?: string;
   /** Engine region/country (`query.region`). Same reasoning as `lang`. */
@@ -234,7 +233,6 @@ export function serpKey(q: SerpKeyInput): string {
     text,
     q.n,
     q.page ?? 1,
-    q.freshness ?? "",
     q.lang ?? "",
     q.region ?? "",
     q.summary,

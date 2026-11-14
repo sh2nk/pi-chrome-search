@@ -156,24 +156,17 @@ test("buildUrl percent-encodes the query (not form-encoded with +)", () => {
   );
 });
 
-test("buildUrl ignores pagination until M2 (page>1 yields the same URL)", () => {
-  // PLAN §5: DDG pagination is deferred; the tool reports pageIgnored instead.
+test("buildUrl ignores pagination (page>1 yields the same URL; S4.2)", () => {
+  // S4.2: DDG has no pagination; the tool reports ignored.page instead.
   const first = duckduckgoEngine.buildUrl(query({ page: 1 }));
   const third = duckduckgoEngine.buildUrl(query({ page: 3 }));
   assert.equal(third, first);
   assert.equal(new URL(third).searchParams.has("s"), false);
 });
 
-test("buildUrl ignores freshness (df is unverified, so it is not invented)", () => {
-  const plain = duckduckgoEngine.buildUrl(query());
-  const requested = duckduckgoEngine.buildUrl(query({ freshness: "w" }));
-  assert.equal(requested, plain);
-  assert.equal(new URL(requested).searchParams.has("df"), false);
-});
-
 test("buildUrl is pure: same Query, same URL, and the Query is not mutated", () => {
   const frozen = Object.freeze(
-    query({ text: "solar panel", lang: "ru", region: "ru", page: 2, freshness: "d" }),
+    query({ text: "solar panel", lang: "ru", region: "ru", page: 2 }),
   );
   const snapshot = JSON.stringify(frozen);
   const first = duckduckgoEngine.buildUrl(frozen);

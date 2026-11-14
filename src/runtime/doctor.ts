@@ -21,7 +21,7 @@
  *    never `ok`: the report must not claim an engine works when nothing was
  *    exercised. The extension, the CLI and `/web-doctor` wire
  *    `createEngineProbe`; a caller that does not is told "no probe configured",
- *    not that the engine is fine. P5 extends `reflex` the same way.
+ *    not that the engine is fine.
  *
  * The report is plain JSON with a fixed key order (no Maps, no class instances)
  * so `--json` output is diffable and the schema test can validate it. It never
@@ -31,11 +31,10 @@
 
 import { readFile, unlink } from "node:fs/promises";
 
-import type { Connector, ConnectorInfo } from "../cdp/browser.ts";
-import { defaultLockPath, parseLockRecord, pidAlive } from "../cdp/browser.ts";
-import { pageLockFor } from "../cdp/page-lock.ts";
+import { defaultLockPath, pageLockFor, parseLockRecord, pidAlive } from "../session/index.ts";
+import type { Session, SessionInfo } from "../session/index.ts";
 import type { CdpSource } from "../cdp/types.ts";
-import type { Config, FocusPolicy, FollowPolicy, HumanizeMode, Mode, ReflexBackend } from "../config.ts";
+import type { Config, FocusPolicy, FollowPolicy, HumanizeMode } from "../config/index.ts";
 import type { Engine, EngineId, EngineRegistry, Query, WallKind } from "../engines/types.ts";
 import { ENGINE_IDS } from "../engines/types.ts";
 import { ERROR_HINTS, type FailureDetails } from "./error-codes.ts";
@@ -100,7 +99,7 @@ export const DOCTOR_PROBE_QUERY = "pi-chrome-search doctor probe";
 
 export interface EngineProbeOptions {
   config: Config;
-  connector: Connector;
+  connector: Session;
   registry: EngineRegistry;
   clock: Clock;
   /**
@@ -150,9 +149,9 @@ function probeLocale(engine: EngineId, config: Config): Pick<Query, "lang" | "re
  * `error: { code, stage, hint }` so the report keeps the latency and the verdict
  * mapper owns the interpretation. A wall detected after a settle timeout is
  * promoted to `wall` — a captcha page usually fails the adapter's readiness
- * marker before `detectWall()` is ever reached. A limiter rejection (daily cap,
- * abort) is reported the same way and never navigates: a paced-out probe must
- * not burn an unthrottled search on the user's profile.
+ * marker before `detectWall()` is ever reached. A limiter rejection (an abort or
+ * a pacing deadline) is reported the same way and never navigates: a paced-out
+ * probe must not burn an unthrottled search on the user's profile.
  *
  * One writer per engine tab: the probe navigates the same tab `web_search`
  * extracts from, so it takes the tools' FIFO page lock for that engine. A
@@ -169,7 +168,7 @@ export function createEngineProbe(options: EngineProbeOptions): EngineProbe {
       try {
         await options.limiter.acquire(id);
       } catch (error) {
-        const details = toFailure(error, { code: "E_RATE_LIMITED", stage: "navigate" });
+        const details = toFailure(error, { code: "E_TIMEOUT", stage: "navigate" });
         return {
           ms: elapsed(),
           results: 0,
@@ -229,7 +228,7 @@ export function createEngineProbe(options: EngineProbeOptions): EngineProbe {
 export interface DoctorDeps {
   config: Config;
   configPath: string;
-  connector?: Connector;
+  connector?: Session;
   /**
    * P11: the CLI's Allow-attention coordinator. Its outcome (wait duration,
    * notification adapter, raise adapter) is rendered next to the verdict; the
@@ -265,7 +264,6 @@ export interface DoctorExtensionInfo {
 
 export interface DoctorConfigInfo {
   path: string;
-  mode: Mode;
   focus: FocusPolicy;
   humanize: HumanizeMode;
   /** P10: the anchor panel and the follow-focus policy, so a report explains the window. */
@@ -331,16 +329,6 @@ export interface DoctorEngine {
   probe?: EngineProbeResult;
 }
 
-export interface DoctorReflexInfo {
-  enabled: boolean;
-  /** P14: the offline page gate can be on while the rest of the reflex is off. */
-  pageGate: boolean;
-  backend: ReflexBackend;
-  localOnly: boolean;
-  /** `disabled` when reflex is off; `unavailable` until P5 injects a classifier probe. */
-  classifier: "disabled" | "unavailable";
-}
-
 export interface DoctorReport {
   schemaVersion: 1;
   generatedAt: string;
@@ -350,7 +338,6 @@ export interface DoctorReport {
   cache: DoctorCacheInfo | null;
   artifacts: DoctorArtifactsInfo | null;
   engines: DoctorEngine[];
-  reflex: DoctorReflexInfo;
   verdict: DoctorVerdict;
 }
 
@@ -387,7 +374,7 @@ async function readLockRecord(path: string): Promise<ParsedLock | null> {
   }
 }
 
-function lockPathOf(connector: Connector | undefined, env: NodeJS.ProcessEnv): string {
+function lockPathOf(connector: Session | undefined, env: NodeJS.ProcessEnv): string {
   if (connector !== undefined) {
     try {
       return connector.lockPath();
@@ -398,7 +385,7 @@ function lockPathOf(connector: Connector | undefined, env: NodeJS.ProcessEnv): s
   return defaultLockPath(env);
 }
 
-async function collectLock(connector: Connector | undefined, env: NodeJS.ProcessEnv): Promise<DoctorLock> {
+async function collectLock(connector: Session | undefined, env: NodeJS.ProcessEnv): Promise<DoctorLock> {
   const path = lockPathOf(connector, env);
   const record = await readLockRecord(path);
   if (record === null) return { locked: false, path, owner: "none" };
@@ -447,7 +434,7 @@ export interface DoctorFixOptions {
   connectGraceMs?: number;
 }
 
-function isConnected(connector: Connector | undefined): boolean {
+function isConnected(connector: Session | undefined): boolean {
   if (connector === undefined) return false;
   try {
     return connector.isConnected();
@@ -465,7 +452,7 @@ type ConnectOutcome = { ok: true; late: boolean } | { ok: false; code: string };
  * the original code.
  */
 async function boundedConnect(
-  connector: Connector,
+  connector: Session,
   config: Config,
   options: DoctorFixOptions = {},
 ): Promise<ConnectOutcome> {
@@ -643,7 +630,7 @@ function failedCdp(status: CdpStatus, details: FailureDetails, lock: DoctorLock)
   };
 }
 
-function endpointOf(info: ConnectorInfo): DoctorEndpoint {
+function endpointOf(info: SessionInfo): DoctorEndpoint {
   return {
     port: nonNegativeInt(info.endpoint.port),
     wsUrl: safeText(info.endpoint.wsUrl, "ws://127.0.0.1"),
@@ -683,7 +670,7 @@ async function collectCdp(deps: DoctorDeps): Promise<DoctorCdp> {
     }
   }
 
-  let info: ConnectorInfo | null;
+  let info: SessionInfo | null;
   try {
     info = connector.info();
   } catch (error) {
@@ -1020,7 +1007,6 @@ export async function buildDoctorReport(
     },
     config: {
       path: deps.configPath,
-      mode: deps.config.mode,
       focus: deps.config.window.focus,
       humanize: deps.config.humanize,
       panel: deps.config.window.panel,
@@ -1032,13 +1018,6 @@ export async function buildDoctorReport(
     cache,
     artifacts,
     engines,
-    reflex: {
-      enabled: deps.config.reflex.enabled,
-      pageGate: deps.config.reflex.pageGate,
-      backend: deps.config.reflex.backend,
-      localOnly: deps.config.reflex.localOnly,
-      classifier: deps.config.reflex.enabled ? "unavailable" : "disabled",
-    },
     verdict,
   };
 }
@@ -1064,7 +1043,7 @@ export function renderDoctorText(
   lines.push(`${report.extension.name} ${report.extension.version} — doctor (node ${report.extension.node})`);
   lines.push(`generated ${report.generatedAt}`);
   lines.push(
-    `config: ${tildify(report.config.path)} (${report.config.mode}, focus=${report.config.focus}, ` +
+    `config: ${tildify(report.config.path)} (focus=${report.config.focus}, ` +
       `humanize=${report.config.humanize}, panel=${report.config.panel ? "on" : "off"}, ` +
       `follow=${report.config.follow}, debug=${report.config.debug ? "on" : "off"})`,
   );
@@ -1119,11 +1098,6 @@ export function renderDoctorText(
     lines.push(`  ${engine.id.padEnd(11)} ${engine.verdict}${probe}${note}`);
   }
 
-  lines.push(
-    `reflex: ${report.reflex.enabled ? "enabled" : "disabled"} (backend=${report.reflex.backend}, ` +
-      `localOnly=${report.reflex.localOnly ? "on" : "off"}, pageGate=${report.reflex.pageGate ? "on" : "off"}, ` +
-      `classifier=${report.reflex.classifier})`,
-  );
   if (attention !== undefined) {
     lines.push(
       `attention: waited ${Math.max(0, Math.round(attention.waitedMs / 1000))}s · ` +

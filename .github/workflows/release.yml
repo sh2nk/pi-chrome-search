@@ -10,8 +10,14 @@ on:
       - "scripts/release.mjs"
       - ".github/workflows/release.yml"
   # Manual "release now" button; still classified from the commits since the
-  # last tag, so it is a no-op when nothing classifiable landed.
+  # last tag, so it is a no-op when nothing classifiable landed. `manual=true`
+  # ships the version already prepared in package.json (the first v2 publish).
   workflow_dispatch:
+    inputs:
+      manual:
+        description: "Publish the version already in package.json"
+        type: boolean
+        default: false
 concurrency:
   group: release
   cancel-in-progress: false
@@ -45,6 +51,7 @@ jobs:
       - name: bump, tag and publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_MANUAL: ${{ inputs.manual && '1' || '0' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

@@ -10,15 +10,12 @@ import { join } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
-import { createConnector, type Connector } from "./cdp/browser.ts";
-import { discoverEndpoint } from "./cdp/discovery.ts";
+import { createSession, discoverEndpoint, type Session } from "./session/index.ts";
 import { handleDoctorCommand } from "./commands/doctor.ts";
 import { handleFocusCommand } from "./commands/focus.ts";
-import { loadConfig, resolveConfigPath, type Config } from "./config.ts";
+import { loadConfig, resolveConfigPath, type Config } from "./config/index.ts";
 import { createDefaultRegistry } from "./engines/index.ts";
 import type { EngineRegistry } from "./engines/types.ts";
-import type { ClassifierRegistry } from "./reflex/classifier.ts";
-import { createReflex, type ReflexBundle } from "./reflex/index.ts";
 import { createArtifacts } from "./runtime/artifacts.ts";
 import { createAllowAttention } from "./runtime/attention.ts";
 import { createCache } from "./runtime/cache.ts";
@@ -29,7 +26,8 @@ import type { DoctorDeps } from "./runtime/doctor.ts";
 import { agentDir } from "./runtime/host.ts";
 import { createLogger } from "./runtime/log.ts";
 import type { Artifacts, Cache, Clock, Limiter, Logger } from "./runtime/types.ts";
-import { createTools } from "./tools/index.ts";
+import { DISCOVERY_TOOL_NAME, createTools } from "./tools/index.ts";
+import type { RegisteredTool } from "./tools/index.ts";
 import type { ToolDeps } from "./tools/types.ts";
 import { EXTENSION_NAME, EXTENSION_VERSION } from "./version.ts";
 
@@ -42,7 +40,7 @@ export interface Runtime {
   cache: Cache;
   limiter: Limiter;
   artifacts: Artifacts;
-  connector: Connector;
+  connector: Session;
   registry: EngineRegistry;
 }
 
@@ -56,7 +54,7 @@ function createRuntime(): Runtime {
   const stateDir = join(agentDir(env), "web-search");
   const log = createLogger({ path: join(stateDir, "decisions.jsonl"), clock });
   const cache = createCache({ maxEntries: config.cache.maxEntries, clock });
-  const limiter = createLimiter({ config, clock, statePath: join(stateDir, "state.json") });
+  const limiter = createLimiter({ config, clock });
   const artifacts = createArtifacts({ config, clock });
   // P11: while a CDP handshake waits for the user's Allow, fire exactly one
   // desktop notification and (unless `window.raiseOnPrompt: "never"`) one
@@ -67,7 +65,7 @@ function createRuntime(): Runtime {
       void log.write({ level: "info", event: "awaiting_allow", message: line }).catch(() => undefined);
     },
   });
-  const connector = createConnector({
+  const connector = createSession({
     config,
     clock,
     log,
@@ -83,74 +81,8 @@ function createRuntime(): Runtime {
   return { config, configPath, clock, log, cache, limiter, artifacts, connector, registry };
 }
 
-/**
- * The session's classifier API, or `undefined` when this pi build has none (or a
- * test passes no context). Narrowed structurally: the extension must not depend
- * on the full `ModelRegistry` surface, and an older pi must degrade to rules
- * instead of failing every tool call.
- */
-function ctxClassifierRegistry(ctx: unknown): ClassifierRegistry | undefined {
-  if (typeof ctx !== "object" || ctx === null) return undefined;
-  const candidate = (ctx as { modelRegistry?: unknown }).modelRegistry;
-  if (typeof candidate !== "object" || candidate === null) return undefined;
-  const registry = candidate as Partial<ClassifierRegistry>;
-  if (
-    typeof registry.getAvailableOfType !== "function" ||
-    typeof registry.findOfType !== "function" ||
-    typeof registry.classify !== "function"
-  ) {
-    return undefined;
-  }
-  return registry as ClassifierRegistry;
-}
-
-/**
- * Reflex bundles are memoised per session model registry.
- *
- * The reflex must be built from the *execution context's* registry — never from a
- * module-level singleton created before a session exists — because that registry
- * is what carries pi's classifier auth. Memoising on the registry object (not on
- * this module) keeps `maxCallsPerSession`/`maxUsdPerSession` honest across tool
- * calls: a bundle built per call would reset the session cost guard on every
- * search. A weak key means a new session (or a new registry) starts clean and
- * the old bundle is collectable.
- *
- * No registry → rules-only: there is no model to budget, so a fresh bundle per
- * call is enough and nothing is retained.
- */
-interface CachedReflex {
-  runtime: Runtime;
-  bundle: ReflexBundle;
-}
-
-const reflexBundles = new WeakMap<object, CachedReflex>();
-
-function reflexFor(runtime: Runtime, registry: ClassifierRegistry | undefined): ReflexBundle {
-  if (registry === undefined) {
-    return createReflex({
-      config: runtime.config,
-      clock: runtime.clock,
-      cache: runtime.cache,
-      log: runtime.log,
-    });
-  }
-  const cached = reflexBundles.get(registry);
-  // The runtime check covers a session restart that reuses pi's registry object
-  // while config, cache and log have been rebuilt underneath it.
-  if (cached !== undefined && cached.runtime === runtime) return cached.bundle;
-  const bundle = createReflex({
-    config: runtime.config,
-    clock: runtime.clock,
-    cache: runtime.cache,
-    log: runtime.log,
-    registry,
-  });
-  reflexBundles.set(registry, { runtime, bundle });
-  return bundle;
-}
-
-/** Tool dependencies for one execution context. `ctx` is `unknown` by contract. */
-export function toToolDeps(runtime: Runtime, ctx?: unknown): ToolDeps {
+/** Tool dependencies for one execution context. */
+export function toToolDeps(runtime: Runtime): ToolDeps {
   return {
     config: runtime.config,
     engines: runtime.registry,
@@ -160,7 +92,6 @@ export function toToolDeps(runtime: Runtime, ctx?: unknown): ToolDeps {
     artifacts: runtime.artifacts,
     log: runtime.log,
     clock: runtime.clock,
-    reflex: reflexFor(runtime, ctxClassifierRegistry(ctx)).reflex,
   };
 }
 
@@ -202,9 +133,44 @@ export function toDoctorDeps(runtime: Runtime): DoctorDeps {
   };
 }
 
+/**
+ * Whether this pi build has a discovery tool that can actually reach a deferred
+ * tool. The built-in `tool_search` declares `reachesTools`; a same-named tool
+ * without it cannot load our deferred set, so it does not count (S3.1).
+ */
+function hasDiscoveryTool(pi: ExtensionAPI): boolean {
+  return pi.getAllTools().some(
+    (tool) => tool.name === DISCOVERY_TOOL_NAME && typeof tool.reachesTools === "function",
+  );
+}
+
+/**
+ * Register the canonical surface, then make every tool reachable without asking
+ * the user to edit settings (S3.1, D3):
+ *
+ * - discovery present: activate `tool_search` so the deferred trio is findable;
+ * - discovery absent: re-register the deferred tools as `direct`, because a
+ *   deferred tool with no loader is the v1 defect this phase exists to remove.
+ *
+ * Re-registering a name replaces its definition and activates a `direct` tool,
+ * which is how pi supports promotion after registration.
+ */
+export function ensureToolReachability(pi: ExtensionAPI, tools: readonly RegisteredTool[]): "discovery" | "direct-fallback" {
+  if (hasDiscoveryTool(pi)) {
+    const active = pi.getActiveTools();
+    if (!active.includes(DISCOVERY_TOOL_NAME)) pi.setActiveTools([...active, DISCOVERY_TOOL_NAME]);
+    return "discovery";
+  }
+  for (const tool of tools) {
+    if (tool.exposure === "direct") continue;
+    pi.registerTool({ ...tool, exposure: "direct" } as ToolDefinition);
+  }
+  return "direct-fallback";
+}
+
 export default function register(pi: ExtensionAPI): void {
   const tools = createTools({
-    getDeps: async (ctx?: unknown) => toToolDeps(await getRuntime(), ctx),
+    getDeps: async () => toToolDeps(await getRuntime()),
     getDoctorDeps: async () => toDoctorDeps(await getRuntime()),
   });
   for (const tool of tools) {
@@ -212,6 +178,12 @@ export default function register(pi: ExtensionAPI): void {
     // success branch of the union, so register the structural definition.
     pi.registerTool(tool as ToolDefinition);
   }
+
+  // Extensions finish loading before the first session starts, so this is the
+  // first point where pi.getAllTools() has the built-in discovery tool.
+  pi.on("session_start", () => {
+    ensureToolReachability(pi, tools);
+  });
 
   pi.on("session_shutdown", async () => {
     const pending = runtimePromise;
@@ -223,7 +195,7 @@ export default function register(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("web-doctor", {
-    description: "Diagnose CDP attach, lock, window, per-engine probes and the reflex layer",
+    description: "Diagnose CDP attach, lock, window and per-engine probe verdicts",
     handler: async (args, ctx: ExtensionContext) => {
       await handleDoctorCommand(
         args,

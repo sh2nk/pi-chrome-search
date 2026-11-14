@@ -24,10 +24,13 @@
  *   "query": "…",
  *   "ai": { "text": "…", "sources": ["a.com"] },   // omitted when absent
  *   "results": [
- *     { "title": "…", "url": "…", "domain": "…", "snippet": "…", "engine": "google" }
- *     // "engine" only when the caller mixed engines
+ *     { "title": "…", "url": "…", "domain": "…", "snippet": "…", "engine": "google",
+ *       "unresolved": true }
+ *     // "engine" only when the caller mixed engines; "unresolved" only for an
+ *     // opaque Google /goto wrapper that stayed unresolved (S3.5, S7.4)
  *   ],
  *   "pageCarried": true,
+ *   "ignored": { "page": "duckduckgo" }, // only when an argument was not honoured
  *   "degraded": true,                   // only when true
  *   "cached": true,                     // only when true
  *   "chars": 1234,                      // == text.length
@@ -80,6 +83,12 @@ export interface CompactOptions {
   perEngine?: boolean;
   /** Codes of engines that failed inside a merged search; rendered as `id:0(CODE)`. */
   failedEngines?: Partial<Record<EngineId, string>>;
+  /**
+   * Honour-or-flag (S7.1): an accepted argument the engine cannot honour, with
+   * the engine/reason as the value. DuckDuckGo has no pagination, so
+   * `page > 1` yields `{ page: "duckduckgo" }`; the header and JSON carry it.
+   */
+  ignored?: Readonly<Record<string, string>>;
 }
 
 export interface CompactItem {
@@ -88,6 +97,8 @@ export interface CompactItem {
   domain: string;
   snippet: string;
   engine?: EngineId;
+  /** The URL is an opaque `/goto` wrapper that stayed unresolved (S3.5, S7.4). */
+  unresolved?: boolean;
 }
 
 export interface CompactAi {
@@ -125,6 +136,7 @@ interface MergedItem {
   domain: string;
   snippet: string;
   engine?: EngineId;
+  unresolved?: boolean;
 }
 
 interface Opts {
@@ -136,6 +148,7 @@ interface Opts {
   elapsedMs: number | undefined;
   perEngine: boolean;
   failedEngines: Partial<Record<EngineId, string>> | undefined;
+  ignored: Readonly<Record<string, string>> | undefined;
 }
 
 const DEFAULT_N = 5;
@@ -188,6 +201,7 @@ function resolveOpts(opts: CompactOptions): Opts {
     elapsedMs: typeof opts.elapsedMs === "number" && Number.isFinite(opts.elapsedMs) ? opts.elapsedMs : undefined,
     perEngine: opts.perEngine === true,
     failedEngines: opts.failedEngines,
+    ignored: opts.ignored,
   };
 }
 
@@ -344,7 +358,8 @@ function renderItem(item: CompactItem, index: number): string {
   const tag = item.engine ? `[${item.engine}] ` : "";
   const name = item.title ? `${tag}${item.title}` : tag.trim();
   const heading = name ? `${name} — ${item.domain}` : item.domain;
-  const lines = [`${index + 1}. ${heading}`, `   ${item.url}`];
+  const marker = item.unresolved === true ? " (unresolved)" : "";
+  const lines = [`${index + 1}. ${heading}`, `   ${item.url}${marker}`];
   if (item.snippet) lines.push(`   ${item.snippet}`);
   return lines.join("\n");
 }
@@ -357,6 +372,7 @@ function jsonItem(item: CompactItem): Record<string, unknown> {
     snippet: item.snippet,
   };
   if (item.engine) out.engine = item.engine;
+  if (item.unresolved === true) out.unresolved = true;
   return out;
 }
 
@@ -424,6 +440,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
           domain: domainOf(normalized),
           snippet,
           engine,
+          ...(raw.unresolved === true ? { unresolved: true } : {}),
         });
         continue;
       }
@@ -432,6 +449,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
       // the earlier engine, so the outcome does not depend on map internals).
       if (!existing.title && title) existing.title = title;
       if (snippet.length > existing.snippet.length) existing.snippet = snippet;
+      if (raw.unresolved === true) existing.unresolved = true;
     }
   }
 
@@ -467,6 +485,11 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
   const aiLabel = (state: AiState): string => (state === "answer" ? "yes" : state === "lead" ? "lead" : "no");
 
   const perEngine = opts.perEngine === true;
+  const ignoredEntries = Object.entries(opts.ignored ?? {}).filter(([, value]) => value !== "");
+  const ignoredNote =
+    ignoredEntries.length === 0
+      ? ""
+      : `ignored: ${ignoredEntries.map(([argument, reason]) => `${argument}(${reason})`).join(" ")}`;
 
   /** Contribution counts in canonical engine order; failed engines report `0(CODE)`. */
   const accountingFor = (items: readonly CompactItem[]): string => {
@@ -485,6 +508,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
     const parts = [engineLabel, `${items.length} results`, `ai:${aiLabel(state)}`];
     const accounting = accountingFor(items);
     if (accounting !== "") parts.push(accounting);
+    if (ignoredNote !== "") parts.push(ignoredNote);
     const elapsed = formatElapsed(opts.elapsedMs);
     if (elapsed) parts.push(elapsed);
     if (opts.cached) parts.push("cached");
@@ -509,6 +533,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
       snippet: truncate(item.snippet, snippetCap),
     };
     if (mixed || perEngine) out.engine = item.engine;
+    if (item.unresolved === true) out.unresolved = true;
     return out;
   };
 
@@ -579,6 +604,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
     chars: text.length,
     truncated,
   };
+  if (ignoredEntries.length > 0) data.ignored = Object.fromEntries(ignoredEntries);
   if (perEngine) {
     const counts: Record<string, number> = {};
     for (const id of ENGINE_IDS) {

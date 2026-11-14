@@ -75,7 +75,7 @@ export interface SanitizeFinding {
 
 /**
  * Query parameters whose values are session/user scoped. Keep this list in sync
- * with `research/FINDINGS.md` when a new engine token shows up in a capture.
+ * when a new engine token shows up in a capture.
  */
 const SECRET_PARAMS = [
   "sxsrf",

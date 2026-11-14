@@ -4,7 +4,7 @@
  * The bootstrap tab used to be `about:blank`: a blank page in the user's face
  * that told them nothing. It is now a local `assets/anchor.html` document (no
  * network, no cookies, our own CSS) painted with the current engine, query,
- * stage, pace, daily counters, last error and session id. Everything the panel
+ * stage, pace, session counters, last error and session id. Everything the panel
  * shows is work this process is already doing — nothing is read from the
  * profile and nothing is sent anywhere.
  *
@@ -27,7 +27,8 @@
 
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import type { PacingWindow } from "../config.ts";
+import type { PageKey } from "../cdp/types.ts";
+import type { PacingWindow } from "../config/index.ts";
 import type { EngineId } from "../engines/types.ts";
 import type { Clock } from "./types.ts";
 
@@ -57,7 +58,6 @@ export type PanelStage =
 export interface PanelCounter {
   engine: EngineId;
   today: number;
-  cap: number;
 }
 
 export interface PanelError {
@@ -87,9 +87,36 @@ export interface WorkAnnouncement {
   engine?: EngineId | null;
   query?: string | null;
   stage: PanelStage;
+  /**
+   * The owned tab this stage belongs to when it is not an engine tab: a read
+   * slot (`read`, `read#2`, …). `window.follow: "work"` raises that tab; the
+   * panel itself never shows a page key.
+   */
+  page?: PageKey | null;
   pace?: PacingWindow | null;
   counters?: readonly PanelCounter[];
   error?: PanelError | null;
+}
+
+/** What a stage announcement needs from a connector (the optional panel channel). */
+export interface WorkChannel {
+  announce?(update: WorkAnnouncement): Promise<void>;
+}
+
+/**
+ * Publish one stage on the panel/follow channel. Best effort by contract: a
+ * connector without an anchor, a closed tab or a failed paint is observability,
+ * never a tool failure (S12.5). Every tool goes through this one helper so the
+ * guarantee cannot drift per call site.
+ */
+export async function announceWork(channel: WorkChannel | undefined, update: WorkAnnouncement): Promise<void> {
+  const announce = channel?.announce;
+  if (announce === undefined) return;
+  try {
+    await announce.call(channel, update);
+  } catch {
+    // A dead anchor tab must never turn into a failed search or read.
+  }
 }
 
 /** Context the panel needs but an announcement must not have to repeat. */
@@ -143,7 +170,6 @@ function cleanCounters(value: readonly PanelCounter[] | undefined): PanelCounter
     counters.push({
       engine: entry.engine,
       today: cleanNumber(entry.today),
-      cap: cleanNumber(entry.cap),
     });
   }
   return counters;

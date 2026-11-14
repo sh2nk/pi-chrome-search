@@ -1,99 +1,131 @@
-# AGENTS.md — working on `pi-chrome-search`
+# AGENTS.md — pi-chrome-search
 
-The user speaks Russian: reply in Russian. Code, comments, commit messages and docs are English.
+You are rewriting a pi extension that searches the web through the user's own visible Chrome. Reply to
+the user in Russian; write code, comments, docs and commits in English.
 
-A pi extension that searches the web for free through the user's own visible Chrome (Google,
-DuckDuckGo, Yandex, each engine's native AI summary), reads pages, searches images, and never launches
-an automation browser. The window being visible is **desired**, not a bug. Read
-`docs/architecture.md` (decisions) and `docs/engines.md` (selectors) before changing behaviour.
+**The tree you are looking at is v1.** `SPEC.md` describes the product we are building. Nothing in
+`src/`, `docs/` or `README.md` is authoritative until a plan phase says it has been regenerated: v1's
+docs were verified to disagree with its own code (see `SPEC.md` appendix).
 
-## Hard rules (violating these breaks the premise)
+## Read in this order
 
-1. **Attach only.** Never `launch()`, `launchPersistentContext()`, `--enable-automation` or a separate
-   automation profile in `attach` mode. Raw CDP (`ws`) in production code. `mode:"launch"` is tests-only.
-2. **Never restart, kill or close the user's Chrome**, never close tabs we did not open, never touch
-   `~/.config/google-chrome/**` (no cookie copying, no `Local State` edits).
-3. **No headless and no fingerprint spoofing.** No UA/locale/timezone/screen/WebGL/`navigator.*`
-   overrides, no `Page.addScriptToEvaluateOnNewDocument`. One-off `Runtime.evaluate` is fine.
-4. **No paid search APIs or keys** (SerpApi/Serper/Brave/Tavily/Exa/Kagi). Classifiers may use the user's
-   existing OpenRouter balance or local llama.cpp — capped, logged, `reflex.localOnly:true` disables
-   remote calls. Search traffic never goes through a classifier provider.
-5. **Never solve captchas.** Surface the window, return `E_WALL`, let the user solve it. No third-party
-   solver, no retry loop around a wall.
-6. **Rate-limit like a human.** One search at a time per engine, `pacing` and daily caps respected, one
-   live probe per engine per gate. Never loop live probes; never auto-launch Chrome in `attach` mode.
-7. **Every failure is diagnosable**: `code` + `stage` + `hint` (+ artifact for page states), through
-   `src/runtime/errors.ts`. No bare `throw new Error("failed")`.
-8. **Keep the prompt cheap and the browser single-writer.** `web_search` is the only `direct` tool; all
-   tool descriptions ≤900 chars total, asserted in a test. Live Chrome work is orchestrator-only and
-   serialized; one writer per file; workers never commit and never mark their own gate green.
+1. `SPEC.md` — normative requirements (`S#.#`). On any conflict, SPEC wins; fix the loser in the same PR.
+2. `AGENTS.md` — this file: rules of engagement.
+3. `docs/` — generated reference: config, errors, engine selectors. Decisions live in `SPEC.md` §15.
+4. `src/`, `tests/` — v1 evidence. Useful for transport knowledge (raw CDP, discovery, locks); never
+   copy its contracts.
 
-## Repo map
+If a phase needs a decision that changes a public contract, stop and ask the owner. Record the answer
+in `SPEC.md` §15. Do not bury a decision in code.
+
+## Hard rules (a violation is a defect, not a trade-off)
+
+1. **Attach only.** Never `launch()`, `launchPersistentContext()`, `--enable-automation`, a separate
+   automation profile, or a spawned browser. Raw CDP over WebSocket in production code. There is no
+   `launch` mode in v2 (`SPEC` S1).
+2. **Never restart, kill or close the user's Chrome.** Never close a tab we did not open. Never read or
+   write `~/.config/google-chrome/**`, copy cookies, or edit `Local State`.
+3. **No headless, no fingerprint work.** No UA/locale/timezone/screen/WebGL/`navigator.*` overrides, no
+   `Page.addScriptToEvaluateOnNewDocument`. One-off `Runtime.evaluate` is fine.
+4. **Never solve captchas.** Surface the window and return `E_WALL` with an artifact **at once**, so the
+   human can click it. No solver, no automatic re-navigation, no wait-for-human timer (S8.5,
+   SPEC D5).
+5. **No quality gates.** No classifier, no heuristic rules, no page/read/coverage gate: the model
+   decides what to read and the tool reports what it got (SPEC D1). The SSRF guard is a security
+   boundary, not a quality opinion, and stays.
+6. **No paid search APIs or search keys, no model calls.** Search and read traffic never goes through a
+   third-party provider (S11.5). Do not add a "small classifier" back in any form.
+7. **Rate-limit like a human.** One live search per engine at a time and per-engine pacing with jitter;
+   there are no daily caps (SPEC D8). One probe per engine per gate; never loop live probes. A wall
+   means stop and ask.
+8. **Every failure is diagnosable**: `code` + `stage` + `retryable` + a hint the user can actually
+   execute (`S9.2`) + an artifact for page states. No bare `throw new Error("failed")`.
+9. **Reachability is a requirement** (S3.1): every registered tool must be callable in a stock install.
+   A `deferred` tool is acceptable only if the extension itself activates the discovery tool; otherwise
+   register it `direct`. Test both branches.
+10. **Honesty over convenience** (S7): every argument is honoured or reported `ignored`; `details`
+    describe the emitted text; no phantom config keys, flags or docs.
+11. **One deadline per call** (S8): stages derive from the remaining budget, worst case is a test.
+12. **Single writer.** Live Chrome work goes through the session layer only; one writer per tab; parallel
+    tool calls queue on a per-tab lock.
+13. **Keep the prompt cheap** (S3.3): tool descriptions ≤1200 chars total, each ≤350; search operators are
+    taught with `promptGuidelines` (≤400 chars), not with a new argument; caps live in one module.
+14. **Host facts live in `src/runtime/host.ts`** (platform, paths, profile tables, `capability()`,
+    process liveness). Nothing else imports `node:os`, reads `$HOME`/`PATH`, hardcodes `/proc/` or
+    `.config/`, or spawns to probe a binary.
+15. **Docs are code.** `docs/config.md` and the README tables are generated; never hand-edit them.
+
+## Target layout
 
 ```
-index.ts            package entry (lets pi label this package by name)
-src/index.ts        runtime: 5 tools, /web-doctor, /web-focus, session shutdown
-src/config.ts       strict loader → ~/.pi/agent/web-search.json
-src/tools/          web_search (direct), web_read, image_search, web_research, web_doctor
-src/engines/        google, duckduckgo, yandex, images — pure buildUrl + DOM extractor
-src/cdp/            discovery, session (raw WS), browser (window/tab/lock), humanize, ai-wait,
-                    page-lock, raise
-src/extract/        compact (caps/dedup/URLs), read, urls, claims, goto, pdf
-src/runtime/        cache, limiter, errors, error-codes, artifacts, doctor, log, notify,
-                    attention, panel, ssrf, host
-src/cli/doctor.ts   headless doctor (--json), used by gates
-scripts/audit.mjs   hard rules, secrets, fixture hygiene, doc budgets, docs↔code drift, packaging
-scripts/release.mjs bump table, publish mode and step order (pure, table-tested)
-tests/unit          contract suite (offline) · tests/live opt-in smoke · tests/fixtures sanitized
-docs/               architecture, engines, errors, config
-.github/workflows   ci.yml (lint+test) · release.yml (bump/tag/publish, OIDC trusted publishing)
+index.ts                 package entry only
+src/extension.ts         registration: tools, commands, activation, shutdown
+src/config/              defaults, schema, load (strict), env overrides
+src/session/             one session lifecycle: discover, attach, lock, tab pool, shutdown
+src/cdp/                 raw WS client, navigation commit, document access, humanize
+src/engines/             google, duckduckgo, yandex, images: buildUrl + extractor + canaries
+src/extract/             readability, urls, goto, pdf, compact (all caps here)
+src/runtime/             errors, codes, artifacts, limiter (pacing only), cache, host, log, notify, panel
+src/tools/               search, read, images, research, doctor
+src/commands/            /web-doctor, /web-focus
+scripts/                 audit.mjs, release.mjs, gen-config-doc.mjs, gen-errors-doc.mjs, gen-readme.mjs
+tests/{unit,live,fixtures}
+docs/{config.md,engines.md,errors.md}
+SPEC.md AGENTS.md
 ```
 
 ## Commands
 
 ```bash
 npm run lint                     # tsc --noEmit && node scripts/audit.mjs
-npm test                         # node --test tests/unit/**/*.test.ts (offline)
-node src/cli/doctor.ts --json    # canonical gate output; --no-probe --fix --watch
-PI_CHROME_LIVE=1 npm run test:live   # one query per engine, n=2, no retries; a wall = stop
-pi -e ./src/index.ts             # load the extension in a throwaway session
-node scripts/release.mjs --dry-run   # next version for the current commit log
-# a release runs on push to main (src/**, package.json, release tooling) or Actions → release → Run workflow
+npm test                         # offline suite, must never touch Chrome
+node src/cli/doctor.ts --json    # canonical diagnosis (--no-probe, --fix, --watch)
+PI_CHROME_LIVE=1 npm run test:live   # one query per engine, once; a wall = stop
+pi -e ./src/index.ts             # throwaway session for a manual check
+node scripts/release.mjs --dry-run
 ```
 
-Live commands hit real engines: run them **once**. A wall means stop and ask, not retry. Artifacts:
-`~/.pi/agent/web-search/artifacts/`; decisions: `~/.pi/agent/web-search/decisions.jsonl`.
+Run live commands **once**. They hit real engines in the owner's profile; a captcha is a stop sign, not
+an obstacle to route around.
 
-## Publishing
-npm no longer issues CI tokens that bypass 2FA, so `release.yml` publishes with the job's OIDC id-token:
-a trusted publisher on npmjs.com (`sh2nk/pi-chrome-search`, workflow `release.yml`, allowed action
-`npm publish`) plus a public repository, or provenance cannot verify. Never add an `NPM_TOKEN` secret —
-`release.mjs` would prefer it and leave the OIDC path untested. The bump comes from commits since the last
-`v*` tag (`[skip release]` opts a commit out), publish precedes the tag so a failed publish leaves nothing
-behind, and a brand-new package still needs one manual `npm publish` (a trusted publisher requires it).
+## Workflow
+
+- One phase per branch (`P<n>`), one PR, one logical change per commit.
+- Tests first for anything that fixes a v1 defect: the failing test names the `S#.#` it proves.
+- Delete the legacy module in the PR that replaces it. No phase ends with two implementations and no
+  feature flag outlives its phase.
+- Commit as soon as the gates pass — do not wait for an explicit request. Style: `feat: …`,
+  `fix(scope): …`, `test: …`, `refactor(scope): …`, `docs: …`, `chore: …`; `!` or `BREAKING CHANGE:`
+  for a major.
+- Evidence of a live run goes into the PR body, never into the tree (no `evidence/`, `research/`,
+  `bench/` directories — the audit rejects them).
 
 ## Conventions
 
-- TypeScript strict ESM, Node ≥26, no build step, no `any` (use `unknown` + guards).
-- Small modules: an adapter is `buildUrl` + a DOM extractor, not a god object; text/structural markers
-  with canaries, never obfuscated class names alone.
-- All output passes `src/extract/compact.ts`; caps live there only.
-- **Host access lives in `src/runtime/host.ts`** (platform, paths, profile tables, `capability()`,
-  `isProcessAlive()`). Nothing else imports `node:os`, reads `$HOME`/`PATH`, hardcodes `/proc/` or
-  `.config/`, or spawns to probe a binary — audit rule R13 enforces it.
-- Every new selector ships a fixture (`tests/fixtures`, sanitized: no cookies, tokens, identity, exact
-  IP, personal queries) and a line in `docs/engines.md`.
-- New dependency: justify it in the commit message. Tests are offline by default; live tests are opt-in.
-- Commit style: `feat: …`, `fix(parse): …`, `docs: …`, `test: …`, `chore: …` — the release workflow
-  classifies these (`!`/`BREAKING CHANGE` → major, docs/test/chore only → no release). Commit on your
-  own as soon as the gates pass: do not wait for an explicit "commit" request, one logical change per
-  commit.
+- TypeScript strict ESM, Node ≥26, no build step, no `any` (use `unknown` + a guard).
+- Small modules: an adapter is `buildUrl` + a DOM extractor + canaries, not a god object. Text or
+  structural markers, never obfuscated class names alone.
+- Every selector ships a sanitized fixture and a line in `docs/engines.md`; a selector without a fixture
+  fails the audit (S13.4). Images included — v1 had none.
+- Tests are offline by default: injected DNS, fake CDP, fake clock. Live tests are opt-in.
+- A new runtime dependency needs owner approval, recorded in `SPEC.md` §15, with the justification in
+  the commit message.
+- Caps (chars, bytes, results) live in one module per family; no scattered literals.
 
 ## Definition of done
 
-- `npm run lint && npm test` pass, and `node src/cli/doctor.ts --json` is schema-valid and honest.
-- The changed behaviour has an offline test plus (for live paths) one documented smoke run: engine,
-  query class, `ai:yes/lead/no`, chars, latency.
-- Output ≤2500 chars at `n=5`; tool descriptions ≤900 chars; a new selector is in `docs/engines.md`.
-- No hard rule broken: no launch/headless/fingerprint/captcha automation, no paid search API, no secret
-  or personal data in a tracked file.
+**Per phase:** the SPEC requirements it owns have tests; legacy code for that scope is deleted; generated
+docs are regenerated; `npm run lint && npm test` green; `doctor --json` validates when transport is
+touched; no new `TODO`/`FIXME` and no dead config key.
+
+**Per release:** `SPEC.md` §14 A1–A8 demonstrated; version single-sourced (`package.json` is the only
+place); the live smoke line is recorded; `npm pack --dry-run` contains no dev docs, fixtures or
+artifacts; publish through OIDC trusted publishing (provenance), never an `NPM_TOKEN` secret; a brand-new
+package version still needs one manual `npm publish`.
+
+## Ask the owner instead of guessing
+
+Removing a capability, changing a default that costs money or time, adding/renaming an error code,
+changing the tool surface, anything that weakens a hard rule, or an ambiguous requirement. Ask with a
+concrete proposal and the alternative — the owner answers with a decision, and you record it in
+`SPEC.md` §15.

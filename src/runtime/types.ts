@@ -29,12 +29,12 @@ export interface Cache {
 export interface LimiterStats {
   engine: EngineId;
   lastAt: number | null;
+  /** Searches this process has issued to the engine (observability, not a quota). */
   today: number;
-  dailyCap: number;
 }
 
 export interface Limiter {
-  /** Resolves when the engine may be queried; throws E_RATE_LIMITED at the daily cap. */
+  /** Resolves when the engine may be queried; never enforces a daily quota (SPEC D8). */
   acquire(engine: EngineId, signal?: AbortSignal): Promise<void>;
   stats(engine: EngineId): LimiterStats;
 }
@@ -65,19 +65,4 @@ export interface Artifacts {
   /** Total size of the artifact root in bytes. */
   size(): Promise<number>;
   root(): string;
-}
-
-/** Log row written to decisions.jsonl (SPEC §9.3). Shared by reflex and tools. */
-export interface DecisionLogRow {
-  ts: string;
-  decision: "triage" | "gate_read" | "coverage" | "route" | "rules";
-  verdict: string;
-  confidence?: number;
-  latencyMs?: number;
-  model?: string;
-  usage?: { inputTokens?: number; outputTokens?: number };
-  costUsd?: number;
-  fallback?: boolean;
-  queryHash?: string;
-  url?: string;
 }

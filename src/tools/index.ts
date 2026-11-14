@@ -1,12 +1,14 @@
 /**
- * The single source of truth for the tool surface (P2-E + P4).
+ * The single source of truth for the tool surface (S3).
  *
- * Registration in `src/index.ts` and the prompt-budget test both call
- * `createTools`, so a tool cannot be added to one without the other.
+ * Registration in `src/index.ts`, the reachability test, the prompt-budget test
+ * and the generated README table all call `createTools`, so a tool cannot be
+ * added, renamed or re-exposed in one place without the others noticing.
  *
- * Exposure matters: `web_search` is `direct` (the agent sees it immediately),
- * everything else is `deferred` — findable via tool search and callable from
- * codemode scripts, but not paid for in every prompt (SPEC §7.1, §8).
+ * Exposure is the product decision (D3): `web_search` and `web_read` are
+ * `direct`; the other three are `deferred`, reachable only through an active
+ * `tool_search`. `src/index.ts` promotes the deferred trio to `direct` at
+ * session start when that discovery tool is absent.
  */
 
 import { createImageSearchTool } from "./image_search.ts";
@@ -24,11 +26,20 @@ export interface ToolFactories {
   getDoctorDeps: WebDoctorDepsGetter;
 }
 
+/** The names the prompt promises: search then read (S3.4). */
+export const DIRECT_TOOL_NAMES = ["web_search", "web_read"] as const;
+/** The rest, reachable through discovery or promoted in the fallback branch. */
+export const DEFERRED_TOOL_NAMES = ["image_search", "web_research", "web_doctor"] as const;
+/** pi's built-in discovery tool; the extension activates it itself (D3). */
+export const DISCOVERY_TOOL_NAME = "tool_search";
+
 export function createTools(factories: ToolFactories) {
+  // Direct tools first: registration order is the order the model sees and the
+  // order the generated README table presents search → read.
   return [
     createWebSearchTool(factories.getDeps),
-    createImageSearchTool(factories.getDeps),
     createWebReadTool(factories.getDeps),
+    createImageSearchTool(factories.getDeps),
     createWebResearchTool(factories.getDeps),
     createWebDoctorTool(factories.getDoctorDeps),
   ];

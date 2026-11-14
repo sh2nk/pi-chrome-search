@@ -16,9 +16,9 @@ export type ErrorCode =
   | "E_TARGET_LOST"
   | "E_WALL"
   | "E_EMPTY"
+  | "E_EMPTY_PAGE"
   | "E_PARSE"
   | "E_TIMEOUT"
-  | "E_RATE_LIMITED"
   | "E_BUSY"
   | "E_BLOCKED_URL"
   | "E_UNSUPPORTED"
@@ -36,9 +36,9 @@ export const ERROR_CODES = [
   "E_TARGET_LOST",
   "E_WALL",
   "E_EMPTY",
+  "E_EMPTY_PAGE",
   "E_PARSE",
   "E_TIMEOUT",
-  "E_RATE_LIMITED",
   "E_BUSY",
   "E_BLOCKED_URL",
   "E_UNSUPPORTED",
@@ -60,7 +60,7 @@ export type Stage =
   | "resolve"
   | "render"
   | "read"
-  | "reflex";
+  | "budget";
 
 export const STAGES = [
   "config",
@@ -72,7 +72,7 @@ export const STAGES = [
   "resolve",
   "render",
   "read",
-  "reflex",
+  "budget",
 ] as const satisfies readonly Stage[];
 
 export interface FailureDetails {
@@ -102,10 +102,12 @@ export const ERROR_HINTS: Record<ErrorCode, string> = {
   E_CDP_DISCONNECTED: "the CDP socket dropped; retry once — if it repeats, run /web-doctor and check the lock file",
   E_TARGET_LOST: "the owned tab was closed or navigated away; retry to reopen it",
   E_WALL: "solve the captcha/consent in the visible browser window, then retry — never automate it",
-  E_EMPTY: "the engine returned no organic results; rephrase, try another engine, or drop freshness filters",
+  E_EMPTY: "the engine returned no organic results; rephrase the query or try another engine",
   E_PARSE: "a selector canary failed; inspect the artifact directory, run /web-doctor, then patch the adapter",
-  E_TIMEOUT: "the deadline was exceeded; retry or raise the timeout in config",
-  E_RATE_LIMITED: "the per-engine gap or daily soft cap is active; wait or use another engine",
+  E_EMPTY_PAGE:
+    "the document rendered no readable text; the page may be client-side, so open the artifact " +
+    "and try another URL (or retry once if the page loads late)",
+  E_TIMEOUT: "the deadline was exceeded; retry, or ask for less (a smaller `n` or `maxChars`)",
   E_BUSY: "another pi session holds ~/.pi/agent/web-search.lock; close it or wait for its heartbeat to expire",
   E_BLOCKED_URL: "use a public http(s) URL; localhost, private ranges, file: and data: are blocked",
   E_UNSUPPORTED: "this engine or vertical is not implemented yet; check /web-doctor for per-engine status",
@@ -135,9 +137,9 @@ export const RETRYABLE: Record<ErrorCode, boolean> = {
   E_TARGET_LOST: true,
   E_WALL: true,
   E_EMPTY: true,
+  E_EMPTY_PAGE: false,
   E_PARSE: false,
   E_TIMEOUT: true,
-  E_RATE_LIMITED: true,
   E_BUSY: true,
   E_BLOCKED_URL: false,
   E_UNSUPPORTED: false,
@@ -148,6 +150,15 @@ export const RETRYABLE: Record<ErrorCode, boolean> = {
   E_PDF_SCANNED: false,
   E_PDF_UNSUPPORTED: false,
 };
+
+/**
+ * Codes whose owning phase has not added a dedicated offline test yet (S9.5).
+ * Production paths may throw them, but the contract is not proven until the
+ * named phase lands its test, so a reservation cannot become a permanent pass.
+ * P5 proved `E_EMPTY_PAGE`, `E_NAVIGATION_MISMATCH` and `E_OFFSET_RANGE`; the
+ * table stays so a future code can be reserved deliberately, not by omission.
+ */
+export const RESERVED_CODES: Partial<Record<ErrorCode, string>> = {};
 
 export class WebSearchError extends Error {
   readonly details: FailureDetails;

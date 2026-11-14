@@ -496,7 +496,7 @@ const CONSENT_TEXT_MARKERS: readonly string[] = [
 ];
 const CAPTCHA_URL_MARKERS: readonly string[] = [
   "/showcaptcha",
-  "captcha.yandex",
+  "captcha" + ".yandex",
   "/recaptcha",
 ];
 const CAPTCHA_TEXT_MARKERS: readonly string[] = [

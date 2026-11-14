@@ -1,6 +1,6 @@
 {
   "name": "pi-chrome-search",
-  "version": "0.1.1",
+  "version": "2.0.0",
   "description": "Free, keyless web search through the user's own visible Chrome (Google, DuckDuckGo, Yandex) for pi",
   "type": "module",
   "license": "MIT",
@@ -18,6 +18,9 @@
     "test": "node --test --test-timeout=15000 \"tests/unit/**/*.test.ts\"",
     "test:live": "PI_CHROME_LIVE=1 node --test \"tests/live/**/*.test.ts\"",
     "audit": "node scripts/audit.mjs",
+    "gen-config-doc": "node scripts/gen-config-doc.mjs",
+    "gen-errors-doc": "node scripts/gen-errors-doc.mjs",
+    "gen-readme": "node scripts/gen-readme.mjs",
     "release": "node scripts/release.mjs"
   },
   "peerDependencies": {

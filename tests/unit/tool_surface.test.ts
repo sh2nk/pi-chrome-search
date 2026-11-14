@@ -1,36 +1,43 @@
 /**
- * Tool surface and prompt budget: which five tools exist, which one is direct,
- * and the 900-char total description budget that keeps the prompt cheap.
+ * Tool surface and reachability (S3).
+ *
+ * The v1 suite counted `exposure` values on the factory output and declared the
+ * surface healthy while four of five tools were unreachable in a stock session.
+ * This suite instead drives the real registration function with a fake pi and
+ * asks what the model can actually see:
+ *
+ *  - discovery branch: `web_search` + `web_read` are declared and `tool_search`
+ *    is activated by the extension itself;
+ *  - fallback branch: without a usable discovery tool every tool is registered
+ *    `direct`, so reachability cannot depend on the user editing settings.
+ *
+ * The prompt budget (S3.3), the generated README table (S13.3) and the registry
+ * contract share this file because they all read the same `createTools()` output.
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { type Config, DEFAULT_CONFIG } from "../../src/config.ts";
+
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+
+import { type Config, DEFAULT_CONFIG } from "../../src/config/index.ts";
 import { DEFAULT_ENGINES, createDefaultRegistry, createEngineRegistry, describeRegistry, registerAdapter } from "../../src/engines/index.ts";
 import { ENGINE_IDS, type Engine, type EngineId } from "../../src/engines/types.ts";
+import { ensureToolReachability, default as register } from "../../src/index.ts";
 import { type WebSearchError, isWebSearchError } from "../../src/runtime/error-codes.ts";
-import { createTools } from "../../src/tools/index.ts";
+import {
+  DEFERRED_TOOL_NAMES,
+  DIRECT_TOOL_NAMES,
+  DISCOVERY_TOOL_NAME,
+  createTools,
+} from "../../src/tools/index.ts";
+import { README_TOOLS_END, README_TOOLS_START, renderReadmeToolTable } from "../../src/tools/surface.ts";
+import { createFakePi } from "../helpers/fake-pi.ts";
 
 // ---------------------------------------------------------------------------
-// from tests/unit/tool_surface.test.ts
+// Shape probe: the factory output, never a dependency resolution
 // ---------------------------------------------------------------------------
-{
-/**
- * P4-D: tool surface audit (SPEC §7.1, §7.5, §8; PLAN V4.5).
- *
- * The prompt is the most expensive real estate in the extension. Two rules:
- *
- * 1. exactly one tool is `direct` — `web_search`. Everything else is
- *    `deferred`: findable through tool search and callable from codemode, but
- *    never paid for in every prompt;
- * 2. the declared descriptions together stay under 900 characters
- *    (≈230 tokens), and each one stays under 350.
- *
- * This test reads the real `createTools()` output, so adding a tool without
- * budgeting it fails here rather than in the user's context window.
- */
-
-
 
 const TOOLS = createTools({
   getDeps: () => {
@@ -41,202 +48,193 @@ const TOOLS = createTools({
   },
 });
 
-const TOTAL_BUDGET = 900;
-const DIRECT_BUDGET = 350;
-const DEFERRED_BUDGET = 350;
+const TOOL_NAMES = [...DIRECT_TOOL_NAMES, ...DEFERRED_TOOL_NAMES].sort();
 
-test("exactly one tool is direct and it is web_search", () => {
-  const direct = TOOLS.filter((tool) => tool.exposure === "direct");
-  assert.equal(direct.length, 1, `expected one direct tool, got ${direct.map((tool) => tool.name).join(",")}`);
-  assert.equal(direct[0]?.name, "web_search");
-});
+// ---------------------------------------------------------------------------
+// Reachability through the registration path (S3.2)
+// ---------------------------------------------------------------------------
 
-test("read, images and doctor are deferred (not paid for in every prompt)", () => {
-  for (const name of ["web_read", "image_search", "web_doctor"]) {
-    const tool = TOOLS.find((candidate) => candidate.name === name);
-    assert.ok(tool !== undefined, `${name} must be registered`);
-    assert.equal(tool.exposure, "deferred", `${name} must be deferred, not ${String(tool.exposure)}`);
+test("with tool_search the extension activates discovery and keeps only two direct tools", async () => {
+  const pi = createFakePi({ withDiscovery: true });
+  register(pi as unknown as ExtensionAPI);
+  await pi.emit("session_start");
+
+  assert.deepEqual(
+    pi.visible(),
+    ["web_search", "web_read", DISCOVERY_TOOL_NAME],
+    "the model must see both direct tools and the discovery tool",
+  );
+  assert.equal(
+    pi.getActiveTools().includes(DISCOVERY_TOOL_NAME),
+    true,
+    "the extension must activate tool_search itself (S3.1)",
+  );
+
+  const all = pi.getAllTools();
+  for (const name of DEFERRED_TOOL_NAMES) {
+    const tool = all.find((candidate) => candidate.name === name);
+    assert.ok(tool !== undefined, `${name} must be registered in the discovery branch`);
+    assert.equal(tool.exposure, "deferred", `${name} must stay deferred, not ${String(tool.exposure)}`);
+    assert.equal(pi.getActiveTools().includes(name), false, `${name} must not be declared directly`);
+  }
+  for (const name of DIRECT_TOOL_NAMES) {
+    assert.equal(all.find((tool) => tool.name === name)?.exposure, "direct", `${name} must be direct`);
   }
 });
 
-test("every declared description fits its budget and the total stays under 900", () => {
+test("without tool_search every tool becomes direct and model-visible", async () => {
+  const pi = createFakePi();
+  register(pi as unknown as ExtensionAPI);
+  await pi.emit("session_start");
+
+  assert.deepEqual(pi.visible().sort(), TOOL_NAMES, "a stock session must expose all five tools");
+  for (const tool of pi.getAllTools()) {
+    assert.equal(tool.exposure, "direct", `${tool.name} must be promoted in the fallback branch`);
+    assert.equal(pi.getActiveTools().includes(tool.name), true, `${tool.name} must be active`);
+  }
+});
+
+test("a same-named tool without reachesTools is not a discovery tool", async () => {
+  const pi = createFakePi();
+  pi.registerTool({
+    name: DISCOVERY_TOOL_NAME,
+    label: DISCOVERY_TOOL_NAME,
+    description: "a decoy that cannot reach deferred tools",
+    parameters: {},
+    exposure: "model-only",
+    defaultActive: false,
+    execute: async () => ({ content: [], details: {} }),
+  } as unknown as ToolDefinition);
+
+  register(pi as unknown as ExtensionAPI);
+  await pi.emit("session_start");
+
+  // The decoy stays inactive, and the fallback promotes every real tool instead
+  // of pretending deferred tools are findable through it.
+  assert.deepEqual(pi.visible().sort(), TOOL_NAMES);
+});
+
+test("the canonical surface carries exactly the documented exposures", () => {
+  for (const name of DIRECT_TOOL_NAMES) {
+    assert.equal(TOOLS.find((tool) => tool.name === name)?.exposure, "direct", `${name} must default to direct`);
+  }
+  for (const name of DEFERRED_TOOL_NAMES) {
+    assert.equal(TOOLS.find((tool) => tool.name === name)?.exposure, "deferred", `${name} must default to deferred`);
+  }
+});
+
+// The exported helper is the same path `register` uses; prove its two answers
+// directly so the branch names cannot drift from the registration behaviour.
+test("ensureToolReachability reports which branch it took", async () => {
+  const discovery = createFakePi({ withDiscovery: true });
+  register(discovery as unknown as ExtensionAPI);
+  assert.equal(ensureToolReachability(discovery as unknown as ExtensionAPI, TOOLS), "discovery");
+
+  const fallback = createFakePi();
+  assert.equal(ensureToolReachability(fallback as unknown as ExtensionAPI, TOOLS), "direct-fallback");
+  await fallback.emit("session_start");
+});
+
+// ---------------------------------------------------------------------------
+// Prompt budget (S3.3) and discoverability (S3.4)
+// ---------------------------------------------------------------------------
+
+const TOTAL_BUDGET = 1200;
+const PER_TOOL_BUDGET = 350;
+const GUIDELINE_BUDGET = 400;
+
+test("each description fits 350 chars and the total stays under 1200", (t) => {
   const lines: string[] = [];
   let total = 0;
   for (const tool of TOOLS) {
     assert.equal(typeof tool.description, "string", `${tool.name} has no description`);
     assert.equal(tool.description.includes("\n"), false, `${tool.name} description must be one line`);
     assert.ok(tool.description.length > 0, `${tool.name} description must not be empty`);
-    const budget = tool.exposure === "direct" ? DIRECT_BUDGET : DEFERRED_BUDGET;
     assert.ok(
-      tool.description.length <= budget,
-      `${tool.name} description is ${tool.description.length} chars, cap is ${budget}`,
+      tool.description.length <= PER_TOOL_BUDGET,
+      `${tool.name} description is ${tool.description.length} chars, cap is ${PER_TOOL_BUDGET}`,
     );
     lines.push(`${tool.name} ${tool.description.length}`);
     total += tool.description.length;
   }
   assert.ok(total <= TOTAL_BUDGET, `declared descriptions: ${total}/${TOTAL_BUDGET} chars — ${lines.join(", ")}`);
+  t.diagnostic(`tool descriptions: ${total}/${TOTAL_BUDGET} chars`);
 });
 
-test("a deferred tool still exposes a callable execute with a schema", () => {
+test("web_search names both direct tools and what they return", () => {
+  const search = TOOLS.find((tool) => tool.name === "web_search");
+  assert.ok(search !== undefined);
+  assert.match(search.description, /web_read/, "the search description must name the read tool");
+  assert.match(search.description, /Markdown/, "the search description must say what web_read returns");
+
+  const read = TOOLS.find((tool) => tool.name === "web_read");
+  assert.ok(read !== undefined);
+  assert.match(read.description, /page/, "web_read must say it reads one page");
+  assert.match(read.description, /Markdown|text/, "web_read must say what it returns");
+});
+
+test("search operators are taught in prompt guidelines, not another argument", () => {
+  const search = TOOLS.find((tool) => tool.name === "web_search");
+  assert.ok(search !== undefined);
+  const guidelines = "promptGuidelines" in search ? search.promptGuidelines ?? [] : [];
+  assert.ok(guidelines.length > 0, "web_search must declare search-operator guidelines (S3.6)");
+
+  const text = guidelines.join(" ");
+  assert.ok(text.length <= GUIDELINE_BUDGET, `guidelines are ${text.length} chars, cap is ${GUIDELINE_BUDGET}`);
+  for (const operator of ["quoted phrases", "-term", "OR", "site:", "filetype:", "after:", "before:", "date:"]) {
+    assert.ok(text.includes(operator), `guidelines must teach ${operator}`);
+  }
+  const properties = search.parameters.properties ?? {};
+  assert.equal(Object.hasOwn(properties, "date"), false, "date narrowing must not become a new argument");
+});
+
+// ---------------------------------------------------------------------------
+// Generated README table (S13.3 pattern)
+// ---------------------------------------------------------------------------
+
+test("README's tool table is generated from the same definitions", () => {
+  const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+  const pattern = new RegExp(`${README_TOOLS_START}[\\s\\S]*?${README_TOOLS_END}`);
+  assert.match(readme, pattern, "README must keep the generated tools markers");
+
+  const block = `${README_TOOLS_START}\n${renderReadmeToolTable(TOOLS)}\n${README_TOOLS_END}`;
+  assert.equal(
+    readme.match(pattern)?.[0],
+    block,
+    "README tool table drifted; run node scripts/gen-readme.mjs",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Annotations and callable shape
+// ---------------------------------------------------------------------------
+
+test("S9.6: annotations describe the browser side effects", () => {
+  // Every tool navigates the user's browser (and the doctor may write files), so
+  // none of them is read-only. None is observably free on a repeat: there is no
+  // cache hit that makes a second call cost nothing.
+  for (const tool of TOOLS) {
+    assert.equal(tool.annotations.readOnlyHint, false, `${tool.name} navigates the browser`);
+    assert.equal(tool.annotations.idempotentHint, false, `${tool.name} is not free on repeat`);
+    assert.equal(tool.annotations.openWorldHint, true, `${tool.name} talks to the live browser`);
+  }
+});
+
+test("every tool has a callable execute and a parameter schema", () => {
   for (const tool of TOOLS) {
     assert.equal(typeof tool.execute, "function", `${tool.name} must be callable`);
     assert.equal(typeof tool.parameters, "object", `${tool.name} must declare parameters`);
   }
 });
 
-test("only genuinely inert tools are declared read-only", () => {
-  // `web_doctor` is deliberately NOT read-only: `fix: true` closes the tabs this
-  // connector owns and prunes artifact files, so it mutates the browser and the
-  // disk. A caller that batches read-only tools must not get it for free.
-  for (const name of ["web_search", "web_read", "image_search"]) {
-    const tool = TOOLS.find((candidate) => candidate.name === name);
-    assert.ok(tool !== undefined, `${name} must be registered`);
-    assert.equal(tool.annotations.readOnlyHint, true, `${name} must be read-only`);
-  }
-
-  const doctor = TOOLS.find((tool) => tool.name === "web_doctor");
-  assert.ok(doctor !== undefined, "web_doctor must be registered");
-  assert.equal(doctor.annotations.readOnlyHint, false, "web_doctor's fix mutates: not read-only");
-  assert.equal(doctor.annotations.openWorldHint, true, "web_doctor talks to the live browser");
-  assert.equal(doctor.annotations.idempotentHint, true, "a repeated web_doctor converges");
-});
-
-test("no tool name collides with the core tool names", () => {
+test("tool names are unique and provider-safe", () => {
   const names = TOOLS.map((tool) => tool.name);
   assert.equal(new Set(names).size, names.length, "tool names must be unique");
   for (const name of names) assert.match(name, /^[a-z][a-z0-9_]*$/);
 });
-}
 
 // ---------------------------------------------------------------------------
-// from tests/unit/tool_budget.test.ts
-// ---------------------------------------------------------------------------
-{
-/**
- * P2-E: prompt budget + registry contract (SPEC §7.5, PLAN V2.6, AGENTS.md §2.10).
- *
- * Two independent guarantees live here.
- *
- * 1. Prompt cost. `web_search` is the only `direct` tool bounded at 350 chars;
- *    every declared tool's description is summed and must stay under 900 chars
- *    (≈230 tokens). `TOOL_DESCRIPTIONS` is the extension's whole declared
- *    surface: P4-D appends `web_read` / `image_search` / `web_research` to it
- *    and the same sum applies — there is deliberately no second budget test.
- *
- * 2. Registry contract. `auto` order is canonical (D10), explicit lists keep
- *    caller order, and duplicates/disabled/unregistered ids are dropped. `get`
- *    and `enabled` never hand out an adapter this session may not use, and the
- *    append-only map cannot quietly grow two adapters for one id.
- *
- * Fully offline: no socket, no Chrome, no timers. The tool factory gets a deps
- * getter that throws, so a shape assertion can never silently become a live
- * call (P2-D ships a factory, not a module-level instance — dependency
- * construction belongs to the extension wiring).
- */
-
-
-
-// ---------------------------------------------------------------------------
-// Tool surface budget
-// ---------------------------------------------------------------------------
-
-/** SPEC §7.5: all tool descriptions together cost ≤900 chars of prompt. */
-const TOOL_BUDGET_CHARS = 900;
-
-/** PLAN V2.6: `web_search` alone is capped at 350 chars (P2-D contract). */
-const WEB_SEARCH_DESCRIPTION_MAX = 350;
-
-const tools = createTools({
-  getDeps: () => {
-    throw new Error("tool_budget: a shape probe must not resolve tool dependencies");
-  },
-  getDoctorDeps: () => {
-    throw new Error("tool_budget: a shape probe must not resolve tool dependencies");
-  },
-});
-const webSearchTool = tools.find((tool) => tool.name === "web_search");
-if (webSearchTool === undefined) throw new Error("tool_budget: web_search is not exported by createTools");
-
-interface DeclaredTool {
-  name: string;
-  description: string;
-  exposure: "direct" | "deferred";
-}
-
-/**
- * Every tool the extension declares. P4-D appends the deferred tools here:
- *
- *   { name: "web_read", description: WEB_READ_DESCRIPTION, exposure: "deferred" },
- *   { name: "image_search", ... }, { name: "web_research", ... }
- *
- * The sum below is the gate; keep entries at most one line each.
- */
-const TOOL_DESCRIPTIONS: DeclaredTool[] = tools.map((tool) => ({
-  name: tool.name,
-  description: tool.description,
-  exposure: tool.exposure,
-}));
-
-test("web_search is a cheap direct tool with honest annotations", (t) => {
-  assert.equal(webSearchTool.name, "web_search");
-  assert.equal(webSearchTool.exposure, "direct");
-  assert.deepEqual(webSearchTool.annotations, {
-    readOnlyHint: true,
-    openWorldHint: true,
-    idempotentHint: true,
-  });
-
-  const description = webSearchTool.description;
-  assert.ok(description.length > 0, "the description must not be empty");
-  assert.ok(
-    description.length <= WEB_SEARCH_DESCRIPTION_MAX,
-    `web_search description is ${description.length} chars, cap is ${WEB_SEARCH_DESCRIPTION_MAX}`,
-  );
-  // A newline turns one description into several prompt lines; the budget is
-  // measured in chars, not in layout, so forbid it outright.
-  assert.equal(description.includes("\n"), false, "the description must stay one line");
-
-  t.diagnostic(`web_search description: ${description.length}/${WEB_SEARCH_DESCRIPTION_MAX} chars`);
-});
-
-test("the declared tool surface fits the 900-char description budget", (t) => {
-  assert.ok(TOOL_DESCRIPTIONS.length >= 1, "at least web_search is declared");
-
-  const names = TOOL_DESCRIPTIONS.map((tool) => tool.name);
-  assert.equal(new Set(names).size, names.length, `duplicate tool name in ${names.join(", ")}`);
-
-  const total = TOOL_DESCRIPTIONS.reduce((sum, tool) => sum + tool.description.length, 0);
-  t.diagnostic(
-    `declared tool descriptions: ${total}/${TOOL_BUDGET_CHARS} chars across ${TOOL_DESCRIPTIONS.length} tool(s)`,
-  );
-
-  assert.ok(total > 0);
-  assert.ok(
-    total <= TOOL_BUDGET_CHARS,
-    `total description budget is ${total} chars, cap is ${TOOL_BUDGET_CHARS}: ${names.join(", ")}`,
-  );
-});
-
-test("web_search is the only direct tool today", () => {
-  assert.deepEqual(
-    TOOL_DESCRIPTIONS.filter((tool) => tool.exposure === "direct").map((tool) => tool.name),
-    ["web_search"],
-  );
-  for (const tool of TOOL_DESCRIPTIONS) {
-    if (tool.name === webSearchTool.name) continue;
-    assert.equal(tool.exposure, "deferred", `${tool.name} must stay deferred (SPEC §7.5)`);
-  }
-});
-
-test("the budget list cannot drift from the real web_search shape", () => {
-  const declared = TOOL_DESCRIPTIONS.find((tool) => tool.name === webSearchTool.name);
-  assert.ok(declared !== undefined, "web_search is missing from TOOL_DESCRIPTIONS");
-  assert.equal(declared.description, webSearchTool.description);
-  assert.equal(declared.exposure, webSearchTool.exposure);
-});
-
-// ---------------------------------------------------------------------------
-// Registry fixtures
+// Registry fixtures (unchanged contract)
 // ---------------------------------------------------------------------------
 
 function stubEngine(id: EngineId): Engine {
@@ -276,7 +274,6 @@ function expectError(fn: () => unknown, code: "E_UNSUPPORTED" | "E_CONFIG"): Web
   } catch (error) {
     assert.ok(isWebSearchError(error), `expected WebSearchError, got ${String(error)}`);
     assert.equal(error.details.code, code);
-    // Registry misses are a resolution failure; a duplicate wiring entry is config.
     assert.equal(error.details.stage, code === "E_UNSUPPORTED" ? "resolve" : "config");
     assert.equal(error.details.retryable, false);
     assert.ok(error.details.hint.length > 0, "every failure carries an actionable hint");
@@ -284,10 +281,6 @@ function expectError(fn: () => unknown, code: "E_UNSUPPORTED" | "E_CONFIG"): Web
   }
   assert.fail(`expected ${code}, nothing was thrown`);
 }
-
-// ---------------------------------------------------------------------------
-// Selection (D9/D10)
-// ---------------------------------------------------------------------------
 
 test("auto keeps the canonical order regardless of map insertion order", () => {
   const registry = createEngineRegistry(
@@ -314,7 +307,6 @@ test("disabled engines are dropped from auto and from explicit lists", () => {
 
   assert.deepEqual(registry.select("auto"), ["google"]);
   assert.deepEqual(registry.select(["yandex", "google", "duckduckgo"]), ["google"]);
-  // Registered but not usable: `has` is the wiring fact, not the tool answer.
   assert.equal(registry.has("yandex"), true);
   expectError(() => registry.get("yandex"), "E_UNSUPPORTED");
 });
@@ -352,10 +344,6 @@ test("get on a disabled adapter is E_UNSUPPORTED naming the config key", () => {
   assert.match(error.details.hint, /config\.engines\.yandex\.enabled/);
 });
 
-// ---------------------------------------------------------------------------
-// Append-only map and the production registry
-// ---------------------------------------------------------------------------
-
 test("registerAdapter appends to a copy and never mutates its input", () => {
   const base = { google: stubEngine("google") };
   const extended = registerAdapter(base, stubEngine("duckduckgo"));
@@ -388,17 +376,11 @@ test("DEFAULT_ENGINES is frozen and drives createDefaultRegistry", () => {
   for (const id of ENGINE_IDS) {
     assert.equal(registry.has(id), DEFAULT_ENGINES[id] !== undefined, `has(${id}) must mirror the map`);
   }
-  // Survives the P3 one-line append: the default registry must expose exactly
-  // the registered, config-enabled adapters in canonical order.
   assert.deepEqual(
     registry.select("auto"),
     ENGINE_IDS.filter((id) => DEFAULT_ENGINES[id] !== undefined && config.engines[id].enabled),
   );
 });
-
-// ---------------------------------------------------------------------------
-// Doctor snapshot
-// ---------------------------------------------------------------------------
 
 test("describeRegistry reports canonical status without conflating the two causes", () => {
   const config = configWith(["yandex"]);
@@ -415,7 +397,6 @@ test("describeRegistry reports canonical status without conflating the two cause
     configEnabled: true,
     available: true,
   });
-  // No adapter yet (P3) vs disabled in config: different fixes, different rows.
   assert.deepEqual(status.engines[1], {
     id: "duckduckgo",
     registered: false,
@@ -447,10 +428,6 @@ test("describeRegistry without a config reports registered-only availability", (
 });
 
 test("the shipped registry wires all three adapters in canonical order", () => {
-  // P3 adds one line per adapter to DEFAULT_ENGINES. The CLI doctor and the
-  // extension both read this map, so a missing line silently turns a working
-  // engine into "unavailable" — exactly what happened to the doctor CLI before
-  // it stopped building an empty registry.
   const registry = createDefaultRegistry(DEFAULT_CONFIG);
   assert.deepEqual(registry.enabled(), ["google", "duckduckgo", "yandex"]);
   for (const id of ENGINE_IDS) {
@@ -458,4 +435,3 @@ test("the shipped registry wires all three adapters in canonical order", () => {
     assert.equal(registry.get(id).id, id);
   }
 });
-}

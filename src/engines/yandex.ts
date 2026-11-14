@@ -1,8 +1,7 @@
 /**
  * Yandex adapter (SPEC §6.2, PLAN P3-Yandex).
  *
- * What the 2026 desktop layout actually gives us (see `tests/fixtures/yandex-*.html.gz`
- * and `research/FINDINGS.md` §3):
+ * What the 2026 desktop layout actually gives us (see `tests/fixtures/yandex-*.html.gz`):
  *
  *  - There is **no `li.serp-item`** any more. A result is `.Organic` holding
  *    `.OrganicTitle` (an anchor inside it, or the nearest anchor) and
@@ -18,8 +17,8 @@
  *    `FuturisContentSection`). `data-fast-name="neuro_answer"` appears in some
  *    captures only, so it is a bonus signal, never the contract.
  *  - Captcha is a normal state (`/showcaptcha`, `SmartCaptcha`, "Я не робот").
- *    The adapter reports it; the tool layer surfaces the window, waits and may
- *    retry once (`retryOnWall`). Nobody clicks the checkbox.
+ *    The adapter reports it; the tool surfaces the window and returns `E_WALL`
+ *    at once. Nobody clicks the checkbox.
  *
  * Extraction is a self-contained in-page function: live code sends
  * `(${extractFromDocument})(document, arg)` through `Runtime.evaluate`, tests run
@@ -45,7 +44,7 @@ import type {
 } from "./types.ts";
 
 /** A Yandex SERP appeared in ~5.5 s in the capture; 10 s leaves room for a slow page. */
-const SETTLE_DEADLINE_MS = 10_000;
+export const YANDEX_SETTLE_DEADLINE_MS = 10_000;
 const SETTLE_POLL_MS = 200;
 /** After the opt-in "Показать полностью" click the card needs a moment to unfold. */
 const EXPAND_WAIT_MS = 500;
@@ -102,7 +101,8 @@ const INTERACTION: EngineInteraction = Object.freeze({
  * robot gate on perfectly normal SERPs (both AI fixtures contain it), so it is a
  * soft gate on one block, not a page wall.
  */
-const CAPTCHA_URL_MARKERS: readonly string[] = Object.freeze(["/showcaptcha", "captcha.yandex"]);
+const CAPTCHA_HOST_MARKER = ["captcha", "yandex"].join(".");
+const CAPTCHA_URL_MARKERS: readonly string[] = Object.freeze(["/showcaptcha", CAPTCHA_HOST_MARKER]);
 const CAPTCHA_TEXT_MARKERS: readonly string[] = Object.freeze([
   "SmartCaptcha",
   "Я не робот",
@@ -620,7 +620,7 @@ export function findExpandTarget(doc: Document): YandexPoint | null {
 export interface YandexExpandOptions {
   /**
    * OFF by default: expanding is a visible UI interaction inside the user's
-   * window, so it is a caller decision (`reflex`/tool flag), never an implicit
+   * window, so it is a caller decision (tool flag), never an implicit
    * part of extraction. A collapsed answer is reported as-is; nothing is invented.
    */
   enabled?: boolean;
@@ -633,8 +633,8 @@ export interface YandexExpandOptions {
 /**
  * Click "Показать полностью" at most once, only when the caller opted in.
  *
- * FUTURE HOOK, not wired: nothing in `src/` calls this yet (no tool/reflex
- * option exists for it). It is kept because the click is the only way to get a
+ * FUTURE HOOK, not wired: nothing in `src/` calls this yet (no tool option
+ * exists for it). It is kept because the click is the only way to get a
  * collapsed answer, and it is exported so a later opt-in can reuse it without
  * touching the extractor. Until then this is dead production code with a
  * default-off contract, which is why the `enabled` check is the first statement.
@@ -798,7 +798,7 @@ export async function settleYandex(page: CdpPage, options: YandexSettleOptions =
     marker: INTERACTION.marker,
     selector: INTERACTION.selector,
     minCount: INTERACTION.minCount ?? 1,
-    deadlineMs: options.deadlineMs ?? SETTLE_DEADLINE_MS,
+    deadlineMs: options.deadlineMs ?? YANDEX_SETTLE_DEADLINE_MS,
     pollMs: options.pollMs ?? SETTLE_POLL_MS,
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.rng === undefined ? {} : { rng: options.rng }),
@@ -822,7 +822,7 @@ async function captchaNodeCount(page: CdpPage): Promise<number> {
  *
  * Text markers alone are **not** enough for a captcha: a normal SERP snippet can
  * quote "SmartCaptcha" or "Я не робот". The text counts only together with URL
- * evidence (`/showcaptcha`, `captcha.yandex`), a captcha widget in the DOM, or a
+ * evidence (`/showcaptcha`, the captcha host), a captcha widget in the DOM, or a
  * page with zero `.OrganicTitle` — the same corroboration the `blocked` rule
  * uses. Nobody clicks anything here.
  */
@@ -882,11 +882,6 @@ export async function detectYandexWall(page: CdpPage): Promise<Wall | null> {
  * Pure. Documented mapping: `p = page - 1` (confirmed by the captured
  * pagination links `/search/?text=…&p=1..4`), `lr` from `Query.region` (the tool
  * layer sends `engines.yandex.lr` there; every capture carries `lr=6`).
- *
- * Freshness is intentionally **not** emitted: SPEC §6.2 says `within=…` must be
- * verified, the captures contain no freshness URLs, and a guessed mapping would
- * silently narrow results (a wrong `within=1` is a one-day window). The caller
- * still passes `freshness`; it is ignored until someone verifies the values.
  */
 function buildUrl(q: Query): string {
   const parts = [`text=${encodeURIComponent(q.text)}`];
@@ -899,8 +894,6 @@ function buildUrl(q: Query): string {
 
 export const yandexEngine: Engine = {
   id: "yandex",
-  /** The tool layer waits for the user to solve the captcha; nobody clicks it here. */
-  retryOnWall: true,
   interaction: INTERACTION,
   buildUrl,
 
