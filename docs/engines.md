@@ -1,11 +1,10 @@
 # Engines and browser markers
 
 Selector knowledge that cost live probes. Every selector below is asserted against a sanitized fixture
-in `tests/unit/google.test.ts`, `tests/unit/duckduckgo.test.ts` or `tests/unit/yandex.test.ts`. A selector
+in `tests/unit/<adapter>.test.ts` (`google`, `duckduckgo`, `yandex`, `avito`, `image_search`). A selector
 change ships a new fixture and updates this page (S13.4).
 
 ## Fixtures
-
 | Fixture | Adapter | What it proves |
 |---|---|---|
 | `tests/fixtures/google-ai.html.gz` | Google | organics, `/goto` wrappers, AI Overview answer, ads, canaries |
@@ -14,10 +13,11 @@ change ships a new fixture and updates this page (S13.4).
 | `tests/fixtures/ddg-no-assist.html.gz` | DuckDuckGo | no assist block, toggle-only `lead` |
 | `tests/fixtures/yandex-neuro.html.gz` | Yandex | organics, Futuris AI answer, jsredir ads, tracking params |
 | `tests/fixtures/yandex-captcha.html.gz` | Yandex | SmartCaptcha wall classification |
-| `tests/fixtures/images-google.html.gz` | Google Images | tile cards, `data-lpage` page URLs, `encrypted-tbn` thumbs, canaries |
-| `tests/fixtures/images-yandex.html.gz` | Yandex Images | `.SerpItem` tiles, `img_url` source-image URLs, canaries |
+| `tests/fixtures/images-google.html.gz` | Google Images | tiles, `data-lpage` page URLs, `encrypted-tbn` thumbs |
+| `tests/fixtures/images-yandex.html.gz` | Yandex Images | `.SerpItem` tiles, `img_url` image URLs |
+| `tests/fixtures/avito-serp.html.gz` + `tests/fixtures/avito-no-match.html.gz` | Avito | 50 listings: `data-marker` contract, price/location/date facts, tracking stripped, canaries; the no-match fallback (`notice`: quoted title + "Похожие объявления рядом…", trimmed to 4 cards) |
 
-## Discovery (in order)
+## Discovery
 
 1. `PI_CHROME_CDP_WS` — full `ws://…` URL (escape hatch).
 2. `PI_CHROME_CDP_PORTS` — comma list, each probed via `127.0.0.1:<port>/json/version`.
@@ -28,13 +28,12 @@ change ships a new fixture and updates this page (S13.4).
 5. Nothing → `E_CDP_UNAVAILABLE` with the browser-brand-aware Allow hint.
 
 Chrome 136+ ignores `--remote-debugging-port` for the default profile. Enable it once per Chrome
-session: open `chrome://inspect/#remote-debugging`, tick **Discover network targets**, click **Allow**.
-`/json/version` may stay disabled in that mode — the `DevToolsActivePort` file is authoritative.
+session: `chrome://inspect/#remote-debugging` → **Discover network targets** → **Allow**.
+`/json/version` may stay disabled then — the `DevToolsActivePort` file is authoritative.
 
-The DevTools WebSocket handshake completes only after the user clicks Allow. Until then the socket
-hangs, which is not a dead browser: the session waits `cdp.attachWaitMs` (60 s), notifies the
-desktop once, and reports `E_CDP_AWAITING_ALLOW` (retryable) when the wait expires. `ECONNREFUSED` /
-`ENOTFOUND` fail immediately — nothing is listening, so waiting would be a lie.
+The DevTools handshake completes only after the user clicks Allow. Until then the socket hangs, which
+is not a dead browser: the session waits `cdp.attachWaitMs` (60 s), notifies the desktop once, and
+reports `E_CDP_AWAITING_ALLOW` (retryable). `ECONNREFUSED`/`ENOTFOUND` fail at once.
 
 ## Readiness and interaction
 
@@ -74,6 +73,17 @@ Ads `[data-text-ad]`/`[data-ad]` and the `реклама`/`промо` labels ar
 lazy placeholder, never a reportable URL. Yandex 2026 has no `.serp-item`, so a non-zero
 `legacySerpItem` canary means the layout rolled back.
 
+**Avito** (`avito-serp`, `avito-no-match`; *special* engine, D11/D12): ready
+`[data-marker="item"], [data-marker="page-title"]` (the home page has neither, so the typed warm-up
+cannot settle on it); card `[data-marker="item"]` (50 per page, server-rendered); title
+`a[data-marker="item-title"]`; price `item-price-value` (fallback `meta[itemprop="price"]`); snippet
+`item-specific-params`; facts `item-location` + `item-date` (leading text only: the seller link follows
+it); paging `pagination-button/page(N)` with `?p=N`. `context`, `cd`, `slocation` are ranking state and
+are stripped (S7.4). `Продвинуто` is a paid boost of the same listing: neither `isAd` nor a fact.
+Walls: `/captcha`, `/blocked`, `Доступ ограничен`, `Подтвердите, что вы не робот`, a captcha
+widget/iframe — a phrase alone never wins (needs zero cards). A no-match query returns *similar*
+listings and is reported as `note: no exact match: …` (S7.6).
+
 **Yandex** (`yandex-neuro`, `yandex-captcha`): ready `.OrganicTitle, .Misspell, .SmartCaptcha`;
 organics `.OrganicTitle`; snippet `.OrganicTextContentSpan`; AI `[class*='Futuris']` (`FuturisSearch`,
 `FuturisContentSection`, `FactFold`); titles `h3`, `.Misspell`; ads `yandex.ru/clck/jsredir`, badges
@@ -82,23 +92,29 @@ organics `.OrganicTitle`; snippet `.OrganicTextContentSpan`; AI `[class*='Futuri
 
 ## Paging and links
 
-- Google: `&start=10*(page-1)`. Yandex: `&p=page-1`. DuckDuckGo has no pagination: `page > 1` is
-  served as page 1 and reported as `ignored.page` (S4.2).
-- Google organics are `/goto?url=<signed protobuf>` wrappers. Resolution is a cookie-carrying GET with
-  `redirect: "manual"`, three at a time under one 8 s batch deadline (S8.3). A wrapper that stays
-  opaque keeps its URL and is marked `unresolved` (S7.4).
-- `image_search` on Yandex returns the source **image** URL (`pageUrlKind: "image"`); Google tiles
-  disclose the host page (`"page"`).
+- Google: `&start=10*(page-1)`. Yandex: `&p=page-1`. Avito: `&p=page` (1-based, verified live).
+  DuckDuckGo has no pagination: `page > 1` is served as page 1 and reported as `ignored.page` (S4.2).
+- Avito's region is a path segment (`/all`, `/moskva`, `/kaluga`): `engines.avito.location` holds that
+  slug (`all` = every region, `rossiya` redirects to it); a non-slug degrades to `all`, not a 404.
+- Google organics are `/goto?url=<signed protobuf>` wrappers: a cookie-carrying GET with
+  `redirect: "manual"`, three at a time under one 8 s batch deadline (S8.3). An unresolved wrapper
+  keeps its URL and is marked `unresolved` (S7.4).
+- `image_search` on Yandex returns the source **image** URL; Google tiles disclose the host page.
 
-## AI states (all engines)
+## Card facts (D13)
 
-`answer` (≥200 chars of real prose) · `lead` (block present, no answer: affordance, prompt, query
-echo, or a fragment) · `none` (no block). `extract/compact.ts` re-checks the 200-char floor, so a
-hand-built `RawSerp` cannot smuggle a short "answer". A wait that sees no block ends after a ~1.4 s
-grace instead of burning `search.aiWaitMs`; an AI timeout leaves an artifact. A visible expand
-("Показать полностью") runs only when `search.aiExpand` is true.
+Price/availability/rating/location shown outside the snippet (Google's `103 500,00 ₽ · В наличии ·
+5,0 ★`, every Avito card) go into `SerpItem.facts`, rendered after the snippet, whole facts dropped
+past 120 chars. Only Avito has a fixture for it so far.
+
+## AI states (all engines, except Avito)
+
+`answer` (≥200 chars of real prose) · `lead` (block present, no answer) · `none` (no block).
+`compact.ts` re-checks the 200-char floor, so a hand-built `RawSerp` cannot smuggle a short "answer".
+No block ends the wait after ~1.4 s instead of burning `search.aiWaitMs`; a visible expand runs only
+when `search.aiExpand` is true.
 
 ## Walls
 
-A wall is reported at once: `E_WALL`, the window surfaced, one artifact, zero automatic
-re-navigation and no wait-for-human timer (SPEC D5). The human solves it and retries.
+`E_WALL` at once: window surfaced, one artifact, no automatic re-navigation, no wait-for-human timer
+(SPEC D5). The human solves it and retries.

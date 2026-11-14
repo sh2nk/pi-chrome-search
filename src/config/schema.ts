@@ -54,6 +54,7 @@ export const CONFIG_SPEC: Spec = {
         google: { kind: "object", fields: { enabled: BOOL, lang: STRING_NE, gl: STRING_NE } },
         duckduckgo: { kind: "object", fields: { enabled: BOOL, kl: STRING_NE } },
         yandex: { kind: "object", fields: { enabled: BOOL, lr: STRING_NE } },
+        avito: { kind: "object", fields: { enabled: BOOL, location: STRING_NE } },
       },
     },
     pacing: {
@@ -62,6 +63,7 @@ export const CONFIG_SPEC: Spec = {
         google: { kind: "tuple", items: [NUM(0), NUM(0)] },
         duckduckgo: { kind: "tuple", items: [NUM(0), NUM(0)] },
         yandex: { kind: "tuple", items: [NUM(0), NUM(0)] },
+        avito: { kind: "tuple", items: [NUM(0), NUM(0)] },
       },
     },
     search: {

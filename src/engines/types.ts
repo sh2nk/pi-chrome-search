@@ -9,10 +9,40 @@
 
 import type { CdpPage } from "../cdp/types.ts";
 
-export type EngineId = "google" | "duckduckgo" | "yandex";
+/**
+ * Primary engines answer a general web query. Canonical order; `auto` keeps this
+ * order and yandex stays last by policy (SPEC §15 D10).
+ */
+export const PRIMARY_ENGINES = ["google", "duckduckgo", "yandex"] as const;
 
-/** Canonical order. `auto` keeps this order; yandex stays last by policy (D10). */
-export const ENGINE_IDS = ["google", "duckduckgo", "yandex"] as const satisfies readonly EngineId[];
+/**
+ * Special engines answer one site, not the web (SPEC §15 D11). They are never
+ * part of `auto`: a marketplace listing is not an answer to "search the web",
+ * so a caller must name the engine (`engines: "avito"`) to get it.
+ */
+export const SPECIAL_ENGINES = ["avito"] as const;
+
+export type PrimaryEngineId = (typeof PRIMARY_ENGINES)[number];
+export type SpecialEngineId = (typeof SPECIAL_ENGINES)[number];
+export type EngineId = PrimaryEngineId | SpecialEngineId;
+
+/** Every id the contract knows, primary first. `auto` walks the primary part only. */
+export const ENGINE_IDS = [...PRIMARY_ENGINES, ...SPECIAL_ENGINES] as const satisfies readonly EngineId[];
+
+export type EngineClass = "primary" | "special";
+
+/** Primary/special is data, so `auto` and the tool's docs cannot drift apart. */
+export const ENGINE_CLASS: Readonly<Record<EngineId, EngineClass>> = Object.freeze({
+  google: "primary",
+  duckduckgo: "primary",
+  yandex: "primary",
+  avito: "special",
+});
+
+/** True when `auto` may pick this engine (SPEC S4.7). */
+export function isPrimaryEngine(id: EngineId): boolean {
+  return ENGINE_CLASS[id] === "primary";
+}
 
 export interface Query {
   text: string;
@@ -42,6 +72,17 @@ export interface SerpItem {
    * resolved link (S3.5, S7.4).
    */
   unresolved?: boolean;
+  /**
+   * Short facts the card shows around the snippet, in display order: price,
+   * availability, rating, location, listing date (SPEC §15 D13).
+   *
+   * Additive and optional on purpose: a SERP that does not surface them leaves
+   * this absent, and an adapter never invents one. Google already prints
+   * `103 500,00 ₽ · В наличии · 5,0 ★` under some results; Avito prints price,
+   * location and date on every card. The renderer joins them after the snippet
+   * and caps the line (`COMPACT_CAPS.factsMaxChars`).
+   */
+  facts?: readonly string[];
 }
 
 /**
@@ -121,6 +162,15 @@ export interface RawSerp {
   pageCarried: boolean;
   /** True only for the keyless HTTP fallback (SPEC §6.5); never for a real SERP. */
   degraded?: boolean;
+  /**
+   * One adapter-authored line about the page the caller must not have to guess
+   * (S7.6/S7.7): Avito answers a no-match query with "similar listings", and
+   * saying so is the difference between a labelled fallback and a silent lie.
+   *
+   * A fixed adapter constant, never page text — a SERP cannot inject prose into
+   * the output through it.
+   */
+  notice?: string;
   timings: SerpTimings;
 }
 
@@ -172,6 +222,12 @@ export interface EngineInteraction {
   /** Optional typing profile; without it `humanize: "typing"` uses the generic delays. */
   typeProfile?: EngineTypeProfile;
   /**
+   * Per-query home page, when the engine's home is parameterized (SPEC D12:
+   * Avito's typed search starts on `https://www.avito.ru/<location>/`, so the
+   * configured region must reach the warm-up page too). Absent means `homeUrl`.
+   */
+  homeUrlFor?(q: Query): string;
+  /**
    * Where the typed path starts (P10-C). `home` (default) opens the engine home
    * page and types into its box. `serp` navigates the SERP URL first and types
    * into the SERP box after clearing its prefilled value — for engines whose
@@ -216,11 +272,14 @@ export type ArgumentSupport = "yes" | "flag";
 export const SUPPORT_MATRIX: Readonly<
   Record<SupportArgument, Readonly<Record<EngineId, ArgumentSupport>>>
 > = Object.freeze({
-  n: Object.freeze({ google: "yes", duckduckgo: "yes", yandex: "yes" }),
+  n: Object.freeze({ google: "yes", duckduckgo: "yes", yandex: "yes", avito: "yes" }),
   // DuckDuckGo has no pagination in this adapter: page > 1 is served as page 1
   // and must be reported as `ignored.page`, never silently dropped (S4.2, S7.1).
-  page: Object.freeze({ google: "yes", duckduckgo: "flag", yandex: "yes" }),
-  summary: Object.freeze({ google: "yes", duckduckgo: "yes", yandex: "yes" }),
+  // Avito paginates with `&p=` (verified live: the page-2 link carries `p=2`).
+  page: Object.freeze({ google: "yes", duckduckgo: "flag", yandex: "yes", avito: "yes" }),
+  // Avito has no native AI block at all (SPEC D12): asking is reported as
+  // `ignored.summary`, never answered with an invented summary.
+  summary: Object.freeze({ google: "yes", duckduckgo: "yes", yandex: "yes", avito: "flag" }),
 });
 
 export interface EngineRegistry {

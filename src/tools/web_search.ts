@@ -67,17 +67,23 @@ const engineIdSchema = Type.Union([
   Type.Literal("google"),
   Type.Literal("duckduckgo"),
   Type.Literal("yandex"),
+  Type.Literal("avito"),
 ]);
 
 /**
  * SPEC §7.1 / D9. `engines` accepts one id, a list, or `auto`; the array form is
- * capped at three because that is every engine the extension supports.
+ * capped at `ENGINE_IDS.length` because that is every engine the extension
+ * supports.
  */
 export const webSearchSchema = Type.Object({
   q: Type.String({ minLength: 1 }),
   n: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })),
   engines: Type.Optional(
-    Type.Union([Type.Literal("auto"), engineIdSchema, Type.Array(engineIdSchema, { minItems: 1, maxItems: 3 })]),
+    Type.Union([
+      Type.Literal("auto"),
+      engineIdSchema,
+      Type.Array(engineIdSchema, { minItems: 1, maxItems: ENGINE_IDS.length }),
+    ]),
   ),
   summary: Type.Optional(Type.Boolean()),
   page: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -192,7 +198,7 @@ export interface WebSearchTool {
  * every word.
  */
 export const WEB_SEARCH_DESCRIPTION =
-  "Search the web for free in the user's visible Chrome (Google, DuckDuckGo, Yandex) with each engine's native AI summary. Compact results, n<=10. Call web_read on a result URL to get that page as paged Markdown. site:/filetype:/quoted queries pass through; engines: id, list, or auto.";
+  "Search the web for free in the user's visible Chrome (Google, DuckDuckGo, Yandex; Avito listings opt-in) with each engine's native AI summary. Compact results, n<=10. Call web_read on a result URL to get that page as paged Markdown. site:/filetype:/quoted queries pass through; engines: id, list, or auto.";
 
 /**
  * SPEC S3.6: `q` is passed verbatim, so narrowing happens in the query. The
@@ -200,6 +206,7 @@ export const WEB_SEARCH_DESCRIPTION =
  */
 export const WEB_SEARCH_GUIDELINES: readonly string[] = [
   "web_search passes q verbatim: use quoted phrases, -term, OR, site:, filetype:; narrow by date with after:/before: on Google or date: on Yandex (there is no date argument).",
+  "engines:\"avito\" searches Avito listings (price, location); it is opt-in: enable engines.avito.enabled in web-search.json first, and auto never uses it.",
 ];
 
 /**
@@ -217,8 +224,7 @@ const FALLBACK_CODES: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
 ]);
 
 /** Every defensive validation failure shares this hint: the fix is in the call, not the file. */
-const INPUT_HINT =
-  "check the web_search arguments: q (non-empty), n 1..10, page >= 1, engines auto|google|duckduckgo|yandex";
+const INPUT_HINT = `check the web_search arguments: q (non-empty), n 1..10, page >= 1, engines auto|${ENGINE_IDS.join("|")}`;
 
 const UNSUPPORTED_HINT =
   "no enabled engine matched the request; run /web-doctor (or node src/cli/doctor.ts --json) and check config.engines";
@@ -350,7 +356,13 @@ function resolveLocale(value: string): string | undefined {
  * parameter rather than inventing one.
  */
 function buildQuery(engine: EngineId, input: NormalizedInput, config: Config): Query {
-  const query: Query = { text: input.q, n: input.n, summary: input.summary };
+  const query: Query = {
+    text: input.q,
+    n: input.n,
+    // S4.2 as data: an engine without a native AI block (avito) never receives
+    // `summary: true`; the caller sees `ignored.summary` instead (S7.1).
+    summary: SUPPORT_MATRIX.summary[engine] === "yes" ? input.summary : false,
+  };
   // S4.2 is data (`SUPPORT_MATRIX`): an engine that cannot paginate never
   // receives `page`, and the caller is told so through `ignored` below.
   if (SUPPORT_MATRIX.page[engine] === "yes") query.page = input.page;
@@ -371,6 +383,12 @@ function buildQuery(engine: EngineId, input: NormalizedInput, config: Config): Q
     case "yandex": {
       const region = resolveLocale(config.engines.yandex.lr);
       if (region !== undefined) query.region = region;
+      break;
+    }
+    case "avito": {
+      // The region is a URL path slug, not a locale; `auto` means "every
+      // region" here, which is the adapter's own default (SPEC D12).
+      query.region = resolveLocale(config.engines.avito.location) ?? "all";
       break;
     }
   }
@@ -967,7 +985,7 @@ async function runEngineLive(
       const human = await humanSearch({
         page,
         query: query.text,
-        homeUrl: interaction.homeUrl,
+        homeUrl: interaction.homeUrlFor?.(query) ?? interaction.homeUrl,
         serpUrl: engine.buildUrl(query),
         boxSelectors: [...interaction.boxSelectors],
         marker: interaction.marker,
@@ -1209,6 +1227,20 @@ export function createWebSearchTool(
       return failureResult(asFailure(error, "resolve"));
     }
     if (order.length === 0) {
+      // The selection came back empty. When the caller named engines, ask the
+      // registry *why* each one was dropped: a disabled engine (the opt-in avito
+      // ships off, D12) gets its own "set config.engines.avito.enabled" hint
+      // instead of a generic "no enabled engine" (S9.2). `auto` keeps the
+      // generic message: there is no id to explain.
+      const named =
+        input.engines === "auto" ? [] : Array.isArray(input.engines) ? input.engines : [input.engines];
+      for (const id of named) {
+        try {
+          deps.engines.get(id);
+        } catch (error) {
+          return failureResult(asFailure(error, "resolve", id));
+        }
+      }
       return failureResult(
         fail("E_UNSUPPORTED", "resolve", {
           hint: UNSUPPORTED_HINT,

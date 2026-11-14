@@ -36,6 +36,7 @@ const DOCUMENTED: Record<EngineId, PacingWindow> = {
   google: [2500, 5000],
   duckduckgo: [2000, 4000],
   yandex: [5000, 9000],
+  avito: [6000, 12_000],
 };
 
 function pacingConfig(overrides: Partial<Record<EngineId, PacingWindow>> = {}): Config {
@@ -75,7 +76,11 @@ function errorCode(error: unknown): string {
 
 test("S10.1 the shipped pacing windows are the documented ones", () => {
   assert.deepEqual(DEFAULT_CONFIG.pacing, DOCUMENTED);
-  assert.deepEqual([...ENGINE_IDS], ["google", "duckduckgo", "yandex"], "Yandex last in the canonical order");
+  assert.deepEqual(
+    [...ENGINE_IDS],
+    ["google", "duckduckgo", "yandex", "avito"],
+    "primary engines first, yandex last among them, special engines after",
+  );
 });
 
 test("S10.1 the first search of an engine never waits", async () => {

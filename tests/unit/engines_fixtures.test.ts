@@ -37,7 +37,7 @@ test("S13.4: every documented fixture exists", () => {
 });
 
 test("S13.4: every adapter test loads a fixture and every fixture is asserted", () => {
-  const tests = ["google", "duckduckgo", "yandex", "image_search"].map((name) =>
+  const tests = ["google", "duckduckgo", "yandex", "avito", "image_search"].map((name) =>
     readFileSync(join(ROOT, `tests/unit/${name}.test.ts`), "utf8"),
   );
   const corpus = tests.join("\n");
@@ -50,7 +50,7 @@ test("S13.4: every adapter test loads a fixture and every fixture is asserted", 
       `${file} is not referenced by any adapter test (a fixture without a test is dead weight)`,
     );
   }
-  for (const engine of ["google", "duckduckgo", "yandex"]) {
+  for (const engine of ["google", "duckduckgo", "yandex", "avito"]) {
     assert.match(
       corpus,
       new RegExp(`${engine}[\\s\\S]{0,4000}fixture`, "i"),

@@ -48,10 +48,26 @@ export interface YandexConfig {
   lr: string;
 }
 
+export interface AvitoConfig {
+  /**
+   * OFF by default (SPEC §15 D12): Avito is a *special* engine, so a fresh
+   * install must not touch its anti-bot machinery. Enabling it is one key in
+   * `web-search.json`; the disabled-engine hint names the file.
+   */
+  enabled: boolean;
+  /**
+   * Region path slug in the Avito URL (`all`, `moskva`, `kaluga`), not a display
+   * name. `all` = every region; Avito itself falls back to nearby regions with
+   * delivery when the item is not sold locally.
+   */
+  location: string;
+}
+
 export interface EnginesConfig {
   google: GoogleConfig;
   duckduckgo: DuckDuckGoConfig;
   yandex: YandexConfig;
+  avito: AvitoConfig;
 }
 
 export type PacingWindow = [number, number];
@@ -60,6 +76,8 @@ export interface PacingConfig {
   google: PacingWindow;
   duckduckgo: PacingWindow;
   yandex: PacingWindow;
+  /** Slowest window: Avito is the most aggressive of the four about automation. */
+  avito: PacingWindow;
 }
 
 export interface SearchConfig {
@@ -130,8 +148,9 @@ export const DEFAULT_CONFIG: Config = {
     google: { enabled: true, lang: "auto", gl: "auto" },
     duckduckgo: { enabled: true, kl: "auto" },
     yandex: { enabled: true, lr: "auto" },
+    avito: { enabled: false, location: "all" },
   },
-  pacing: { google: [2500, 5000], yandex: [5000, 9000], duckduckgo: [2000, 4000] },
+  pacing: { google: [2500, 5000], yandex: [5000, 9000], duckduckgo: [2000, 4000], avito: [6000, 12000] },
   search: {
     budgetMs: 60000,
     n: 5,

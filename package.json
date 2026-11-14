@@ -1,7 +1,7 @@
 {
   "name": "pi-chrome-search",
   "version": "2.0.0",
-  "description": "Free, keyless web search through the user's own visible Chrome (Google, DuckDuckGo, Yandex) for pi",
+  "description": "Free, keyless web search through the user's own visible Chrome (Google, DuckDuckGo, Yandex, and opt-in Avito listings) for pi",
   "type": "module",
   "license": "MIT",
   "pi": {
@@ -45,7 +45,8 @@
     "web-search",
     "google",
     "duckduckgo",
-    "yandex"
+    "yandex",
+    "avito"
   ],
   "files": [
     "index.ts",

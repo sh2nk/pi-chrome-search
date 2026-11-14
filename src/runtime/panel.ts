@@ -29,7 +29,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { PageKey } from "../cdp/types.ts";
 import type { PacingWindow } from "../config/index.ts";
-import type { EngineId } from "../engines/types.ts";
+import { ENGINE_IDS, type EngineId } from "../engines/types.ts";
 import type { Clock } from "./types.ts";
 
 /** Highest number of panel paints per second (PLAN-v2 P10-A). */
@@ -136,7 +136,7 @@ const STAGES: ReadonlySet<string> = new Set<PanelStage>([
   "error",
 ]);
 
-const ENGINES: ReadonlySet<string> = new Set<EngineId>(["google", "duckduckgo", "yandex"]);
+const ENGINES: ReadonlySet<string> = new Set<string>(ENGINE_IDS);
 
 /** Control characters would corrupt the rendered single line; strip, never escape. */
 function clean(value: string, max: number): string {

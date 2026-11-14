@@ -29,11 +29,11 @@ interface EngineCounters {
 }
 
 function emptyCounters(): Record<EngineId, EngineCounters> {
-  return {
-    google: { lastAt: null, today: 0 },
-    duckduckgo: { lastAt: null, today: 0 },
-    yandex: { lastAt: null, today: 0 },
-  };
+  // Derived from ENGINE_IDS so a new engine cannot be missing from the counters
+  // (SPEC §15 D11: the wiring is data, not a second list to keep in sync).
+  const counters = {} as Record<EngineId, EngineCounters>;
+  for (const id of ENGINE_IDS) counters[id] = { lastAt: null, today: 0 };
+  return counters;
 }
 
 function cancelled(engine: EngineId): WebSearchError {

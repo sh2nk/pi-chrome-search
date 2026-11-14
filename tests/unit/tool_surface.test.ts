@@ -265,6 +265,7 @@ function allEngines(): Record<EngineId, Engine> {
     google: stubEngine("google"),
     duckduckgo: stubEngine("duckduckgo"),
     yandex: stubEngine("yandex"),
+    avito: stubEngine("avito"),
   };
 }
 
@@ -342,6 +343,7 @@ test("get on a disabled adapter is E_UNSUPPORTED naming the config key", () => {
 
   assert.equal(error.details.engine, "yandex");
   assert.match(error.details.hint, /config\.engines\.yandex\.enabled/);
+  assert.match(error.details.hint, /web-search\.json/, "the hint names the file to edit");
 });
 
 test("registerAdapter appends to a copy and never mutates its input", () => {
@@ -376,9 +378,11 @@ test("DEFAULT_ENGINES is frozen and drives createDefaultRegistry", () => {
   for (const id of ENGINE_IDS) {
     assert.equal(registry.has(id), DEFAULT_ENGINES[id] !== undefined, `has(${id}) must mirror the map`);
   }
+  // S4.7: `auto` walks primary engines only. avito is registered and enabled in
+  // `DEFAULT_CONFIG` terms (it ships disabled), yet it must never be automatic.
   assert.deepEqual(
     registry.select("auto"),
-    ENGINE_IDS.filter((id) => DEFAULT_ENGINES[id] !== undefined && config.engines[id].enabled),
+    ["google", "duckduckgo", "yandex"].filter((id) => config.engines[id as EngineId].enabled),
   );
 });
 
@@ -389,7 +393,7 @@ test("describeRegistry reports canonical status without conflating the two cause
 
   assert.deepEqual(
     status.engines.map((engine) => engine.id),
-    ["google", "duckduckgo", "yandex"],
+    ["google", "duckduckgo", "yandex", "avito"],
   );
   assert.deepEqual(status.engines[0], {
     id: "google",
@@ -405,6 +409,14 @@ test("describeRegistry reports canonical status without conflating the two cause
   });
   assert.deepEqual(status.engines[2], {
     id: "yandex",
+    registered: false,
+    configEnabled: false,
+    available: false,
+  });
+  // The special engine is reported like any other, and it is the only row that
+  // is disabled by default (SPEC D12).
+  assert.deepEqual(status.engines[3], {
+    id: "avito",
     registered: false,
     configEnabled: false,
     available: false,
@@ -427,11 +439,20 @@ test("describeRegistry without a config reports registered-only availability", (
   assert.equal(status.ready, 1);
 });
 
-test("the shipped registry wires all three adapters in canonical order", () => {
+test("the shipped registry wires every adapter, and only primary engines are automatic", () => {
   const registry = createDefaultRegistry(DEFAULT_CONFIG);
+  // Every id has an adapter; avito ships disabled, so the usable set is the
+  // three primaries and `auto` is exactly those (S4.7, D11/D12).
+  for (const id of ENGINE_IDS) assert.equal(registry.has(id), true, `${id} must be registered`);
   assert.deepEqual(registry.enabled(), ["google", "duckduckgo", "yandex"]);
-  for (const id of ENGINE_IDS) {
-    assert.equal(registry.has(id), true, `${id} must be registered`);
-    assert.equal(registry.get(id).id, id);
-  }
+  assert.deepEqual(registry.select("auto"), ["google", "duckduckgo", "yandex"]);
+
+  // Enabling it does not make it automatic — it only makes an explicit request work.
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.engines.avito.enabled = true;
+  const enabled = createDefaultRegistry(config);
+  assert.deepEqual(enabled.enabled(), ["google", "duckduckgo", "yandex", "avito"]);
+  assert.deepEqual(enabled.select("auto"), ["google", "duckduckgo", "yandex"]);
+  assert.deepEqual(enabled.select("avito"), ["avito"]);
+  for (const id of ENGINE_IDS) assert.equal(enabled.get(id).id, id);
 });
