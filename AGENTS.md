@@ -10,14 +10,13 @@ docs were verified to disagree with its own code (see `SPEC.md` appendix).
 ## Read in this order
 
 1. `SPEC.md` — normative requirements (`S#.#`). On any conflict, SPEC wins; fix the loser in the same PR.
-2. `PLAN.md` — the phase you are in, its gate, and what it deletes.
-3. `AGENTS.md` — this file: rules of engagement.
-4. `docs/adr/` — decisions that changed a public contract. An ADR is binding once the owner approved it.
-5. `src/`, `tests/` — v1 evidence. Useful for transport knowledge (raw CDP, discovery, locks); never
+2. `AGENTS.md` — this file: rules of engagement.
+3. `docs/` — generated reference: config, errors, engine selectors. Decisions live in `SPEC.md` §15.
+4. `src/`, `tests/` — v1 evidence. Useful for transport knowledge (raw CDP, discovery, locks); never
    copy its contracts.
 
-If a phase needs a decision that changes a public contract, stop and write an ADR draft
-(`docs/adr/0000-template.md`). Do not bury a decision in code.
+If a phase needs a decision that changes a public contract, stop and ask the owner. Record the answer
+in `SPEC.md` §15. Do not bury a decision in code.
 
 ## Hard rules (a violation is a defect, not a trade-off)
 
@@ -30,14 +29,14 @@ If a phase needs a decision that changes a public contract, stop and write an AD
    `Page.addScriptToEvaluateOnNewDocument`. One-off `Runtime.evaluate` is fine.
 4. **Never solve captchas.** Surface the window and return `E_WALL` with an artifact **at once**, so the
    human can click it. No solver, no automatic re-navigation, no wait-for-human timer (S8.5,
-   ADR-0001 D5).
+   SPEC D5).
 5. **No quality gates.** No classifier, no heuristic rules, no page/read/coverage gate: the model
-   decides what to read and the tool reports what it got (ADR-0001 D1). The SSRF guard is a security
+   decides what to read and the tool reports what it got (SPEC D1). The SSRF guard is a security
    boundary, not a quality opinion, and stays.
 6. **No paid search APIs or search keys, no model calls.** Search and read traffic never goes through a
    third-party provider (S11.5). Do not add a "small classifier" back in any form.
 7. **Rate-limit like a human.** One live search per engine at a time and per-engine pacing with jitter;
-   there are no daily caps (ADR-0001 D8). One probe per engine per gate; never loop live probes. A wall
+   there are no daily caps (SPEC D8). One probe per engine per gate; never loop live probes. A wall
    means stop and ask.
 8. **Every failure is diagnosable**: `code` + `stage` + `retryable` + a hint the user can actually
    execute (`S9.2`) + an artifact for page states. No bare `throw new Error("failed")`.
@@ -69,10 +68,10 @@ src/extract/             readability, urls, goto, pdf, compact (all caps here)
 src/runtime/             errors, codes, artifacts, limiter (pacing only), cache, host, log, notify, panel
 src/tools/               search, read, images, research, doctor
 src/commands/            /web-doctor, /web-focus
-scripts/                 audit.mjs, release.mjs, gen-config-doc.mjs
+scripts/                 audit.mjs, release.mjs, gen-config-doc.mjs, gen-errors-doc.mjs, gen-readme.mjs
 tests/{unit,live,fixtures}
-docs/{adr,config.md,engines.md,errors.md}
-SPEC.md PLAN.md AGENTS.md
+docs/{config.md,engines.md,errors.md}
+SPEC.md AGENTS.md
 ```
 
 ## Commands
@@ -91,7 +90,7 @@ an obstacle to route around.
 
 ## Workflow
 
-- One phase per branch (`P<n>` from `PLAN.md`), one PR, one logical change per commit.
+- One phase per branch (`P<n>`), one PR, one logical change per commit.
 - Tests first for anything that fixes a v1 defect: the failing test names the `S#.#` it proves.
 - Delete the legacy module in the PR that replaces it. No phase ends with two implementations and no
   feature flag outlives its phase.
@@ -109,7 +108,8 @@ an obstacle to route around.
 - Every selector ships a sanitized fixture and a line in `docs/engines.md`; a selector without a fixture
   fails the audit (S13.4). Images included — v1 had none.
 - Tests are offline by default: injected DNS, fake CDP, fake clock. Live tests are opt-in.
-- A new runtime dependency needs an ADR with the justification in the commit message.
+- A new runtime dependency needs owner approval, recorded in `SPEC.md` §15, with the justification in
+  the commit message.
 - Caps (chars, bytes, results) live in one module per family; no scattered literals.
 
 ## Definition of done
@@ -127,4 +127,5 @@ package version still needs one manual `npm publish`.
 
 Removing a capability, changing a default that costs money or time, adding/renaming an error code,
 changing the tool surface, anything that weakens a hard rule, or an ambiguous requirement. Ask with a
-concrete proposal and the alternative — the owner answers with a decision, and you record it in an ADR.
+concrete proposal and the alternative — the owner answers with a decision, and you record it in
+`SPEC.md` §15.

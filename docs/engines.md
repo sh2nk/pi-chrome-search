@@ -101,4 +101,4 @@ grace instead of burning `search.aiWaitMs`; an AI timeout leaves an artifact. A 
 ## Walls
 
 A wall is reported at once: `E_WALL`, the window surfaced, one artifact, zero automatic
-re-navigation and no wait-for-human timer (ADR-0001 D5). The human solves it and retries.
+re-navigation and no wait-for-human timer (SPEC D5). The human solves it and retries.

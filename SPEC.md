@@ -1,11 +1,10 @@
 # SPEC — pi-chrome-search v2
 
 **Status:** normative. This file, not the code, defines the product. `AGENTS.md` says how to work,
-`PLAN.md` says in what order. `docs/*.md` describe **v1 as shipped** and are historical until a plan
-phase regenerates or replaces them. On conflict: SPEC wins, and the losing file is fixed in the same PR.
+`docs/*.md` are generated reference, not a source of truth. On conflict: SPEC wins, and the losing file is fixed in the same PR.
 
 Requirement ids (`S#.#`) exist so tests, commits and reviews can name what they prove. `MUST` /
-`MUST NOT` are normative; `SHOULD` is waivable only by an ADR that the owner approves.
+`MUST NOT` are normative; `SHOULD` is waivable only by owner approval recorded in §15.
 
 ---
 
@@ -59,7 +58,7 @@ Five tools, one contract:
 - **S3.6 Search operators.** `web_search` passes `q` verbatim and declares `promptGuidelines` teaching
   the operators that actually narrow results: quoted phrases, `-term`, `OR`, `site:`, `filetype:`, and
   date narrowing where the engine supports it (Google `after:`/`before:`, Yandex `date:`). Guideline text
-  ≤400 chars. There is no tool-level date filter (ADR-0001 D2), so the model narrows in the query.
+  ≤400 chars. There is no tool-level date filter (SPEC D2), so the model narrows in the query.
 
 ## 4. `web_search` contract
 
@@ -128,7 +127,7 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
 - **S6.2 `web_research`**: `q`, `budget` `quick|normal|deep` = 1 search + 2 reads / 2 + 4 / 4 + 8. It
   MUST NOT exceed its budget, MUST cite a URL for every claim, MUST NOT invent or paraphrase-inside-quotes,
   and MUST report the budget it spent. Page selection is deterministic (merge order, dedupe, top-N): no
-  quality gate decides what to read (ADR-0001 D1), and no model provider is called at all (S11.5).
+  quality gate decides what to read (SPEC D1), and no model provider is called at all (S11.5).
 - **S6.3 `web_doctor`**: `probe` (default true), `fix` (default false). Safe fix set: reconnect,
   release owned tabs, prune artifacts, reclaim a stale lock. It MUST NOT kill, restart or close
   anything the extension did not open. `readOnlyHint:false` (S9.6).
@@ -189,7 +188,7 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
 
 - **S10.1** Per-engine pacing with jitter (defaults: google 2.5–5 s, ddg 2–4 s, yandex 5–9 s). No daily
   caps and no `E_RATE_LIMITED`: the engines are free, a quota was an unmeasured guess, and politeness is
-  pacing, not a counter (ADR-0001 D8).
+  pacing, not a counter (SPEC D8).
 - **S10.2** One in-flight live search per engine across the whole session, one writer per tab. Parallel
   pi tool calls queue on a per-tab lock; they never type into one box concurrently.
 - **S10.3** No loops around a wall, no retry storms, no probe loops. Doctor probes at most once per
@@ -207,7 +206,7 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
   and no auth headers.
 - **S11.4** Fixtures are sanitized (no identity, tokens, IPs, personal queries) and reviewed as data.
 - **S11.5** No classifier, no rules gate, no page-quality score: the quality layer is deleted, not
-  disabled (ADR-0001 D1). Search and read traffic never goes through any third-party provider. The SSRF
+  disabled (SPEC D1). Search and read traffic never goes through any third-party provider. The SSRF
   guard is a security boundary, not a quality gate, and stays.
 
 ## 12. UX of the visible window
@@ -229,15 +228,15 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
 - **S13.2** No dead keys: every leaf of the default config is read by production code. Enforced by an
   audit rule (dotted path resolves to an access outside the config module) and by tests that change the
   key and observe the behaviour. The `reflex.*`, `captcha.*` and `engines.*.dailyCap` blocks are deleted
-  (ADR-0001) and do not come back as configuration.
+  (SPEC §15) and do not come back as configuration.
 - **S13.3** `docs/config.md` is generated from the schema (defaults, ranges, env) and CI fails when it
   differs from generator output. Hand-written tables drift; v1's did.
 - **S13.4** `docs/engines.md` lists every selector and its fixture; a selector without a fixture fails
   the audit. Images included (v1 gap).
 - **S13.5** Tests are offline by default, deterministic, and must not touch Chrome, DNS outside the
   injected resolver, or the user's home. Live tests are opt-in and run once.
-- **S13.6** `docs/adr/NNNN-*.md` records decisions that change a public contract (tool surface, error
-  codes, config keys, defaults, budgets). An ADR without an owner "approved" line is a draft.
+- **S13.6** Decisions that change a public contract (tool surface, error codes, config keys, defaults,
+  budgets) are recorded in §15 with an owner approval date. A decision without approval is a proposal.
 - **S13.7** No evidence/apparatus directories in the tree; live-run evidence goes into the PR body.
 
 ## 14. Acceptance (product level)
@@ -258,10 +257,10 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
 
 ## 15. Decisions (settled)
 
-Owner decisions, 2026-11-13; full rationale and consequences in `docs/adr/0001-v2-decisions.md`.
-Changing one requires a new ADR.
+Owner decisions, 2026-11-13; the rationale and consequences live in the requirements they change.
+Changing one requires owner approval.
 
-- **D1** Classifier and all built-in quality gates deleted; no rules layer either (ADR D1).
+- **D1** Classifier and all built-in quality gates deleted; no rules layer either.
 - **D2** No `freshness` argument; the agent narrows with query operators, taught by `promptGuidelines`.
 - **D3** `web_search` + `web_read` direct; the rest deferred with guaranteed discovery, `direct` fallback.
 - **D4** In-place rewrite on `feature/v2-rewrite`, one phase per PR.
@@ -277,7 +276,7 @@ Changing one requires a new ADR.
 |---|---|
 | 4 of 5 tools unreachable in a stock session (`tool_search` inactive) | S3.1, S3.2 |
 | five config keys with no reader (`mode`, `cdp.profileDir`, `window.reuse`, `reflex.batchBackend`, `cache.gotoTtlMs`) | S7.5, S13.2 |
-| DDG `freshness` silently ignored; argument deleted in v2 (ADR-0001 D2) | S3.6, S4.2 |
+| DDG `freshness` silently ignored; argument deleted in v2 (SPEC D2) | S3.6, S4.2 |
 | no total deadline; `/goto` up to 10×5 s | S8.1, S8.2, S8.3 |
 | `E_PARSE` used for "page rendered nothing" | S9.3 |
 | hints naming a non-existent knob / an already-off flag | S9.2 |
@@ -285,6 +284,6 @@ Changing one requires a new ADR.
 | docs claimed DDG `&s=`/`&df=`, 8 s settle on a 10 s adapter, "19 codes" for 18, a schema file that does not exist | S7.5, S13.3, S13.4 |
 | `src/version.ts` stuck at 0.1.0 while the package is 0.1.1 | A5 |
 | images adapter: 756 lines, zero fixtures, zero tests, zero docs | S6.1, S13.4 |
-| page gate on by default and spending money in an "optional" feature | S11.5, ADR-0001 D1 |
-| daily caps on free engines, persisted state, `E_RATE_LIMITED` | S10.1, ADR-0001 D8 |
+| page gate on by default and spending money in an "optional" feature | S11.5, SPEC D1 |
+| daily caps on free engines, persisted state, `E_RATE_LIMITED` | S10.1, SPEC D8 |
 | `web_read` documented as "marker settle" but extracted immediately | S5.1 |
