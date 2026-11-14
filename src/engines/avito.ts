@@ -48,14 +48,22 @@ export const AVITO_SETTLE_DEADLINE_MS = 12_000;
 const SETTLE_POLL_MS = 200;
 
 /**
- * Readiness gate. Both branches exist on a search page and on neither the home
- * page nor a wall: `item` cards are the results, `page-title` is the result
- * header (present when the list is empty or when Avito answers with
- * "similar listings"). The home page renders none of them, so the typed path
- * cannot settle on the warm-up page (verified on the capture of
- * `https://www.avito.ru/`).
+ * Readiness gate. `item` cards are the results; `page-title` is the result
+ * header, present when the list is empty or when Avito answers with "similar
+ * listings"; the home page renders neither, so a typed warm-up cannot settle on
+ * it (verified on the capture of `https://www.avito.ru/`).
+ *
+ * The captcha widget is part of the gate for the same reason Google's `#rso`
+ * lives next to `#captcha-form` and Yandex's `.OrganicTitle` next to
+ * `.SmartCaptcha`: a wall page has no results node (measured on the firewall
+ * markup in `avito-wall`), so without it the settle would burn the whole 12 s
+ * deadline *before* `detectWall()` could report the wall it is looking at. Settling on a wall is safe because the wall probe runs
+ * immediately after the gate and before extraction (`web_search`,
+ * `web_doctor`), and it is what makes the report immediate (D5).
  */
-export const AVITO_READY_SELECTOR = '[data-marker="item"], [data-marker="page-title"]';
+export const AVITO_WALL_SELECTOR =
+  '#h-captcha, .h-captcha, #geetest_captcha, .form-captcha-image, #captcha, form[action*="checkcaptcha"]';
+export const AVITO_READY_SELECTOR = `[data-marker="item"], [data-marker="page-title"], ${AVITO_WALL_SELECTOR}`;
 export const AVITO_ITEM_SELECTOR = '[data-marker="item"]';
 
 const BOX_SELECTOR = 'input[data-marker="search-form/suggest/input"]';
@@ -99,19 +107,33 @@ const INTERACTION: EngineInteraction = Object.freeze({
 });
 
 /**
- * Wall markers. Text-first so class-name churn does not blind us, with the same
+ * Wall markers, text-first so class-name churn does not blind us, with the same
  * corroboration rule as the other adapters: a phrase alone is not a wall (a
- * listing title may quote it), but a phrase plus zero `item` cards is.
+ * listing title may quote it, and a no-match SERP quotes the query), but a
+ * phrase plus zero `item` cards is.
  *
- * `Доступ ограничен` is Avito's own firewall sentence; the rest cover the
- * captcha/interstitial variants seen across its brands.
+ * What the fixture `tests/fixtures/avito-wall.html.gz` is: Avito's own firewall
+ * markup (the IP wall with an hCaptcha checkbox). It was obtained **out of band**
+ * and pasted into a tab, so the markup is evidence and the page *URL* is not —
+ * the tab happened to hold a search URL, which says nothing about where Avito
+ * serves this page. Consequences, both honest:
+ *  - the `/captcha` and `/blocked` URL markers stay, but only as a cheap extra: a
+ *    wall on such a path is caught, and nothing here claims Avito redirects;
+ *  - the sentence "Доступ ограничен" lives in `<title>`, never in `innerText`,
+ *    which is why the title is scanned separately from the body;
+ *  - the body says "Страница не загрузилась из-за проблем с IP" / "поставьте
+ *    галочку и нажмите «Продолжить»", and the widget markup
+ *    (`#h-captcha`, `.h-captcha`, `.form-captcha-image`) gives `captchaNodes = 1`.
+ * That markup carries neither `item` nor `page-title`, so it can never settle.
  */
 const CAPTCHA_URL_MARKERS: readonly string[] = Object.freeze(["/captcha", "/blocked"]);
+/** Only on the engine's own page title; a SERP title is `<query> — объявления`. */
+const CAPTCHA_TITLE_MARKERS: readonly string[] = Object.freeze(["Доступ ограничен", "проблема с IP"]);
 const CAPTCHA_TEXT_MARKERS: readonly string[] = Object.freeze([
+  "Страница не загрузилась из-за проблем с",
+  "поставьте галочку",
   "Подтвердите, что вы не робот",
   "проверка на робота",
-  "Доступ ограничен",
-  "доступ к сайту ограничен",
   "Ограниченный доступ",
   "Request blocked",
   "Access denied",
@@ -302,7 +324,10 @@ export function canaryCounts(doc: Document): Record<string, number> {
  * offline harness uses.
  */
 export function captchaNodeCount(doc: Document): number {
-  if (doc.querySelector('#captcha, .captcha, iframe[src*="captcha"], form[action*="checkcaptcha"]') !== null) {
+  // Self-contained (the function is stringified into the page), so the ids are
+  // repeated here instead of importing `AVITO_WALL_SELECTOR`; the class half of
+  // that selector is covered by the scan below.
+  if (doc.querySelector('#h-captcha, #geetest_captcha, #captcha, iframe[src*="captcha"], form[action*="checkcaptcha"]') !== null) {
     return 1;
   }
   for (const node of Array.from(doc.querySelectorAll("[class]"))) {
@@ -425,34 +450,41 @@ async function captchaNodes(page: CdpPage): Promise<number> {
   return typeof count === "number" && Number.isFinite(count) ? count : 0;
 }
 
+/** Markers present in a lowercased haystack, in list order. */
+function markersIn(haystack: string, markers: readonly string[]): string[] {
+  const found: string[] = [];
+  for (const marker of markers) {
+    if (haystack.indexOf(marker.toLowerCase()) !== -1) found.push(marker);
+  }
+  return found;
+}
+
 /**
  * Wall detection. Nobody clicks anything here: the tool surfaces the window, the
  * human solves it and retries (D5).
  */
 export async function detectAvitoWall(page: CdpPage): Promise<Wall | null> {
   const url = page.url();
+  const urlMarkers = markersIn(url.toLowerCase(), CAPTCHA_URL_MARKERS);
+  if (urlMarkers.length > 0) return { kind: "captcha", url, markers: urlMarkers };
+
+  // Title and body are scanned separately: Avito's firewall names itself
+  // "Доступ ограничен: проблема с IP" in `<title>` only (captured). A failing
+  // `title()` is a signal we lose, not a wall we invent.
+  const title = await page.title().catch((): string => "");
   const text = await page.innerText();
-  const loweredUrl = url.toLowerCase();
-  const loweredText = text.toLowerCase();
+  const markers = [
+    ...markersIn(title.toLowerCase(), CAPTCHA_TITLE_MARKERS),
+    ...markersIn(text.toLowerCase(), CAPTCHA_TEXT_MARKERS),
+  ];
 
-  const urlMarkers: string[] = [];
-  for (const marker of CAPTCHA_URL_MARKERS) {
-    if (loweredUrl.indexOf(marker) !== -1) urlMarkers.push(marker);
-  }
-  const textMarkers: string[] = [];
-  for (const marker of CAPTCHA_TEXT_MARKERS) {
-    if (loweredText.indexOf(marker.toLowerCase()) !== -1) textMarkers.push(marker);
-  }
-  const markers = [...urlMarkers, ...textMarkers];
-
-  if (urlMarkers.length > 0) return { kind: "captcha", url, markers };
-  // A captcha widget is evidence on its own: the iframe text is invisible to the
-  // page-text scan.
+  // A captcha widget is evidence on its own: its label lives in an iframe the
+  // page-text scan cannot see.
   if ((await captchaNodes(page)) > 0) {
     return { kind: "captcha", url, markers: markers.length > 0 ? markers : ["captcha-node"] };
   }
-  // A listing title can quote "Доступ ограничен"; a real wall has no cards.
-  if (textMarkers.length > 0 && (await itemCount(page)) === 0) {
+  // A phrase can be quoted by a listing or by the query itself; a wall has no cards.
+  if (markers.length > 0 && (await itemCount(page)) === 0) {
     return { kind: "blocked", url, markers };
   }
   return null;

@@ -144,9 +144,10 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
   (`maxlength=100`: a longer query is not typed), Enter, and the warm-up must use the configured region
   (`homeUrlFor`). Extraction reads the `data-marker` contract (`item`, `item-title`,
   `item-price-value`, `item-specific-params`, `item-location`, `item-date`), strips the ranking
-  parameters (`context`, `cd`, `slocation`) from the link, and reports price/location/age as card
-  facts (D13). `summary` is flagged; a no-match query returns *similar* listings and must say so
-  (`RawSerp.notice` → a `note:` line), never as matches (S7.6).
+  parameters (`context`, `cd`, `slocation`) from the link, and reports price/location/age as card facts
+  (D13). `summary` is flagged; a no-match query returns *similar* listings and says so (`notice` → a
+  `note:` line), never as matches (S7.6). The gate names the captcha widget too, because a wall has no
+  results node: a settle that cannot succeed must end at once so the wall is reported, not a timeout.
 
 ## 7. Honesty
 

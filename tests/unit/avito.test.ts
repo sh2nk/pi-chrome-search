@@ -3,6 +3,11 @@
  * captures of a real SERP (`avito-serp`, `avito-no-match`), linkedom, a
  * `node:vm` page bridge and the in-memory `FakePage`. No network, no Chrome.
  *
+ * `avito-wall` is the one fixture that is not our own capture: Avito's firewall
+ * markup was obtained out of band and pasted into a tab, so its markup is
+ * evidence and its page URL is not (see the adapter's marker comment). No test
+ * here asserts anything about where Avito serves that page.
+ *
  * What this file pins:
  *  - `buildUrl` is the live-verified shape (`/<location>?q=…&p=…`), and a region
  *    that is not a slug degrades to `all` instead of becoming a 404 path;
@@ -36,8 +41,11 @@ import {
 import { ENGINE_CLASS, SUPPORT_MATRIX, type Query } from "../../src/engines/types.ts";
 import { compactSerps } from "../../src/extract/compact.ts";
 import { isWebSearchError } from "../../src/runtime/error-codes.ts";
+import { createWebSearchTool } from "../../src/tools/web_search.ts";
+import { ERROR_HINTS } from "../../src/runtime/error-codes.ts";
 import { FakeClock, FakePage } from "../helpers/fake-cdp.ts";
 import { fixtureDocument, loadFixture, runInPage } from "../helpers/fixtures.ts";
+import { createHarness, resultText } from "../helpers/search-harness.ts";
 
 const SERP_URL = "https://www.avito.ru/all?q=iphone+13";
 const HOME_URL = "https://www.avito.ru/";
@@ -275,12 +283,100 @@ test("a captcha URL or widget is a wall; a phrase alone is not", async () => {
   const quoted = pageFor(fixtureDocument(quotedHtml, SERP_URL), SERP_URL);
   assert.equal(await detectAvitoWall(quoted), null);
 
-  // Text without cards is the real block page.
-  const blockedHtml = "<html><body><h1>Доступ ограничен</h1><p>проблема с IP</p></body></html>";
+  // Body text without cards is the real block page.
+  const blockedHtml = "<html><body><h1>Страница не загрузилась из-за проблем с IP</h1></body></html>";
   const blocked = pageFor(fixtureDocument(blockedHtml, SERP_URL), SERP_URL);
   const wall = await detectAvitoWall(blocked);
   assert.equal(wall?.kind, "blocked");
-  assert.ok(wall.markers.includes("Доступ ограничен"));
+  assert.ok(wall.markers.includes("Страница не загрузилась из-за проблем с"));
+});
+
+/**
+ * The firewall markup (`avito-wall`): "Доступ ограничен: проблема с IP" and an
+ * hCaptcha checkbox. The sentence is only in `<title>`, and the page has neither
+ * readiness node a SERP has — so the gate names the widget itself and the wall is
+ * reported at once instead of after a 12 s deadline (D5). Its URL is ours, not
+ * evidence: the fixture was pasted into a tab (see the file header).
+ */
+test("S9.3/S8.5 the captured firewall is reported at once, not as a timeout", async () => {
+  const page = fixturePage("avito-wall");
+  page.setTitle("Доступ ограничен: проблема с IP");
+
+  const wall = await detectAvitoWall(page);
+  assert.equal(wall?.kind, "captcha", "an hCaptcha widget is on the page");
+  assert.equal(wall.url, SERP_URL);
+  assert.ok(wall.markers.includes("Доступ ограничен"), "the title names the firewall");
+  assert.ok(
+    wall.markers.includes("Страница не загрузилась из-за проблем с"),
+    "the body says what to do",
+  );
+
+  // No card and no result header: only the widget can satisfy the gate, and the
+  // settle still has to succeed on it in one poll (the deadline is not burned).
+  const counts = await page.evaluate<Record<string, number>>(
+    `(() => { const out = {}; for (const s of ['[data-marker="item"]', '[data-marker="page-title"]', '#h-captcha']) out[s] = document.querySelectorAll(s).length; return out; })()`,
+  );
+  // JSON round-trip: the counts object comes from the `node:vm` realm.
+  assert.deepEqual(JSON.parse(JSON.stringify(counts)) as unknown, {
+    '[data-marker="item"]': 0,
+    '[data-marker="page-title"]': 0,
+    "#h-captcha": 1,
+  });
+  const clock = new FakeClock();
+  await settleAvito(page, { clock, deadlineMs: 5_000, pollMs: 10 });
+  assert.equal(clock.totalSleptMs(), 0, "the gate matched on the first probe");
+
+  // The same page with no `<title>` at all is still a captcha: the body sentence
+  // and the widget markup (both server-rendered, unlike the invisible iframe
+  // label) carry it, so a failed title read loses nothing.
+  const untitled = fixturePage("avito-wall");
+  const byBody = await detectAvitoWall(untitled);
+  assert.equal(byBody?.kind, "captcha");
+  assert.deepEqual(byBody.markers, [
+    "Страница не загрузилась из-за проблем с",
+    "поставьте галочку",
+  ]);
+});
+
+/**
+ * The whole path on the firewall markup: the typed warm-up cannot find a box (a
+ * wall has none), the pinned SERP URL renders the wall, the gate matches and the
+ * caller gets `E_WALL` with an artifact — never a timeout, never a retry. The
+ * navigation and its URL are the tool's, the markup is Avito's.
+ */
+test("D5/S9.4 the captured firewall reaches web_search as E_WALL", async () => {
+  const rig = createHarness({
+    engines: [avitoEngine],
+    configure: (config) => {
+      config.engines.avito = { ...config.engines.avito, enabled: true };
+    },
+  });
+  const wall = fixturePage("avito-wall");
+  wall.setTitle("Доступ ограничен: проблема с IP");
+  rig.pages.set("avito", wall);
+
+  const result = await createWebSearchTool(async () => rig.deps).execute(
+    "call-avito-wall",
+    { q: "iphone 13", engines: "avito" },
+    undefined,
+    undefined,
+  );
+
+  if (!("isError" in result)) assert.fail("a wall must be a typed failure");
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "E_WALL");
+  assert.equal(result.details.engine, "avito");
+  assert.equal(result.details.retryable, true);
+  assert.equal(result.details.wall, "captcha");
+  assert.match(result.details.artifact ?? "", /artifact/);
+  assert.ok(resultText(result).includes(ERROR_HINTS.E_WALL), "the hint names the human remedy");
+
+  assert.equal(rig.artifacts.length, 1, "one artifact for the wall the caller sees");
+  assert.equal(rig.artifacts[0]?.code, "E_WALL");
+  // The warm-up failed first (no box on a wall page); the SERP navigation is the
+  // last one, and nothing navigates again after the wall is reported.
+  assert.equal(wall.lastNavigation(), avitoEngine.buildUrl(query()), "the tab keeps the wall page");
+  assert.equal(wall.bringToFrontCount(), 1, "the window is surfaced for the human");
 });
 
 test("detectWall is null on both captured normal states", async () => {

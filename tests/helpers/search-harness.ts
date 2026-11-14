@@ -101,7 +101,8 @@ export function createEngineStub(id: EngineId, options: EngineStubOptions = {}):
 }
 
 export interface HarnessOptions {
-  engines: EngineStub[];
+  /** Stubs or a real adapter: any `Engine` is enough for the tool path. */
+  engines: readonly Engine[];
   /** Mutate the cloned defaults before the tool sees them. */
   configure?: (config: Config) => void;
   cache?: CacheWithStats;

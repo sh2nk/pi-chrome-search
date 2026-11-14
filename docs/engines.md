@@ -1,8 +1,7 @@
 # Engines and browser markers
 
-Selector knowledge that cost live probes. Every selector below is asserted against a sanitized fixture
-in `tests/unit/<adapter>.test.ts` (`google`, `duckduckgo`, `yandex`, `avito`, `image_search`). A selector
-change ships a new fixture and updates this page (S13.4).
+Selector knowledge that cost live probes: every selector below is asserted against a sanitized fixture
+in `tests/unit/<adapter>.test.ts`; a change ships a new fixture and updates this page (S13.4).
 
 ## Fixtures
 | Fixture | Adapter | What it proves |
@@ -16,6 +15,7 @@ change ships a new fixture and updates this page (S13.4).
 | `tests/fixtures/images-google.html.gz` | Google Images | tiles, `data-lpage` page URLs, `encrypted-tbn` thumbs |
 | `tests/fixtures/images-yandex.html.gz` | Yandex Images | `.SerpItem` tiles, `img_url` image URLs |
 | `tests/fixtures/avito-serp.html.gz` + `tests/fixtures/avito-no-match.html.gz` | Avito | 50 listings: `data-marker` contract, price/location/date facts, tracking stripped, canaries; the no-match fallback (`notice`: quoted title + "Похожие объявления рядом…", trimmed to 4 cards) |
+| `tests/fixtures/avito-wall.html.gz` | Avito | IP firewall markup (supplied out of band: URL is not evidence): `<title>Доступ ограничен`, hCaptcha, zero cards → `E_WALL` |
 
 ## Discovery
 
@@ -37,20 +37,17 @@ reports `E_CDP_AWAITING_ALLOW` (retryable). `ECONNREFUSED`/`ENOTFOUND` fail at o
 
 ## Readiness and interaction
 
-- `settle()` waits for a **DOM marker** with a deadline (Google/DuckDuckGo 8 s, Yandex 10 s) and
-  jitter; `Page.loadEventFired` never arrives on a real SERP (consent hops + trackers keep loading).
-- Navigation commits on `Page.frameNavigated` with a `loaderId` different from the pre-navigate one,
-  then accepts `readyState: interactive` after a 200 ms grace.
-- `humanize: "auto"` types the first search of a session per engine and uses the pinned SERP URL
-  afterwards; `"always"` types every time; `"typing"` uses each engine's `typeProfile`. Typing keys
-  at 20–80 ms/char and never touches the fingerprint.
-- Yandex warm-up is `https://ya.ru/`: `yandex.ru` redirects to Dzen. A landing on a host outside
-  `homeHosts: ["ya.ru","yandex.ru"]` is reported as `home-redirect` and served from the SERP URL.
+- `settle()` waits for a **DOM marker** with a deadline (Google/DuckDuckGo 8 s, Yandex 10 s, Avito 12 s)
+  and jitter — `Page.loadEventFired` never arrives on a real SERP. Navigation commits on
+  `Page.frameNavigated` with a new `loaderId`, then accepts `readyState: interactive` after 200 ms.
+- `humanize: "auto"` types the first search of a session per engine, then uses the pinned SERP URL;
+  `"always"` types every time; `"typing"` uses each `typeProfile` (20–80 ms/char, no fingerprint work).
+- Warm-ups are per engine: Yandex uses `https://ya.ru/` (`yandex.ru` redirects to Dzen), Avito the
+  configured `/<location>/`; a landing outside `homeHosts` is `home-redirect`, served from the SERP URL.
 - DuckDuckGo's home page has no usable search input, so its typed path starts on the SERP
   (`typeOn: "serp"`): clear the prefilled box with Backspace, retype, Enter.
-- The box value is read back after typing. A value that is not the query (a second writer, a lost
-  focus) is never submitted: Enter stays un-pressed and the search falls back to the SERP URL as
-  `box-mismatch`.
+- The box value is read back: a value that is not the query (second writer, lost focus) is never
+  submitted — Enter stays un-pressed and the search falls back to the SERP URL as `box-mismatch`.
 
 ## Selectors
 
@@ -80,9 +77,12 @@ cannot settle on it); card `[data-marker="item"]` (50 per page, server-rendered)
 `item-specific-params`; facts `item-location` + `item-date` (leading text only: the seller link follows
 it); paging `pagination-button/page(N)` with `?p=N`. `context`, `cd`, `slocation` are ranking state and
 are stripped (S7.4). `Продвинуто` is a paid boost of the same listing: neither `isAd` nor a fact.
-Walls: `/captcha`, `/blocked`, `Доступ ограничен`, `Подтвердите, что вы не робот`, a captcha
-widget/iframe — a phrase alone never wins (needs zero cards). A no-match query returns *similar*
-listings and is reported as `note: no exact match: …` (S7.6).
+Walls (`avito-wall`): Avito's firewall names itself in `<title>`, not the body (the title is read
+separately); the body says "Страница не загрузилась из-за проблем с…" / "поставьте галочку". A
+captcha widget (`#h-captcha`, `.h-captcha`, `.form-captcha*`) is a wall on its own and sits *in* the
+gate, so a phrase needs zero cards and the wall is reported at once, not after 12 s of a deadline
+that cannot succeed. `/captcha`/`/blocked` stay as a defensive URL match only: the fixture is pasted
+markup, so its URL proves nothing. A no-match query says `note: no exact match: …` (S7.6).
 
 **Yandex** (`yandex-neuro`, `yandex-captcha`): ready `.OrganicTitle, .Misspell, .SmartCaptcha`;
 organics `.OrganicTitle`; snippet `.OrganicTextContentSpan`; AI `[class*='Futuris']` (`FuturisSearch`,
