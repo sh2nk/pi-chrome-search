@@ -34,7 +34,7 @@ export interface LimiterStats {
 }
 
 export interface Limiter {
-  /** Resolves when the engine may be queried; never enforces a daily quota (ADR-0001 D8). */
+  /** Resolves when the engine may be queried; never enforces a daily quota (SPEC D8). */
   acquire(engine: EngineId, signal?: AbortSignal): Promise<void>;
   stats(engine: EngineId): LimiterStats;
 }

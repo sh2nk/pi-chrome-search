@@ -1,5 +1,5 @@
 /**
- * Per-engine pacing (S10.1, ADR-0001 D8).
+ * Per-engine pacing (S10.1, SPEC D8).
  *
  * Politeness is a minimum gap with jitter between searches on one engine plus
  * one in-flight search per engine. There is no daily cap, no counter that can

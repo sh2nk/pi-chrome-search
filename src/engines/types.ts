@@ -1,5 +1,5 @@
 /**
- * Frozen contract for engine adapters. See PLAN.md Appendix A and the D9 decision
+ * Frozen contract for engine adapters. See SPEC.md §15 D9
  * (SPEC §7.1): `engines` may be a single id or a list.
  *
  * Additive changes only, and only with a `contract:` commit. Adapters are pure

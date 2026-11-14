@@ -1023,7 +1023,7 @@ async function runEngineLive(
     throw asFailure(error, "extract", engine.id, signal);
   }
 
-  // ADR-0001 D5: a wall is reported at once. No retry, no timer, no automatic
+  // SPEC D5: a wall is reported at once. No retry, no timer, no automatic
   // re-navigation; the human solves it and retries.
   if (wall !== null) await reportWall(wall);
 

@@ -11,8 +11,7 @@
  *    is what keeps a later search round from finding all reads already spent.
  * 2. **The loop.** search → read top-k → coverage → refine/stop. Page selection is
  *    deterministic (merge order, dedupe, top-N) and coverage is a fixed rule; no
- *    model is consulted and no page-quality gate decides what to read (ADR-0001
- *    D1).
+ *    model is consulted and no page-quality gate decides what to read (SPEC D1).
  * 3. **The evidence bundle.** Every claim cites a URL that a search actually
  *    returned; sources are de-duplicated by canonical host+path
  *    (`sourceKey`), tracking parameters are stripped from URLs and link text,
@@ -561,7 +560,7 @@ function mergeOutcome(state: LoopState, outcome: SearchOutcome): number {
  * The candidates to read this round, best first. Current-round results come
  * before leftovers from earlier queries, because the rewritten query is the tool's
  * best guess at what is still missing. No quality gate filters this list: the
- * budget and the merge order are the only rules (ADR-0001 D1).
+ * budget and the merge order are the only rules (SPEC D1).
  */
 function pickCandidates(state: LoopState, k: number): SeenResult[] {
   if (k <= 0) return [];

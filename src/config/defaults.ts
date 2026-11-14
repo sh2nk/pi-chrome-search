@@ -2,7 +2,7 @@
  * The config contract: one type tree, one default tree (S13.1).
  *
  * Every leaf here is read by production code; `scripts/audit.mjs` fails when a
- * leaf has no reader (S13.2). Removed surfaces (ADR-0001) do not come back:
+ * leaf has no reader (S13.2). Removed surfaces (SPEC §15) do not come back:
  * there is no attach/launch mode, no classifier block, no wall retry, no daily
  * caps and no profile-directory key. `PI_CHROME_SEARCH_PROFILE` is a host
  * discovery input, not configuration.

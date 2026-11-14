@@ -15,7 +15,7 @@
  * - page selection is deterministic (merge order, dedupe, top-N);
  * - `details.budget` reports what was spent;
  * - no model provider is consulted: the extension never imports a model client
- *   and the fixed coverage rule is the only judge (ADR-0001 D1/S11.5).
+ *   and the fixed coverage rule is the only judge (SPEC D1/S11.5).
  */
 
 import assert from "node:assert/strict";

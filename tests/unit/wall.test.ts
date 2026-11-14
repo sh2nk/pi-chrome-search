@@ -1,5 +1,5 @@
 /**
- * A wall is immediate (S8.5, S12.4, ADR-0001 D5; PLAN P7).
+ * A wall is immediate (S8.5, S12.4, SPEC D5; PLAN P7).
  *
  * The product never solves a captcha, never waits for a timer and never
  * re-navigates a walled page. The observable contract this suite pins:

@@ -79,7 +79,7 @@ test("S8.2: the documented worst case is inside the 60 s budget", () => {
   assert.equal(
     DEFAULT_CONFIG.search.budgetMs,
     60_000,
-    "ADR-0001 D7 fixes the search budget at 60000 ms",
+    "SPEC D7 fixes the search budget at 60000 ms",
   );
 });
 

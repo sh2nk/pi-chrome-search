@@ -1,6 +1,6 @@
 /**
  * Frozen tool-layer contract. Tools receive dependencies; they never import the
- * browser or a socket directly. See PLAN.md Appendix A.
+ * browser or a socket directly. See SPEC.md §15.
  */
 
 import type { CdpConnector } from "../cdp/types.ts";

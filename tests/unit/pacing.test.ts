@@ -1,5 +1,5 @@
 /**
- * Politeness is pacing, not a counter (S10.1, S10.2, ADR-0001 D8; PLAN P7).
+ * Politeness is pacing, not a counter (S10.1, S10.2, SPEC D8; PLAN P7).
  *
  * The limiter is the only thing between an eager agent and a burst of searches
  * on the user's own IP, so every property here is asserted on a virtual clock:
