@@ -4,7 +4,7 @@
  * The code set is closed: a code thrown anywhere in `src/` must be documented,
  * and a documented code must either appear in a test or carry a phased
  * reservation. Hints are executable: every env name and config path they mention
- * must exist, and no hint may advertise a surface ADR-0001 deleted.
+ * must exist, and no hint may advertise a surface deleted by SPEC §15.
  */
 
 import assert from "node:assert/strict";
@@ -20,6 +20,7 @@ import {
   RESERVED_CODES,
   STAGES,
 } from "../../src/runtime/error-codes.ts";
+import { renderErrorsDoc } from "../../src/runtime/errors-doc.ts";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -40,6 +41,10 @@ function textOf(relative: string): string {
 const SRC = filesUnder("src").map(textOf).join("\n");
 const TESTS = filesUnder("tests").map(textOf).join("\n");
 const ERROR_DOC = textOf("docs/errors.md");
+
+test("S9.5: docs/errors.md is generated from the taxonomy", () => {
+  assert.equal(ERROR_DOC, renderErrorsDoc(), "docs/errors.md drifted; run node scripts/gen-errors-doc.mjs");
+});
 
 test("S9.5: every code mentioned in src is in the closed set", () => {
   const mentioned = new Set(
@@ -82,7 +87,7 @@ test("S9.2: every config path named in a hint exists in the schema", () => {
   }
 });
 
-test("S9.3: hints do not advertise a surface ADR-0001 deleted", () => {
+test("S9.3: hints do not advertise a surface deleted by SPEC §15", () => {
   for (const [code, hint] of Object.entries(ERROR_HINTS)) {
     assert.doesNotMatch(hint, /\bfreshness\b|\bdailyCap\b|\breflex\b|captcha\.|\bE_RATE_LIMITED\b/, code);
   }

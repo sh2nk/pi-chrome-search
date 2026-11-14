@@ -11,13 +11,13 @@
  *   R6  no secrets in tracked files (values are never printed)
  *   R7  no personal data in tests/fixtures/**
  *   R8  repo hygiene: no development apparatus (research/, evidence/, bench/, archived PLAN-vN),
- *       no tracked build output or screenshots. The normative SPEC.md/PLAN.md are allowed by name.
+ *       no tracked build output or screenshots. The normative SPEC.md is allowed by name.
  *   R9  packaging sanity (`files` allowlist, metadata, no install hooks)
  *   R10 tool-description budget (approximate; the authoritative check is a unit test)
  *   R13 host facts live only in src/runtime/host.ts (PO1–PO4)
- *   R14 documentation budgets (README ≤90, AGENTS ≤150, SPEC ≤320, PLAN ≤260, docs/*.md ≤120,
+ *   R14 documentation budgets (README ≤90, AGENTS ≤150, SPEC ≤320, docs/*.md ≤120,
  *       docs total ≤400)
- *   R15 docs↔code drift (error codes, registered tools)
+ *   R15 generated README/errors docs, error codes and registered tools agree with the code
  *   R16 generated config docs and every config leaf read by production code
  *
  * Code is read with comments blanked and literals kept, so a comment documenting "never launch
@@ -34,7 +34,7 @@ const MAX_BYTES = 4 * 1024 * 1024;
 const SKIP_DIRS = new Set(["node_modules", ".git"]);
 const CODE_EXT = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 const TOOL_BUDGET_CHARS = 1200;
-const DOC_BUDGET = { README: 90, AGENTS: 150, SPEC: 320, PLAN: 260, doc: 120, docsTotal: 400 };
+const DOC_BUDGET = { README: 90, AGENTS: 150, SPEC: 320, doc: 120, docsTotal: 400 };
 
 const json = process.argv.includes("--json");
 if (process.argv.slice(2).some((arg) => arg !== "--json")) {
@@ -228,8 +228,8 @@ for (const rel of FILES.filter((f) => f.startsWith("tests/fixtures/") && !f.ends
 }
 add("R7", "no personal data in fixtures", fixtureFindings, "tests/fixtures/**");
 
-/** The two normative docs of the rewrite, allowed by exact name (an archived PLAN-vN is apparatus). */
-const NORMATIVE_DOCS = new Set(["SPEC.md", "PLAN.md"]);
+/** The normative SPEC.md is allowed by exact name (a leftover PLAN is apparatus). */
+const NORMATIVE_DOCS = new Set(["SPEC.md"]);
 
 const hygiene = [];
 for (const rel of FILES) {
@@ -298,7 +298,6 @@ for (const [file, budget] of [
   ["README.md", DOC_BUDGET.README],
   ["AGENTS.md", DOC_BUDGET.AGENTS],
   ["SPEC.md", DOC_BUDGET.SPEC],
-  ["PLAN.md", DOC_BUDGET.PLAN],
 ]) {
   if (lines(file) > budget) docFindings.push({ file, line: lines(file), rule: "budget", detail: `> ${budget}` });
 }
@@ -308,7 +307,7 @@ for (const rel of docs) {
   if (lines(rel) > DOC_BUDGET.doc) docFindings.push({ file: rel, line: lines(rel), rule: "budget", detail: `> ${DOC_BUDGET.doc}` });
 }
 if (docsTotal > DOC_BUDGET.docsTotal) docFindings.push({ file: "docs/", line: docsTotal, rule: "budget", detail: `> ${DOC_BUDGET.docsTotal}` });
-add("R14", "documentation budgets", docFindings, "README.md, AGENTS.md, SPEC.md, PLAN.md, docs/*.md");
+add("R14", "documentation budgets", docFindings, "README.md, AGENTS.md, SPEC.md, docs/*.md");
 
 /** Every leaf of the default config, as dotted paths. */
 function configLeaves(value, prefix = "", out = []) {
@@ -360,11 +359,29 @@ for (const leaf of configLeaves(DEFAULT_CONFIG)) {
 add("R16", "generated config docs and every leaf read (values, enums, ranges)", configFindings, "docs/config.md, src/");
 
 const drift = [];
+const { renderErrorsDoc } = await import("../src/runtime/errors-doc.ts");
+const { createTools } = await import("../src/tools/index.ts");
+const { README_TOOLS_END, README_TOOLS_START, renderReadmeToolTable } = await import("../src/tools/surface.ts");
 const errorDoc = readText("docs/errors.md") ?? "";
+if (errorDoc !== renderErrorsDoc()) {
+  drift.push({ file: "docs/errors.md", line: 0, rule: "generated", detail: "stale; run node scripts/gen-errors-doc.mjs" });
+}
 for (const match of (readText("src/runtime/error-codes.ts") ?? "").matchAll(/\bE_[A-Z_]+\b/g)) {
   if (!errorDoc.includes(match[0])) drift.push({ file: "docs/errors.md", line: 0, rule: "error-code", detail: match[0] });
 }
 const readme = readText("README.md") ?? "";
+const generatedTools = createTools({
+  getDeps: () => {
+    throw new Error("audit: rendering the surface must not resolve tool dependencies");
+  },
+  getDoctorDeps: () => {
+    throw new Error("audit: rendering the surface must not resolve tool dependencies");
+  },
+});
+const toolsBlock = `${README_TOOLS_START}\n${renderReadmeToolTable(generatedTools)}\n${README_TOOLS_END}`;
+if (readme.match(new RegExp(`${README_TOOLS_START}[\\s\\S]*?${README_TOOLS_END}`))?.[0] !== toolsBlock) {
+  drift.push({ file: "README.md", line: 0, rule: "generated", detail: "stale; run node scripts/gen-readme.mjs" });
+}
 const tools = new Set();
 for (const rel of toolFiles) {
   for (const match of (readText(rel) ?? "").matchAll(/^\s{2}name:\s*"([a-z_]+)"/gm)) tools.add(match[1]);
@@ -372,7 +389,7 @@ for (const rel of toolFiles) {
 for (const tool of tools) {
   if (!readme.includes(`\`${tool}\``)) drift.push({ file: "README.md", line: 0, rule: "tool", detail: tool });
 }
-add("R15", "docs ↔ code drift", drift, "docs/errors.md, README.md");
+add("R15", "generated README/errors docs and docs ↔ code drift", drift, "docs/errors.md, README.md");
 
 // --------------------------------------------------------------------------- report
 

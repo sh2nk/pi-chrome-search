@@ -25,4 +25,6 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: node scripts/gen-config-doc.mjs --check
+      - run: node scripts/gen-errors-doc.mjs --check
+      - run: node scripts/gen-readme.mjs --check
       - run: npm test

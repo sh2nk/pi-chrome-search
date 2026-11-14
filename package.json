@@ -19,6 +19,8 @@
     "test:live": "PI_CHROME_LIVE=1 node --test \"tests/live/**/*.test.ts\"",
     "audit": "node scripts/audit.mjs",
     "gen-config-doc": "node scripts/gen-config-doc.mjs",
+    "gen-errors-doc": "node scripts/gen-errors-doc.mjs",
+    "gen-readme": "node scripts/gen-readme.mjs",
     "release": "node scripts/release.mjs"
   },
   "peerDependencies": {
