@@ -31,6 +31,7 @@
 
 import type { CdpPage } from "../cdp/types.ts";
 import { waitForMarker } from "../cdp/humanize.ts";
+import { asFacts } from "../extract/facts.ts";
 import { normalizeUrl } from "../extract/urls.ts";
 import { fail } from "../runtime/errors.ts";
 import type { Clock } from "../runtime/types.ts";
@@ -341,10 +342,6 @@ export function captchaNodeCount(doc: Document): number {
 // Result validation (TS side: the page is untrusted even when we wrote the code)
 // ---------------------------------------------------------------------------
 
-/** Facts are display sugar, not a payload: a hostile page cannot flood the line. */
-const MAX_FACTS = 4;
-const MAX_FACT_CHARS = 60;
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -355,19 +352,6 @@ function parseFailure(message: string): Error {
     message,
     hint: "the Avito page returned an unexpected shape; run /web-doctor and inspect the artifact",
   });
-}
-
-function asFacts(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  const facts: string[] = [];
-  for (const raw of value) {
-    if (typeof raw !== "string") continue;
-    const fact = raw.replace(/[\s\u00a0]+/g, " ").trim();
-    if (fact === "") continue;
-    facts.push(fact.slice(0, MAX_FACT_CHARS));
-    if (facts.length >= MAX_FACTS) break;
-  }
-  return facts;
 }
 
 function asExtraction(value: unknown): AvitoExtraction {

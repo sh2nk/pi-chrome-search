@@ -29,6 +29,7 @@
 
 import type { CdpPage } from "../cdp/types.ts";
 import { waitForMarker } from "../cdp/humanize.ts";
+import { asFacts } from "../extract/facts.ts";
 import { isHttpUrl } from "../extract/urls.ts";
 import { systemClock } from "../runtime/clock.ts";
 import type { Clock } from "../runtime/types.ts";
@@ -598,6 +599,37 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
     return { results: [], aiProbe: { state: measured.state, chars: measured.text.length }, pageCarried: false };
   }
 
+  /**
+   * Card facts of a shopping-like result (SPEC S7.7, `google-facts` fixture):
+   * Google prints one "rich" row under the snippet — `От 4 057,00 ₽ · 4,9(302)`
+   * — and nothing in the DOM says which number is a price and which is a
+   * rating, so both are read from what the page itself labels:
+   *
+   *  - the rating is the `aria-label` of the row ("Оценка: 4,9 из 5, (302)
+   *    отзыва пользователей"), copied verbatim: a rating Google computes is
+   *    Google's statement, not ours;
+   *  - the price is a leaf whose *entire* text is a price ("От 4 057,00 ₽"). The
+   *    full-text rule is what keeps "43 610,00 ₽" out of a snippet's prose.
+   *
+   * Both are absent on an article result, so facts are conditional by design.
+   */
+  function cardFacts(scope: Element | null): string[] {
+    if (scope === null) return [];
+    const facts: string[] = [];
+    const PRICE = /^(От\s+)?\d[\d\s\u00a0\u202f]*([.,]\d{2})?\s?₽$/;
+    for (const node of Array.from(scope.querySelectorAll("span, b"))) {
+      if (node.children.length > 0) continue;
+      const text = normalize(node.textContent);
+      if (text === "" || text.length > 24 || !PRICE.test(text)) continue;
+      facts.push(text);
+      break;
+    }
+    const ratingNode = scope.querySelector('[aria-label*=" из 5"], [aria-label*="out of 5"]');
+    const rating = ratingNode === null ? "" : normalize(ratingNode.getAttribute("aria-label"));
+    if (rating !== "") facts.push(rating);
+    return facts;
+  }
+
   const results: SerpItem[] = [];
   const seenUrls = new Set<string>();
   let organics = 0;
@@ -621,8 +653,11 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
     const snippetNode = container === null ? null : container.querySelector(".VwiC3b, [data-sncf]");
     const snippet = clampText(snippetNode === null ? "" : visibleText(snippetNode), MAX_SNIPPET_CHARS);
 
+    const facts = cardFacts(container);
     organics += 1;
-    if (results.length < limit) results.push({ title, url: href, snippet });
+    if (results.length < limit) {
+      results.push({ title, url: href, snippet, ...(facts.length === 0 ? {} : { facts }) });
+    }
   }
 
   let ai: ExtractedAi | undefined;
@@ -923,7 +958,9 @@ function asSerpItem(value: unknown): SerpItem | null {
   const url = typeof value.url === "string" ? value.url : "";
   const snippet = typeof value.snippet === "string" ? value.snippet.trim() : "";
   if (title === "" || !isHttpUrl(url)) return null;
-  return { title, url, snippet };
+  // `facts` is page output like any other field: capped in one place (S7.7).
+  const facts = asFacts(value.facts);
+  return { title, url, snippet, ...(facts.length === 0 ? {} : { facts }) };
 }
 
 function asAiState(value: unknown): "answer" | "lead" | undefined {

@@ -191,9 +191,8 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
   `artifact`. No bare `Error("failed")` reaches the agent.
 - **S9.2 Hints are executable.** Anything a hint tells the user to do must exist: a real key, a real
   command, a real file (v1 named a timeout that had no knob and a flag that was already off).
-- **S9.3 Taxonomy is disjoint.** `E_PARSE` = our extractor's canary failed; `E_EMPTY_PAGE` = the
-  document rendered nothing readable; `E_WALL` = captcha/consent/blocked; `E_BLOCKED_URL` = the SSRF
-  guard refused. One situation, one code.
+- **S9.3 Taxonomy is disjoint.** `E_PARSE` = our canary failed; `E_EMPTY_PAGE` = nothing readable
+  rendered; `E_WALL` = captcha/consent/blocked; `E_BLOCKED_URL` = SSRF refusal. One situation, one code.
 - **S9.4 Artifacts.** Every page-state failure (parse, empty, wall, blocked-after-navigate, mismatch)
   leaves `page.html`, `page.txt`, `meta.json`; retention by count and bytes.
 - **S9.5 Code set is closed and proven.** A test asserts: every code thrown in `src/` is documented and
@@ -298,8 +297,9 @@ Changing one requires owner approval.
   home, pacing 6–12 s. The disabled hint names `config.engines.avito.enabled` and the `web-search.json`
   path, because the expected workflow is a user asking their agent to enable it.
 - **D13** Card facts (`SerpItem.facts`, S7.7) and `RawSerp.notice` (S7.6) are additive: price/
-  availability/rating/location become short strings instead of being glued into the snippet, and a
-  fallback result set gets one adapter-authored line. Only Avito populates facts so far.
+  availability/rating/location become short strings copied from the card (never composed), and a
+  fallback result set gets one adapter-authored line. Avito reports item price/place/age; Google a
+  from-price plus the rating row; Yandex a *shop* rating plus its review count (fixtures per engine).
 
 ## Appendix — v1 defect ledger (why each requirement exists)
 

@@ -423,6 +423,49 @@ test("detectWall returns null on a normal SERP", async () => {
   assert.equal(await googleEngine.detectWall(page), null, "google-ai must not look like a wall");
 });
 
+/**
+ * SPEC S7.7 / D13: a shopping-like Google result prints one "rich" row —
+ * `От 4 057,00 ₽ · 4,9(302)` — and only the page says which number is which.
+ * The rating is copied from the row's `aria-label`, the price from a leaf whose
+ * whole text is a price; nothing is recomputed and nothing is borrowed from the
+ * snippet's prose.
+ */
+test("S7.7 google-facts: the rich row becomes facts, copied verbatim", async () => {
+  const url = "https://www.google.com/search?q=xperia+10+viii";
+  const { page } = fixturePage("google-facts", url);
+  const serp = await googleEngine.extract(page, makeQuery({ n: 4, text: "xperia 10 viii" }));
+
+  const priced = serp.results.find((item) => (item.facts ?? []).includes("От 4 057,00 ₽"));
+  assert.ok(priced !== undefined, "a result with a from-price must report it");
+  assert.deepEqual(priced.facts, [
+    "От 4 057,00 ₽",
+    "Оценка: 4,9 из 5, (302) отзыва пользователей",
+  ]);
+
+  // A card with a rating and no price reports one fact, never a guessed price.
+  const ratingOnly = serp.results.find(
+    (item) => (item.facts ?? []).length === 1 && (item.facts ?? [])[0]?.startsWith("Оценка:") === true,
+  );
+  assert.ok(ratingOnly !== undefined);
+  assert.equal(ratingOnly.facts?.[0], "Оценка: 4,8 из 5, (684) отзыва пользователей");
+
+  // The snippet is still the snippet: a price inside prose is not a fact.
+  assert.equal(
+    priced.snippet.includes("От 4 057,00 ₽"),
+    false,
+    "facts come from the rich row, not from the snippet text",
+  );
+});
+
+test("S7.7 google-ai: an article SERP carries no facts at all", async () => {
+  const { page } = fixturePage("google-ai");
+  const serp = await googleEngine.extract(page, makeQuery({ n: 8, summary: false, text: "трансформер" }));
+  assert.ok(serp.results.length > 0);
+  for (const item of serp.results) {
+    assert.equal(item.facts, undefined, `${item.title} must not invent a fact`);
+  }
+});
+
 test("detectWall ignores wall phrases that only appear in SERP snippets", async () => {
   /**
    * The false-positive shape: a healthy SERP whose snippet quotes a wall slogan.

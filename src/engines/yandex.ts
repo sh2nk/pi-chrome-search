@@ -29,6 +29,7 @@
 
 import type { CdpPage } from "../cdp/types.ts";
 import { waitForMarker } from "../cdp/humanize.ts";
+import { asFacts } from "../extract/facts.ts";
 import { normalizeUrl } from "../extract/urls.ts";
 import { systemClock } from "../runtime/clock.ts";
 import { fail } from "../runtime/errors.ts";
@@ -134,6 +135,8 @@ export interface YandexExtractedItem {
   title: string;
   url: string;
   snippet: string;
+  /** Card facts (S7.7): a shop rating and its review count, when shown. */
+  facts?: string[];
 }
 
 export interface YandexExtractedAi {
@@ -543,11 +546,33 @@ export function extractFromDocument(doc: Document, arg: YandexExtractionArg): Ya
     organics += 1;
 
     let snippet = "";
+    const facts: string[] = [];
     if (card !== null) {
-      const snippetElement = card.querySelector(".OrganicTextContentSpan");
+      // `.OrganicTextContent` is today's layout (`yandex-rating`), the
+      // `…Span` wrapper is the older one (`yandex-neuro`): the old selector alone
+      // returned empty snippets on a live SERP.
+      const snippetElement = card.querySelector(".OrganicTextContentSpan, .OrganicTextContent");
       if (snippetElement !== null) snippet = normalize(snippetElement.textContent);
+
+      /**
+       * A shop rating, not a product rating: the card prints "Рейтинг 4,4 из 5"
+       * and "414K отзывов на магазин". Both strings are copied, never
+       * recomposed, so the label that says what the rating is about survives
+       * into the output (S7.7: report, do not invent).
+       */
+      const label = card.querySelector('[class*="EReviewsLabel"]');
+      if (label !== null) {
+        const ratingNode = label.querySelector(".A11yHidden");
+        const rating = ratingNode === null ? "" : normalize(ratingNode.textContent);
+        if (rating !== "") facts.push(rating);
+        const reviewsNode = label.querySelector('[class*="EReviewsLabel-Reviews"]');
+        const reviews = reviewsNode === null ? "" : normalize(reviewsNode.textContent);
+        if (reviews !== "") facts.push(reviews);
+      }
     }
-    if (results.length < limit) results.push({ title, url, snippet });
+    if (results.length < limit) {
+      results.push({ title, url, snippet, ...(facts.length === 0 ? {} : { facts }) });
+    }
   }
 
   /**
@@ -728,7 +753,8 @@ function asExtraction(value: unknown): { results: SerpItem[]; ai: AiSummary | un
     const normalized = normalizeUrl(url);
     if (normalized === null || seenUrls.has(normalized)) continue;
     seenUrls.add(normalized);
-    results.push({ title, url: normalized, snippet });
+    const facts = asFacts(rawItem.facts);
+    results.push({ title, url: normalized, snippet, ...(facts.length === 0 ? {} : { facts }) });
   }
 
   let ai: AiSummary | undefined;
