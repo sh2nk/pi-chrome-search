@@ -322,13 +322,16 @@ function configLeaves(value, prefix = "", out = []) {
 }
 
 const { DEFAULT_CONFIG } = await import("../src/config/defaults.ts");
+const { ENGINE_IDS } = await import("../src/engines/types.ts");
 const { renderConfigDoc } = await import("../src/config/doc.ts");
 const configSource = srcFiles
   .filter((rel) => !rel.startsWith("src/config/"))
   .map((rel) => stripComments(readText(rel) ?? ""))
   .join("\n");
 
-const ENGINE_SEGMENT = new Set(["google", "duckduckgo", "yandex"]);
+/** Every engine id: `config.engines.<id>` is reached literally or through an index. */
+const ENGINE_SEGMENT = new Set(ENGINE_IDS);
+const ENGINE_ALTERNATION = ENGINE_IDS.join("|");
 function escapeRe(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -337,7 +340,7 @@ function configReadPattern(path) {
   let pattern = "config";
   for (const segment of path.split(".")) {
     pattern += ENGINE_SEGMENT.has(segment)
-      ? `(?:\\.(?:google|duckduckgo|yandex)|\\[\\s*[^\\]]+\\s*\\])`
+      ? `(?:\\.(?:${ENGINE_ALTERNATION})|\\[\\s*[^\\]]+\\s*\\])`
       : `\\.${escapeRe(segment)}`;
   }
   return new RegExp(`${pattern}(?![A-Za-z0-9_])`);

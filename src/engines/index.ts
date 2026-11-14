@@ -19,12 +19,15 @@
  */
 
 import type { Config } from "../config/index.ts";
+import { resolveConfigPath } from "../config/env.ts";
+import { avitoEngine } from "./avito.ts";
 import { duckduckgoEngine } from "./duckduckgo.ts";
 import { googleEngine } from "./google.ts";
 import { yandexEngine } from "./yandex.ts";
 import { WebSearchError } from "../runtime/error-codes.ts";
 import {
   ENGINE_IDS,
+  isPrimaryEngine,
   type Engine,
   type EngineId,
   type EngineRegistry,
@@ -45,6 +48,7 @@ export const DEFAULT_ENGINES: EngineMap = Object.freeze({
   google: googleEngine,
   duckduckgo: duckduckgoEngine,
   yandex: yandexEngine,
+  avito: avitoEngine,
 });
 
 /**
@@ -84,13 +88,16 @@ function missingEngine(id: EngineId): WebSearchError {
 }
 
 function disabledEngine(id: EngineId): WebSearchError {
+  // S9.2: the hint names the real file and the real key, because "enable it in
+  // config" sends the agent hunting. A special engine (avito) ships disabled, so
+  // this is the first thing a user of it sees.
   return new WebSearchError({
     code: "E_UNSUPPORTED",
     engine: id,
     stage: "resolve",
     retryable: false,
     message: `engine "${id}" is disabled in config`,
-    hint: `set config.engines.${id}.enabled = true (or pick another engine); /web-doctor shows the current state`,
+    hint: `set config.engines.${id}.enabled = true in ${resolveConfigPath(process.env)} (or pick another engine); /web-doctor shows the current state`,
   });
 }
 
@@ -122,8 +129,10 @@ class Registry implements EngineRegistry {
 
   select(requested: EngineSelection): EngineId[] {
     const usable = new Set(this.enabled());
-    // `auto` is the canonical order by construction: `enabled()` walks ENGINE_IDS.
-    if (requested === "auto") return this.enabled();
+    // `auto` is the canonical order by construction: `enabled()` walks ENGINE_IDS,
+    // and the primary filter is what keeps a special engine (avito) out of it
+    // (SPEC S4.7/D11). A caller that wants it names it.
+    if (requested === "auto") return this.enabled().filter(isPrimaryEngine);
 
     const list = Array.isArray(requested) ? requested : [requested];
     const selected: EngineId[] = [];

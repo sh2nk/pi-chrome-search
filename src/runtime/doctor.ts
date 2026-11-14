@@ -69,8 +69,18 @@ const WALL_KINDS = ["captcha", "consent", "sorry", "blocked"] as const;
  * `skipped` means "not exercised" (caller asked for no probe, or CDP was down),
  * which is different from `unavailable` ("tried and could not"). It still keeps
  * the overall verdict at `degraded`: a doctor with no evidence is not healthy.
+ *
+ * `disabled` is the one exception: an engine the user turned off (the opt-in
+ * avito ships off, SPEC D12) is a config choice, not a fault.
  */
-export type EngineVerdict = "ok" | "wall" | "layout_changed" | "blocked" | "unavailable" | "skipped";
+export type EngineVerdict =
+  | "ok"
+  | "wall"
+  | "layout_changed"
+  | "blocked"
+  | "unavailable"
+  | "skipped"
+  | "disabled";
 export type CdpStatus = "ok" | "unavailable" | "busy" | "error" | "awaiting_allow";
 export type DoctorVerdict = "ok" | "degraded" | "blocked";
 
@@ -136,6 +146,11 @@ function probeLocale(engine: EngineId, config: Config): Pick<Query, "lang" | "re
     }
     case "yandex": {
       const region = resolveProbeLocale(config.engines.yandex.lr);
+      return region === undefined ? {} : { region };
+    }
+    case "avito": {
+      // `auto` means every region here; the adapter's own default is `all` too.
+      const region = resolveProbeLocale(config.engines.avito.location);
       return region === undefined ? {} : { region };
     }
   }
@@ -827,7 +842,10 @@ async function engineEntry(
 ): Promise<DoctorEngine> {
   const enabled = deps.config.engines[id].enabled;
   if (!enabled) {
-    return { id, enabled: false, verdict: "unavailable", note: "disabled in config" };
+    // A deliberate config choice, reported as `disabled` so it does not degrade
+    // the verdict: the opt-in avito engine ships off (SPEC D12), and a fresh
+    // install must not look broken because of it.
+    return { id, enabled: false, verdict: "disabled", note: "disabled in config" };
   }
 
   if (!deps.registry.has(id)) {
@@ -948,7 +966,12 @@ async function readArtifacts(artifacts: Artifacts | undefined): Promise<DoctorAr
 
 function overallVerdict(cdp: DoctorCdp, engines: DoctorEngine[]): DoctorVerdict {
   if (cdp.status !== "ok" || cdp.webdriver === true) return "blocked";
-  if (engines.some((engine) => engine.verdict !== "ok")) return "degraded";
+  // `disabled` (an engine the user turned off, e.g. the opt-in avito) is a config
+  // choice, not a fault: only a broken, unavailable or probe-skipped engine
+  // degrades the report ("probe absence is not health").
+  if (engines.some((engine) => engine.verdict !== "ok" && engine.verdict !== "disabled")) {
+    return "degraded";
+  }
   return "ok";
 }
 

@@ -9,7 +9,8 @@
 
 Web search and page reading for [pi](https://pi.dev), through your own visible Chrome. Same profile,
 cookies and IP. Google, DuckDuckGo and Yandex return compact Markdown and their native AI summary when
-there is one. No keys, no paid APIs, no headless mode, no fingerprint spoofing. Node 26+, Chrome 136+.
+there is one; Avito listings (price, location, age) are available opt-in. No keys, no paid APIs, no
+headless mode, no fingerprint spoofing. Node 26+, Chrome 136+.
 
 ## Install
 
@@ -31,7 +32,7 @@ The window stays visible. The extension attaches to it and never launches, resta
 <!-- tools:start -->
 | Tool | Exposure | Arguments |
 |---|---|---|
-| `web_search` | direct | `q` string; `n?` integer 1..10; `engines?` "auto" or ("google" or "duckduckgo" or "yandex") or list of ("google" or "duckduckgo" or "yandex") 1..3; `summary?` boolean; `page?` integer >=1; `format?` "md" or "json" |
+| `web_search` | direct | `q` string; `n?` integer 1..10; `engines?` "auto" or ("google" or "duckduckgo" or "yandex" or "avito") or list of ("google" or "duckduckgo" or "yandex" or "avito") 1..4; `summary?` boolean; `page?` integer >=1; `format?` "md" or "json" |
 | `web_read` | direct | `url` string; `offset?` integer >=0; `maxChars?` integer >=1; `format?` "md" or "text" |
 | `image_search` | deferred | `q` string; `n?` integer 1..12; `engine?` "google" or "yandex"; `attach?` boolean or "bytes" |
 | `web_research` | deferred | `q` string; `budget?` "quick" or "normal" or "deep" |
@@ -39,7 +40,14 @@ The window stays visible. The extension attaches to it and never launches, resta
 <!-- tools:end -->
 
 A call has one 60 second deadline. DuckDuckGo has no pagination: `page > 1` is reported as
-`ignored.page`. Every unresolved link stays marked `unresolved`.
+`ignored.page`; Avito has no AI block: `summary` is reported as `ignored.summary`. Every unresolved
+link stays marked `unresolved`, and card facts (price/availability/rating/location) render on their
+own line after the snippet.
+
+`engines: "auto"` only ever means Google → DuckDuckGo → Yandex. Avito is a *special* engine: it is off
+by default and reachable only by naming it. To turn it on, set `engines.avito.enabled` to `true` (and
+optionally `engines.avito.location`, a region slug such as `kaluga` or `all`) in
+`~/.pi/agent/web-search.json` — ask your agent to do it, that is the intended path.
 
 ## Limits
 

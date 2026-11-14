@@ -39,9 +39,12 @@ naming the dotted path.
 | `engines.duckduckgo.kl` | `"auto"` | non-empty string | Region/language; `auto` omits it. |
 | `engines.yandex.enabled` | `true` | boolean | Use Yandex. |
 | `engines.yandex.lr` | `"auto"` | non-empty string | `lr`; `auto` omits it. |
+| `engines.avito.enabled` | `false` | boolean | Use the Avito marketplace engine (special: only an explicit `engines: "avito"` reaches it, `auto` never does). Off by default. |
+| `engines.avito.location` | `"all"` | non-empty string | Region path slug in the Avito URL (`all`, `moskva`, `kaluga`), not a display name. |
 | `pacing.google` | `[2500,5000]` | [integer ≥ 0, integer ≥ 0] | Min/max gap in ms between Google searches. |
 | `pacing.duckduckgo` | `[2000,4000]` | [integer ≥ 0, integer ≥ 0] | Min/max gap in ms between DuckDuckGo searches. |
 | `pacing.yandex` | `[5000,9000]` | [integer ≥ 0, integer ≥ 0] | Min/max gap in ms between Yandex searches. |
+| `pacing.avito` | `[6000,12000]` | [integer ≥ 0, integer ≥ 0] | Min/max gap in ms between Avito searches. |
 | `search.budgetMs` | `60000` | integer 1000..600000 | Whole-call deadline in ms; pacing, settle, AI wait and link resolution draw from it (S8.1). |
 | `search.n` | `5` | integer ≥ 1 | Default result count. |
 | `search.nMax` | `10` | integer ≥ 1 | Hard ceiling for `n`; never above 10. |

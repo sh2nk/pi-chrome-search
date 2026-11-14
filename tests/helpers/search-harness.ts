@@ -10,6 +10,7 @@
 import type { CdpPage } from "../../src/cdp/types.ts";
 import { DEFAULT_CONFIG, type Config } from "../../src/config/index.ts";
 import { createEngineRegistry } from "../../src/engines/index.ts";
+import { ENGINE_IDS } from "../../src/engines/types.ts";
 import type {
   Engine,
   EngineAi,
@@ -100,7 +101,8 @@ export function createEngineStub(id: EngineId, options: EngineStubOptions = {}):
 }
 
 export interface HarnessOptions {
-  engines: EngineStub[];
+  /** Stubs or a real adapter: any `Engine` is enough for the tool path. */
+  engines: readonly Engine[];
   /** Mutate the cloned defaults before the tool sees them. */
   configure?: (config: Config) => void;
   cache?: CacheWithStats;
@@ -120,7 +122,7 @@ export function createHarness(options: HarnessOptions): Harness {
   config.window.focus = "never";
   config.humanize = "auto";
   config.cache.serpTtlMs = 0;
-  for (const id of ["google", "duckduckgo", "yandex"] as const) config.pacing[id] = [0, 0];
+  for (const id of ENGINE_IDS) config.pacing[id] = [0, 0];
   options.configure?.(config);
 
   const pages = new Map<EngineId, FakePage>();

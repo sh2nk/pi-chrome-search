@@ -324,6 +324,40 @@ test("extract: yandex-neuro returns organics, drops ads, and does not invent a g
   assert.equal(out.pageCarried, false);
 });
 
+/**
+ * SPEC S7.7 / D13 on the 2026 layout (`yandex-rating`): the card prints a *shop*
+ * rating — "Рейтинг 4,4 из 5" and "414K отзывов на магазин" — and both strings
+ * are copied as they are, so the words that say what is being rated survive.
+ * The same capture pins the snippet element: today's SERP has
+ * `.OrganicTextContent`, not the older `.OrganicTextContentSpan`, and the
+ * single-selector version returned empty snippets on a live page.
+ */
+test("S7.7 yandex-rating: the shop rating is copied, and today's snippet node is read", () => {
+  const fixture = loadFixture("yandex-rating");
+  const out = extractFrom(fixture.html, SERP_URL, { n: 10, summary: false, query: "xperia" });
+
+  assert.ok(out.results.length >= 3, `expected organics, got ${out.results.length}`);
+  for (const item of out.results) {
+    assert.notEqual(item.snippet, "", `${item.title} must carry the card prose, not an empty snippet`);
+  }
+
+  const rated = out.results[0];
+  assert.ok(rated !== undefined);
+  // JSON round-trip: the array was built in the `node:vm` realm.
+  assert.deepEqual(JSON.parse(JSON.stringify(rated.facts)) as unknown, [
+    "Рейтинг 4,4 из 5",
+    "414K отзывов на магазин",
+  ]);
+  assert.equal(rated.facts?.[1]?.includes("на магазин"), true, "the label that says it is a shop rating stays");
+});
+
+test("S7.7 yandex-neuro: a card without a rating label carries no facts", () => {
+  const fixture = loadFixture("yandex-neuro");
+  const out = extractFrom(fixture.html, SERP_URL, { n: 10, summary: false, query: "q" });
+  assert.ok(out.results.length > 0);
+  for (const item of out.results) assert.equal(item.facts, undefined);
+});
+
 test("extract: a zero-result SERP is honest and never invents an answer", () => {
   const out = extractFrom("<html><body><div class=\"serp\"></div></body></html>", SERP_URL, {
     n: 10,

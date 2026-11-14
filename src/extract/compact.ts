@@ -25,11 +25,13 @@
  *   "ai": { "text": "…", "sources": ["a.com"] },   // omitted when absent
  *   "results": [
  *     { "title": "…", "url": "…", "domain": "…", "snippet": "…", "engine": "google",
- *       "unresolved": true }
+ *       "unresolved": true, "facts": ["23 990 ₽", "Самара"] }
  *     // "engine" only when the caller mixed engines; "unresolved" only for an
- *     // opaque Google /goto wrapper that stayed unresolved (S3.5, S7.4)
+ *     // opaque Google /goto wrapper that stayed unresolved (S3.5, S7.4); "facts"
+ *     // only when the card showed price/rating/location (SPEC §15 D13)
  *   ],
  *   "pageCarried": true,
+ *   "notice": "no exact match: …",       // only when the engine answered with a fallback
  *   "ignored": { "page": "duckduckgo" }, // only when an argument was not honoured
  *   "degraded": true,                   // only when true
  *   "cached": true,                     // only when true
@@ -65,6 +67,12 @@ export const COMPACT_CAPS = {
   maxN: 10,
   /** Results per domain before the domain cap starts deferring them. */
   perDomainLimit: 2,
+  /**
+   * Card facts joined on one line (`23 990 ₽ · Самара · Вчера`, SPEC §15 D13).
+   * A fact line is display sugar: it never displaces the snippet, and it is cut
+   * here so an adapter cannot flood the output with page text.
+   */
+  factsMaxChars: 120,
 } as const;
 
 export interface CompactOptions {
@@ -99,6 +107,8 @@ export interface CompactItem {
   engine?: EngineId;
   /** The URL is an opaque `/goto` wrapper that stayed unresolved (S3.5, S7.4). */
   unresolved?: boolean;
+  /** Card facts (price, location, date) rendered after the snippet; already capped. */
+  facts?: readonly string[];
 }
 
 export interface CompactAi {
@@ -118,6 +128,8 @@ export interface CompactResult {
   pageCarried: boolean;
   degraded: boolean;
   cached: boolean;
+  /** Adapter-authored caveat about the page (`no exact match: …`); rendered as `note: `. */
+  notice?: string;
   /** Markdown render (always produced). */
   text: string;
   /** JSON render; see the schema above. */
@@ -137,6 +149,7 @@ interface MergedItem {
   snippet: string;
   engine?: EngineId;
   unresolved?: boolean;
+  facts?: readonly string[];
 }
 
 interface Opts {
@@ -182,6 +195,30 @@ const AI_MIN_BLOCK = AI_NEWLINE + AI_PREFIX.length + 1;
  */
 const AI_SOURCES_MAX_SHARE = 0.25;
 const PAGE_LINE = "\npage: more results available";
+/** Card facts are one line, joined the way a SERP card groups them. */
+const FACTS_SEPARATOR = " · ";
+/** Adapter notice is one short line (`note: …`), never a paragraph. */
+const NOTICE_MAX_CHARS = 160;
+
+/**
+ * Cap a card's facts as a joined line by dropping whole facts from the tail.
+ * A truncated price ("23 9…") would be a wrong price, and a wrong price is worse
+ * than a missing one, so facts are never cut mid-way.
+ */
+function capFacts(facts: readonly string[] | undefined): string[] | undefined {
+  if (facts === undefined) return undefined;
+  const kept: string[] = [];
+  let width = 0;
+  for (const raw of facts) {
+    const fact = collapse(raw);
+    if (fact === "") continue;
+    const extra = kept.length === 0 ? fact.length : fact.length + FACTS_SEPARATOR.length;
+    if (width + extra > COMPACT_CAPS.factsMaxChars) break;
+    kept.push(fact);
+    width += extra;
+  }
+  return kept.length === 0 ? undefined : kept;
+}
 
 function clampInt(value: number | undefined, fallback: number, min: number, max: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
@@ -361,6 +398,9 @@ function renderItem(item: CompactItem, index: number): string {
   const marker = item.unresolved === true ? " (unresolved)" : "";
   const lines = [`${index + 1}. ${heading}`, `   ${item.url}${marker}`];
   if (item.snippet) lines.push(`   ${item.snippet}`);
+  if (item.facts !== undefined && item.facts.length > 0) {
+    lines.push(`   ${item.facts.join(FACTS_SEPARATOR)}`);
+  }
   return lines.join("\n");
 }
 
@@ -373,6 +413,7 @@ function jsonItem(item: CompactItem): Record<string, unknown> {
   };
   if (item.engine) out.engine = item.engine;
   if (item.unresolved === true) out.unresolved = true;
+  if (item.facts !== undefined && item.facts.length > 0) out.facts = [...item.facts];
   return out;
 }
 
@@ -418,6 +459,13 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
   const engineLabel = contributing.length === 0 ? "none" : contributing.join("+");
   const query = collapse(input[0]?.query ?? "");
   const degraded = input.some((serp) => serp.degraded === true);
+  // Adapter-authored notice (S7.6): "Avito answered with similar listings". One
+  // line, first non-empty wins, capped — a page cannot push prose through it
+  // because adapters pass a constant, not page text.
+  const notice = truncate(
+    collapse(input.find((serp) => typeof serp.notice === "string" && serp.notice !== "")?.notice ?? ""),
+    NOTICE_MAX_CHARS,
+  );
 
   const merged = new Map<string, MergedItem>();
   for (const serp of input) {
@@ -430,6 +478,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
 
       const title = truncate(collapse(raw.title), COMPACT_CAPS.titleMaxChars);
       const snippet = truncate(collapse(raw.snippet), opts.snippetMaxChars);
+      const facts = capFacts(raw.facts);
       const engine = raw.engine ?? serp.engine;
       const existing = merged.get(normalized);
 
@@ -441,14 +490,16 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
           snippet,
           engine,
           ...(raw.unresolved === true ? { unresolved: true } : {}),
+          ...(facts === undefined ? {} : { facts }),
         });
         continue;
       }
 
-      // First non-empty title wins; the longest capped snippet wins (ties keep
-      // the earlier engine, so the outcome does not depend on map internals).
+      // First non-empty title/facts win; the longest capped snippet wins (ties
+      // keep the earlier engine, so the outcome does not depend on map internals).
       if (!existing.title && title) existing.title = title;
       if (snippet.length > existing.snippet.length) existing.snippet = snippet;
+      if (existing.facts === undefined && facts !== undefined) existing.facts = facts;
       if (raw.unresolved === true) existing.unresolved = true;
     }
   }
@@ -518,6 +569,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
 
   const render = (items: CompactItem[], summary: CompactAi | undefined, state: AiState): string => {
     const head = [headerFor(items, state)];
+    if (notice !== "") head.push(`note: ${notice}`);
     if (summary) head.push(aiLine(summary));
     let text = head.join("\n");
     if (items.length > 0) text += `\n\n${items.map(renderItem).join("\n")}`;
@@ -534,12 +586,14 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
     };
     if (mixed || perEngine) out.engine = item.engine;
     if (item.unresolved === true) out.unresolved = true;
+    if (item.facts !== undefined && item.facts.length > 0) out.facts = item.facts;
     return out;
   };
 
   const outputMaxChars = opts.outputMaxChars;
   const fallbackCap = Math.min(opts.snippetMaxChars, MIN_SNIPPET);
   const pageSuffixLen = pageCarried ? PAGE_LINE.length : 0;
+  const noticeLen = notice === "" ? 0 : `\nnote: ${notice}`.length;
 
   // Results floor: the exact chars needed for the selected items at MIN_SNIPPET.
   // Titles are already capped by the merge step and URLs are full, so this is an
@@ -551,7 +605,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
   // `headerFor(selected.length, …)` is the widest header still possible: dropping
   // tail items only shortens the count, and `ai:lead` (7) is the widest AI label.
   const headerReserve =
-    headerFor(selected.map((item) => toItem(item, fallbackCap)), "lead").length + pageSuffixLen;
+    headerFor(selected.map((item) => toItem(item, fallbackCap)), "lead").length + pageSuffixLen + noticeLen;
   const aiBudget = Math.max(
     0,
     Math.min(opts.summaryMaxChars, outputMaxChars - headerReserve - resultsFloor),
@@ -617,6 +671,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
   }
   if (aiOut) data.ai = { text: aiOut.text, sources: [...aiOut.sources], state: "answer" };
   if (aiState === "lead") data.aiState = "lead";
+  if (notice !== "") data.notice = notice;
   if (degraded) data.degraded = true;
   if (opts.cached) data.cached = true;
 
@@ -634,6 +689,7 @@ export function compactSerps(serps: readonly RawSerp[], options: CompactOptions)
     resultsChars,
     truncated,
   };
+  if (notice !== "") result.notice = notice;
   if (aiOut) result.ai = aiOut;
   return result;
 }

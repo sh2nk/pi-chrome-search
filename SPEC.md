@@ -47,10 +47,8 @@ Five tools, one contract:
 - **S3.2 Tested, not assumed.** A unit test enumerates the registered tools through the same path the
   session uses and asserts reachability for both branches (discovery tool present / absent). "Exposure
   looks right" is not evidence.
-- **S3.3 Prompt budget.** Descriptions sum to ≤1200 characters and each is ≤350. The number is
-  enforced by a test, because reachability plus a cheap prompt is exactly the trade this product makes.
-  Until P1 moves both together, the v1 test and audit still enforce the tighter 900 — do not chase that
-  as a bug.
+- **S3.3 Prompt budget.** Descriptions sum to ≤1200 characters and each is ≤350, enforced by a test:
+  reachability plus a cheap prompt is exactly the trade this product makes.
 - **S3.4 Discoverability.** `web_search`'s description names the two direct tools and what they return;
   an agent that only reads declared tool descriptions must still be able to do search → read.
 - **S3.5 Results are readable.** Every emitted result URL is either resolved to a real destination or
@@ -63,20 +61,20 @@ Five tools, one contract:
 ## 4. `web_search` contract
 
 Arguments: `q` (required, non-empty after trim, ≤500 chars), `n` 1..10 (default `search.n`), `engines`
-`auto | id | id[]` (max 3, `auto` = first enabled engine that works), `summary` boolean (default true),
-`page` ≥1, `format` `md|json`.
+`auto | id | id[]` (max = every registered id, `auto` = the primary engines only, first that works),
+`summary` boolean (default true), `page` ≥1, `format` `md|json`.
 
 - **S4.1 Merge semantics.** `auto` and a single id mean "first engine that works, stop at the first
   success"; an explicit list means "coverage set": merge, dedupe, and report per-engine counts. A
   failed engine inside a coverage set MUST appear as `perEngine[id]=0` plus its code in `failedEngines`.
 - **S4.2 Support matrix.** Each argument × engine is honoured or reported (S7.1). Target matrix:
 
-  | argument | google | duckduckgo | yandex |
-  |---|---|---|---|
-  | `n` | yes | yes | yes |
-  | `page` | yes | **flag** (no pagination) | yes |
-  | `summary` | AI Overview | Search Assist | Alice/Neuro |
-  | `site:`/`filetype:`/quotes | passthrough | passthrough | passthrough |
+  | argument | google | duckduckgo | yandex | avito (special) |
+  |---|---|---|---|---|
+  | `n` | yes | yes | yes | yes |
+  | `page` | yes | **flag** (no pagination) | yes | yes (`&p=`) |
+  | `summary` | AI Overview | Search Assist | Alice/Neuro | **flag** (no AI block) |
+  | `site:`/`filetype:`/quotes | passthrough | passthrough | passthrough | passthrough |
 
   `flag` means the result carries `ignored: {"page": "duckduckgo"}` and the README documents it. A
   silently ignored argument is a defect, not a shortcut. Date narrowing is a query operator (S3.6), not
@@ -90,8 +88,13 @@ Arguments: `q` (required, non-empty after trim, ≤500 chars), `n` 1..10 (defaul
   `cached:true`, cost no live request, and never change semantics. A cache hit is not a lie: TTL is
   reported in `details` when it is material.
 - **S4.6 Output caps.** Markdown ≤`search.outputMaxChars` (default 2500) exactly; summary
-  ≤`search.summaryMaxChars` (1200); snippet ≤`search.snippetMaxChars` (140). JSON is capped too, with
-  a documented minimum envelope; counts in `details` describe the emitted text, never the plan.
+  ≤`search.summaryMaxChars` (1200); snippet ≤`search.snippetMaxChars` (140). JSON is capped the same
+  way; counts in `details` describe the emitted text, never the plan.
+- **S4.7 Engine classes.** Every id is `primary` (a general web SERP) or `special` (one site: avito).
+  `auto` walks primary engines only; a special engine is reachable **only** by naming it, and a
+  disabled one fails with `E_UNSUPPORTED` whose hint names the real key **and** file
+  (`config.engines.avito.enabled` in `web-search.json`), so an agent can enable it on request.
+  `ENGINE_CLASS` is the single source the tool docs, registry and matrix read.
 
 ## 5. `web_read` contract
 
@@ -100,7 +103,7 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
 `md|text`.
 
 - **S5.1 Readiness.** A page is ready when `readyState ≥ interactive` **and** the document yields a
-  text floor (≥200 chars) or `readyState = complete`, with a soft deadline (2.5 s) inside the call
+  text floor (≥200 chars) or `readyState = complete`, with a soft 2.5 s deadline inside the call
   budget. No fixed sleeps; no `loadEventFired` dependency.
 - **S5.2 Thin is its own failure.** A document with no extractable text is `E_EMPTY_PAGE` with an
   artifact and a hint that the page may render client-side. `E_PARSE` is reserved for adapter canary
@@ -118,7 +121,7 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
 - **S5.7 Read slots.** `read.pool` 1..3; each slot owns one tab and one exclusive lock. A read never
   navigates an engine tab.
 
-## 6. `image_search`, `web_research`, `web_doctor`
+## 6. `image_search`, `web_research`, `web_doctor`, special engines
 
 - **S6.1 `image_search`**: `q`, `n` ≤12 (default 4), `engine` `google|yandex`, `attach` boolean or
   `"bytes"` (≤4 real image blocks, ≤`image.attachMaxBytes` each). Reports `pageUrlKind` (`page` for
@@ -129,8 +132,22 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
   and MUST report the budget it spent. Page selection is deterministic (merge order, dedupe, top-N): no
   quality gate decides what to read (SPEC D1), and no model provider is called at all (S11.5).
 - **S6.3 `web_doctor`**: `probe` (default true), `fix` (default false). Safe fix set: reconnect,
-  release owned tabs, prune artifacts, reclaim a stale lock. It MUST NOT kill, restart or close
-  anything the extension did not open. `readOnlyHint:false` (S9.6).
+  release owned tabs, prune artifacts, reclaim a stale lock; it MUST NOT kill, restart or close
+  anything the extension did not open. `readOnlyHint:false` (S9.6). A config-disabled engine is
+  `verdict:"disabled"` and does **not** degrade the report (turning it off is a choice; a probe that
+  was requested but produced no evidence still does).
+- **S6.4 `avito` (special engine).** Marketplace listings, enabled by `engines.avito.enabled`
+  (default `false`), located by `engines.avito.location` — a **URL path slug** (`all`, `moskva`,
+  `kaluga`; `all` = every region, and Avito offers nearby regions with delivery itself). URL
+  `https://www.avito.ru/<location>?q=<q>[&p=<page>]`, 1-based `p`. Typed path: home
+  `https://www.avito.ru/<location>/`, box `input[data-marker="search-form/suggest/input"]`
+  (`maxlength=100`: a longer query is not typed), Enter, and the warm-up must use the configured region
+  (`homeUrlFor`). Extraction reads the `data-marker` contract (`item`, `item-title`,
+  `item-price-value`, `item-specific-params`, `item-location`, `item-date`), strips the ranking
+  parameters (`context`, `cd`, `slocation`) from the link, and reports price/location/age as card facts
+  (D13). `summary` is flagged; a no-match query returns *similar* listings and says so (`notice` → a
+  `note:` line), never as matches (S7.6). The gate names the captcha widget too, because a wall has no
+  results node: a settle that cannot succeed must end at once so the wall is reported, not a timeout.
 
 ## 7. Honesty
 
@@ -145,8 +162,13 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
   parameter stripped from a URL is stripped from the link the user will click, not just from display.
 - **S7.5 No phantom features.** A documented key, argument, flag or command either works or does not
   exist. v1 shipped five config keys and a `launch` mode that no code read; that is a defect class.
-- **S7.6 Honest degradation.** A fallback path (e.g. keyless HTTP) is labelled `degraded:true`; the
-  caller can tell a real SERP from a substitute.
+- **S7.6 Honest degradation.** A fallback path (e.g. keyless HTTP) is labelled `degraded:true`; a page
+  that answers with a *different* result set (Avito's "similar listings") gets an adapter-authored
+  `notice` — our constant, never page text, so a SERP cannot inject prose into it.
+- **S7.7 Card facts are reported, not invented.** Price/availability/rating/location shown outside the
+  snippet go into `SerpItem.facts`, rendered after it; whole facts are dropped past the cap (never a
+  half-cut price), and only for a selector with a fixture (S13.4). Recognition is by shape — a leaf
+  that is only a price, a label shaped `<score> … 5` — not by a locale's words or a currency's name.
 
 ## 8. Time
 
@@ -160,24 +182,20 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
 - **S8.3 Link resolution is bounded.** `/goto` resolution runs with concurrency (default 3) and a total
   deadline, not 10 sequential 5 s requests (v1: up to 50 s on one SERP).
 - **S8.4 A user interaction is not a hang.** Waiting for the CDP Allow click is `E_CDP_AWAITING_ALLOW`
-  (retryable, 60 s, one desktop notification), reported, not silently absorbed. The call budget starts
-  once the session is up.
-- **S8.5 Bounded walls.** A wall is reported at once. No automatic re-navigation, no wait-for-human
-  loop: the user solves it and retries (see D5).
+  (retryable, 60 s, one desktop notification), reported, not absorbed; the budget starts once up.
+- **S8.5 Bounded walls.** A wall is reported at once: no automatic re-navigation, no wait-for-human
+  loop (see D5).
 
 ## 9. Errors
 
 - **S9.1 Shape.** Every failure is `code`, `stage`, `retryable`, `hint`, optional `engine`/`wall`/
   `artifact`. No bare `Error("failed")` reaches the agent.
 - **S9.2 Hints are executable.** Anything a hint tells the user to do must exist: a real key, a real
-  command, a real file. v1 told users to raise a timeout that had no knob, and to flip a flag that was
-  already off.
-- **S9.3 Taxonomy is disjoint.** `E_PARSE` = our extractor's canary failed; `E_EMPTY_PAGE` = the
-  document rendered nothing readable; `E_WALL` = captcha/consent/blocked; `E_BLOCKED_URL` = the SSRF
-  guard refused. One situation, one code.
+  command, a real file (v1 named a timeout that had no knob and a flag that was already off).
+- **S9.3 Taxonomy is disjoint.** `E_PARSE` = our canary failed; `E_EMPTY_PAGE` = nothing readable
+  rendered; `E_WALL` = captcha/consent/blocked; `E_BLOCKED_URL` = SSRF refusal. One situation, one code.
 - **S9.4 Artifacts.** Every page-state failure (parse, empty, wall, blocked-after-navigate, mismatch)
-  leaves `page.html`, `page.txt`, `meta.json`; retention by count and bytes; nothing personal in
-  fixtures.
+  leaves `page.html`, `page.txt`, `meta.json`; retention by count and bytes.
 - **S9.5 Code set is closed and proven.** A test asserts: every code thrown in `src/` is documented and
   every documented code is either exercised by a test or marked `reserved` with a reason.
 - **S9.6 Annotations are true.** `readOnlyHint` is false for anything that navigates the user's
@@ -186,15 +204,16 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
 
 ## 10. Rates and politeness
 
-- **S10.1** Per-engine pacing with jitter (defaults: google 2.5–5 s, ddg 2–4 s, yandex 5–9 s). No daily
-  caps and no `E_RATE_LIMITED`: the engines are free, a quota was an unmeasured guess, and politeness is
-  pacing, not a counter (SPEC D8).
+- **S10.1** Per-engine pacing with jitter (google 2.5–5 s, ddg 2–4 s, yandex 5–9 s, avito 6–12 s — the
+  most aggressive anti-bot of the four). No daily caps, no `E_RATE_LIMITED`: politeness is pacing, not
+  a counter (SPEC D8).
 - **S10.2** One in-flight live search per engine across the whole session, one writer per tab. Parallel
   pi tool calls queue on a per-tab lock; they never type into one box concurrently.
 - **S10.3** No loops around a wall, no retry storms, no probe loops. Doctor probes at most once per
   engine per gate.
-- **S10.4** Live smoke: one query per engine, `n=2`, one run, no retries; a wall is a stop-and-ask, not
-  a failure to work around.
+- **S10.4** Live smoke: one query per enabled engine, `n=2`, one run, no retries; a wall is a
+  stop-and-ask, not a failure to work around. A disabled special engine (avito) is not part of the
+  default smoke; enabling it adds exactly one query to the run.
 
 ## 11. Security and privacy
 
@@ -211,10 +230,10 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
 
 ## 12. UX of the visible window
 
-- **S12.1** One owned window, one work tab per engine and per read slot, plus an anchor tab that hosts
-  the local control panel (`assets/anchor.html`, painted by one-off `Runtime.evaluate`).
-- **S12.2** The window is raised per `window.focus` (`session|always|never`) and handed back per
-  `window.follow`/`window.idleMs`; `"never"` dominates everything.
+- **S12.1** One owned window, one work tab per engine and per read slot, plus an anchor tab with the
+  local control panel (`assets/anchor.html`, painted by a one-off `Runtime.evaluate`).
+- **S12.2** Raised per `window.focus` (`session|always|never`), handed back per
+  `window.follow`/`window.idleMs`; `"never"` dominates.
 - **S12.3** Tabs we did not open are never closed; the last tab closes the window, so the anchor exists.
 - **S12.4** A wall surfaces the window and leaves the page for the human; the extension does not steal
   focus back mid-solve.
@@ -236,7 +255,7 @@ Arguments: `url` (public http/https), `offset` ≥0 (default 0), `maxChars` ≥1
 - **S13.5** Tests are offline by default, deterministic, and must not touch Chrome, DNS outside the
   injected resolver, or the user's home. Live tests are opt-in and run once.
 - **S13.6** Decisions that change a public contract (tool surface, error codes, config keys, defaults,
-  budgets) are recorded in §15 with an owner approval date. A decision without approval is a proposal.
+  budgets) are recorded in §15 with an owner approval date; without one it is a proposal.
 - **S13.7** No evidence/apparatus directories in the tree; live-run evidence goes into the PR body.
 
 ## 14. Acceptance (product level)
@@ -269,6 +288,18 @@ Changing one requires owner approval.
 - **D7** Budgets 60000 / 30000 / 300000 ms; descriptions ≤1200; operator guideline ≤400.
 - **D8** No daily caps, no persisted rate state, no `E_RATE_LIMITED`; pacing + one in-flight per engine.
 - **D9** v2.0.0 (breaking surface, config and error taxonomy).
+- **D10** *(recovered from the code; was referenced but never recorded)* `auto` = primary engines in
+  canonical order google → duckduckgo → yandex; an explicit list keeps the caller's order and merges.
+- **D11** Engine classes (owner, 2026-11-15): primary engines may appear in `auto`; special engines (one
+  site, not the web) are reachable only by explicit intent (`engines: "avito"`). A marketplace listing
+  is not an answer to "search the web", so it must never be automatic.
+- **D12** Avito is a special engine: `enabled:false`, `location:"all"` (Avito's all-Russia slug;
+  `rossiya` redirects to it), no AI block (`summary` flagged), typed warm-up on the configured region's
+  home, pacing 6–12 s. The disabled hint names `config.engines.avito.enabled` and the `web-search.json`
+  path, because the expected workflow is a user asking their agent to enable it.
+- **D13** Card facts (`SerpItem.facts`, S7.7) and `RawSerp.notice` (S7.6) are additive: price/
+  availability/rating/location become short strings copied from the card, never composed; a fallback
+  result set gets one authored line. Avito: price/place/age; Google: price + rating; Yandex: shop rating.
 
 ## Appendix — v1 defect ledger (why each requirement exists)
 

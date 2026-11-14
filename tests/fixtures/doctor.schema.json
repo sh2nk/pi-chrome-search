@@ -126,10 +126,10 @@
         "additionalProperties": false,
         "required": ["id", "enabled", "verdict"],
         "properties": {
-          "id": { "enum": ["google", "duckduckgo", "yandex"] },
+          "id": { "enum": ["google", "duckduckgo", "yandex", "avito"] },
           "enabled": { "type": "boolean" },
           "verdict": {
-            "enum": ["ok", "wall", "layout_changed", "blocked", "unavailable", "skipped"]
+            "enum": ["ok", "wall", "layout_changed", "blocked", "unavailable", "skipped", "disabled"]
           },
           "note": { "type": "string" },
           "probe": {

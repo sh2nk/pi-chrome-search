@@ -29,6 +29,7 @@
 
 import type { CdpPage } from "../cdp/types.ts";
 import { waitForMarker } from "../cdp/humanize.ts";
+import { asFacts } from "../extract/facts.ts";
 import { isHttpUrl } from "../extract/urls.ts";
 import { systemClock } from "../runtime/clock.ts";
 import type { Clock } from "../runtime/types.ts";
@@ -598,6 +599,85 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
     return { results: [], aiProbe: { state: measured.state, chars: measured.text.length }, pageCarried: false };
   }
 
+  /**
+   * Card facts of a shopping-like result (SPEC S7.7, `google-facts` fixture):
+   * Google prints one "rich" row under the snippet — `От 4 057,00 ₽ · 4,9(302)`
+   * — and nothing in the DOM says which number is a price and which is a
+   * rating, so both are read from what the page itself labels:
+   *
+   *  - the rating is the row's `aria-label` ("Оценка: 4,9 из 5, (302) отзыва
+   *    пользователей"), copied verbatim: a rating Google computes is Google's
+   *    statement, not ours;
+   *  - the price is a leaf whose *entire* text is one price. The full-text rule
+   *    is what keeps "41 246 ₽" inside a sentence out of `facts`.
+   *
+   * Both rules are locale- and currency-agnostic on purpose (`lang` is a config
+   * key, so a German or Polish SERP is a supported input, not a surprise):
+   *  - a price is recognised by shape — one currency token (symbol, ISO code or
+   *    a short suffix like `zł`/`Kč`/`kr`), digits, separators, and at most a
+   *    four-letter prefix ("От", "From", "ab"). Anything wordier is prose. A
+   *    locale whose prefix is longer loses the price fact instead of getting a
+   *    wrong one;
+   *  - a rating is recognised by its invariant shape, `<score> … 5`, in any
+   *    language ("4,9 из 5", "4.9 out of 5", "4,9 von 5", "4,9 sur 5"), and is
+   *    then copied whole, so the reader gets the page's own words.
+   */
+  function cardFacts(scope: Element | null): string[] {
+    if (scope === null) return [];
+    const facts: string[] = [];
+
+    /**
+     * Symbols and ISO codes seen on Google's own currency list, plus the
+     * word-suffix currencies whose symbol follows the amount. Deliberately a
+     * closed list: an unknown currency means "no price fact", never a guess.
+     */
+    const CURRENCY =
+      /[$€£¥₹₽₩₪₺₴₸₾₼₫₱฿]|\b(?:USD|EUR|RUB|GBP|UAH|BYN|KZT|PLN|CZK|SEK|NOK|DKK|CHF|JPY|CNY|INR|TRY|GEL|AMD|AZN|UZS|KGS|TJS|MDL|RSD|BGN|HUF|RON|ILS|AED|SAR|BRL|KRW|THB|VND|PHP|IDR|MYR|SGD|HKD|TWD|MXN|CAD|AUD|NZD|ARS|CLP|COP|PEN)\b|zł|Kč|kr|TL|RMB|руб|грн|сум|тенге|лари|драм|ман|円|元|圓/iu;
+    const CURRENCY_ALL =
+      /[$€£¥₹₽₩₪₺₴₸₾₼₫₱฿]|(?:USD|EUR|RUB|GBP|UAH|BYN|KZT|PLN|CZK|SEK|NOK|DKK|CHF|JPY|CNY|INR|TRY|GEL|AMD|AZN|UZS|KGS|TJS|MDL|RSD|BGN|HUF|RON|ILS|AED|SAR|BRL|KRW|THB|VND|PHP|IDR|MYR|SGD|HKD|TWD|MXN|CAD|AUD|NZD|ARS|CLP|COP|PEN)|zł|Kč|kr|TL|RMB|руб|грн|сум|тенге|лари|драм|ман|円|元|圓/giu;
+    /** Letters a price may carry besides the currency: "От", "From", "ab". */
+    const PRICE_PREFIX = /^[A-Za-zА-Яа-яЁё]{0,4}$/;
+
+    function looksLikePrice(text: string): boolean {
+      if (text === "" || text.length > 26) return false;
+      if (!/[0-9]/.test(text)) return false;
+      if (!CURRENCY.test(text)) return false;
+      const rest = text
+        .replace(CURRENCY_ALL, " ")
+        // Digits, grouping/decimals, ranges ("–") and noise like "~".
+        .replace(/[0-9\s.,'\u00a0\u202f\u2013\u2014~≈-]/g, " ")
+        .trim();
+      return PRICE_PREFIX.test(rest);
+    }
+
+    for (const node of Array.from(scope.querySelectorAll("span, b"))) {
+      if (node.children.length > 0) continue;
+      const text = normalize(node.textContent);
+      if (!looksLikePrice(text)) continue;
+      facts.push(text);
+      break;
+    }
+
+    /**
+     * `<score> … 5` — the scale is the only language-independent part of a
+     * rating label; the words around it differ per locale and are kept as-is.
+     * A label longer than a fact (60 chars, the same ceiling `asFacts` applies)
+     * is a paragraph that happens to contain numbers, not a card label.
+     *
+     * Both orders exist: "4,9 из 5" (ru/de/pl) and "5 üzerinden 4,9" /
+     * "5 段階中 4.9" (tr/ja). The reverse form is anchored to the start of the
+     * label, so a stray "5" inside a sentence cannot qualify.
+     */
+    const RATING = /[0-9][.,][0-9][^0-9]{1,14}5(?![0-9])|^5[^0-9]{1,14}[0-9][.,][0-9]/;
+    for (const node of Array.from(scope.querySelectorAll("[aria-label]"))) {
+      const label = normalize(node.getAttribute("aria-label"));
+      if (label === "" || label.length > 60 || !RATING.test(label)) continue;
+      facts.push(label);
+      break;
+    }
+    return facts;
+  }
+
   const results: SerpItem[] = [];
   const seenUrls = new Set<string>();
   let organics = 0;
@@ -621,8 +701,11 @@ export function extractFromDocument(doc: Document, arg: ExtractArgument): Extrac
     const snippetNode = container === null ? null : container.querySelector(".VwiC3b, [data-sncf]");
     const snippet = clampText(snippetNode === null ? "" : visibleText(snippetNode), MAX_SNIPPET_CHARS);
 
+    const facts = cardFacts(container);
     organics += 1;
-    if (results.length < limit) results.push({ title, url: href, snippet });
+    if (results.length < limit) {
+      results.push({ title, url: href, snippet, ...(facts.length === 0 ? {} : { facts }) });
+    }
   }
 
   let ai: ExtractedAi | undefined;
@@ -923,7 +1006,9 @@ function asSerpItem(value: unknown): SerpItem | null {
   const url = typeof value.url === "string" ? value.url : "";
   const snippet = typeof value.snippet === "string" ? value.snippet.trim() : "";
   if (title === "" || !isHttpUrl(url)) return null;
-  return { title, url, snippet };
+  // `facts` is page output like any other field: capped in one place (S7.7).
+  const facts = asFacts(value.facts);
+  return { title, url, snippet, ...(facts.length === 0 ? {} : { facts }) };
 }
 
 function asAiState(value: unknown): "answer" | "lead" | undefined {

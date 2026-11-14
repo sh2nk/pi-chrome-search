@@ -29,9 +29,11 @@ async function search(
 }
 
 test("S4.2: the matrix is exactly the SPEC table", () => {
-  assert.deepEqual(SUPPORT_MATRIX.n, { google: "yes", duckduckgo: "yes", yandex: "yes" });
-  assert.deepEqual(SUPPORT_MATRIX.page, { google: "yes", duckduckgo: "flag", yandex: "yes" });
-  assert.deepEqual(SUPPORT_MATRIX.summary, { google: "yes", duckduckgo: "yes", yandex: "yes" });
+  assert.deepEqual(SUPPORT_MATRIX.n, { google: "yes", duckduckgo: "yes", yandex: "yes", avito: "yes" });
+  assert.deepEqual(SUPPORT_MATRIX.page, { google: "yes", duckduckgo: "flag", yandex: "yes", avito: "yes" });
+  // Avito has no native AI block (SPEC D12), so `summary` is flagged there and
+  // reported as `ignored.summary` instead of being silently dropped (S7.1).
+  assert.deepEqual(SUPPORT_MATRIX.summary, { google: "yes", duckduckgo: "yes", yandex: "yes", avito: "flag" });
 });
 
 test("S3.6/S4.2: q reaches every engine verbatim, operators included", async () => {
@@ -192,4 +194,65 @@ test("S4.5: the cache key covers every honoured argument, not format", async () 
 
   const cachedIds: EngineId[] = engine.queries.map(() => "google");
   assert.equal(cachedIds.length, 4);
+});
+
+// ---------------------------------------------------------------------------
+// Special engines (SPEC §15 D11/D12, S4.7)
+// ---------------------------------------------------------------------------
+
+test("S4.7: a special engine is never reached by auto, even when enabled", async () => {
+  const avito = createEngineStub("avito");
+  const google = createEngineStub("google");
+  const harness = createHarness({
+    engines: [avito, google],
+    configure: (config) => {
+      config.engines.avito.enabled = true;
+    },
+  });
+
+  const automatic = await search(harness, { q: "iphone 13", engines: "auto", summary: false });
+  assert.equal("isError" in automatic, false);
+  assert.equal(avito.queries.length, 0, "auto must not search a marketplace");
+  assert.equal(google.queries.length, 1);
+
+  const explicit = await search(harness, { q: "iphone 13", engines: "avito", summary: false });
+  assert.equal("isError" in explicit, false);
+  assert.equal(avito.queries.length, 1, "an explicit id is honoured");
+});
+
+test("D12: a disabled special engine is E_UNSUPPORTED with an executable hint", async () => {
+  const avito = createEngineStub("avito");
+  const harness = createHarness({ engines: [avito] });
+
+  const result = await search(harness, { q: "iphone 13", engines: "avito", summary: false });
+  if (!("isError" in result)) assert.fail("a disabled engine must not be searched");
+  assert.equal(result.details.code, "E_UNSUPPORTED");
+  assert.equal(result.details.engine, "avito");
+  const text = resultText(result);
+  assert.match(text, /config\.engines\.avito\.enabled/);
+  assert.match(text, /web-search\.json/, "the agent is told which file to edit");
+  assert.equal(avito.queries.length, 0, "nothing was navigated");
+});
+
+test("S4.2/S7.1: avito's missing AI block is flagged, not silently skipped", async () => {
+  const avito = createEngineStub("avito");
+  const harness = createHarness({
+    engines: [avito],
+    configure: (config) => {
+      config.engines.avito.enabled = true;
+    },
+  });
+
+  const result = await search(harness, { q: "iphone 13", engines: "avito", summary: true });
+  assert.equal("isError" in result, false);
+  assert.equal(avito.queries[0]?.summary, false, "an engine without an AI block is never asked for one");
+  if (!("isError" in result)) assert.deepEqual(result.details.ignored, { summary: "avito" });
+  assert.match(resultText(result), /ignored: summary\(avito\)/);
+
+  // page and n are supported, so a page-2 request with a summary may only flag the summary.
+  const paged = await search(harness, { q: "iphone 13", n: 2, page: 2, engines: "avito" });
+  assert.equal("isError" in paged, false);
+  assert.equal(avito.queries[1]?.page, 2);
+  assert.equal(avito.queries[1]?.n, 2);
+  if (!("isError" in paged)) assert.deepEqual(paged.details.ignored, { summary: "avito" });
 });
