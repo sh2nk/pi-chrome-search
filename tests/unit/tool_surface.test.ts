@@ -266,6 +266,7 @@ function allEngines(): Record<EngineId, Engine> {
     duckduckgo: stubEngine("duckduckgo"),
     yandex: stubEngine("yandex"),
     avito: stubEngine("avito"),
+    ozon: stubEngine("ozon"),
   };
 }
 
@@ -393,7 +394,7 @@ test("describeRegistry reports canonical status without conflating the two cause
 
   assert.deepEqual(
     status.engines.map((engine) => engine.id),
-    ["google", "duckduckgo", "yandex", "avito"],
+    ["google", "duckduckgo", "yandex", "avito", "ozon"],
   );
   assert.deepEqual(status.engines[0], {
     id: "google",
@@ -413,10 +414,16 @@ test("describeRegistry reports canonical status without conflating the two cause
     configEnabled: false,
     available: false,
   });
-  // The special engine is reported like any other, and it is the only row that
-  // is disabled by default (SPEC D12).
+  // The special engines are reported like any other, and they are the only rows
+  // that are disabled by default (SPEC D12/D14).
   assert.deepEqual(status.engines[3], {
     id: "avito",
+    registered: false,
+    configEnabled: false,
+    available: false,
+  });
+  assert.deepEqual(status.engines[4], {
+    id: "ozon",
     registered: false,
     configEnabled: false,
     available: false,
@@ -441,18 +448,21 @@ test("describeRegistry without a config reports registered-only availability", (
 
 test("the shipped registry wires every adapter, and only primary engines are automatic", () => {
   const registry = createDefaultRegistry(DEFAULT_CONFIG);
-  // Every id has an adapter; avito ships disabled, so the usable set is the
-  // three primaries and `auto` is exactly those (S4.7, D11/D12).
+  // Every id has an adapter; both marketplaces ship disabled, so the usable set
+  // is the three primaries and `auto` is exactly those (S4.7, D11/D12/D14).
   for (const id of ENGINE_IDS) assert.equal(registry.has(id), true, `${id} must be registered`);
   assert.deepEqual(registry.enabled(), ["google", "duckduckgo", "yandex"]);
   assert.deepEqual(registry.select("auto"), ["google", "duckduckgo", "yandex"]);
 
-  // Enabling it does not make it automatic — it only makes an explicit request work.
+  // Enabling a special engine does not make it automatic — it only makes an
+  // explicit request work.
   const config = structuredClone(DEFAULT_CONFIG);
   config.engines.avito.enabled = true;
+  config.engines.ozon.enabled = true;
   const enabled = createDefaultRegistry(config);
-  assert.deepEqual(enabled.enabled(), ["google", "duckduckgo", "yandex", "avito"]);
+  assert.deepEqual(enabled.enabled(), ["google", "duckduckgo", "yandex", "avito", "ozon"]);
   assert.deepEqual(enabled.select("auto"), ["google", "duckduckgo", "yandex"]);
   assert.deepEqual(enabled.select("avito"), ["avito"]);
+  assert.deepEqual(enabled.select("ozon"), ["ozon"]);
   for (const id of ENGINE_IDS) assert.equal(enabled.get(id).id, id);
 });

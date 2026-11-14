@@ -153,6 +153,10 @@ function probeLocale(engine: EngineId, config: Config): Pick<Query, "lang" | "re
       const region = resolveProbeLocale(config.engines.avito.location);
       return region === undefined ? {} : { region };
     }
+    case "ozon": {
+      // Ozon has no URL locale/region parameter (SPEC D14).
+      return {};
+    }
   }
 }
 

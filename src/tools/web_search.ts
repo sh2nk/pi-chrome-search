@@ -68,6 +68,7 @@ const engineIdSchema = Type.Union([
   Type.Literal("duckduckgo"),
   Type.Literal("yandex"),
   Type.Literal("avito"),
+  Type.Literal("ozon"),
 ]);
 
 /**
@@ -198,7 +199,7 @@ export interface WebSearchTool {
  * every word.
  */
 export const WEB_SEARCH_DESCRIPTION =
-  "Search the web for free in the user's visible Chrome (Google, DuckDuckGo, Yandex; Avito listings opt-in) with each engine's native AI summary. Compact results, n<=10. Call web_read on a result URL to get that page as paged Markdown. site:/filetype:/quoted queries pass through; engines: id, list, or auto.";
+  "Search the web for free in the user's visible Chrome (Google, DuckDuckGo, Yandex; Avito and Ozon opt-in) with each engine's native AI summary. Compact results, n<=10. Call web_read on a result URL to get that page as paged Markdown. site:/filetype:/quoted queries pass through; engines: id, list, or auto.";
 
 /**
  * SPEC S3.6: `q` is passed verbatim, so narrowing happens in the query. The
@@ -206,7 +207,7 @@ export const WEB_SEARCH_DESCRIPTION =
  */
 export const WEB_SEARCH_GUIDELINES: readonly string[] = [
   "web_search passes q verbatim: use quoted phrases, -term, OR, site:, filetype:; narrow by date with after:/before: on Google or date: on Yandex (there is no date argument).",
-  "engines:\"avito\" searches Avito listings (price, location); it is opt-in: enable engines.avito.enabled in web-search.json first, and auto never uses it.",
+  "engines:\"avito\" (listings) and \"ozon\" (goods) are opt-in marketplaces: enable engines.<id>.enabled in web-search.json first; auto never uses them.",
 ];
 
 /**
@@ -389,6 +390,12 @@ function buildQuery(engine: EngineId, input: NormalizedInput, config: Config): Q
       // The region is a URL path slug, not a locale; `auto` means "every
       // region" here, which is the adapter's own default (SPEC D12).
       query.region = resolveLocale(config.engines.avito.location) ?? "all";
+      break;
+    }
+    case "ozon": {
+      // No locale plumbing: Ozon has no URL region/language parameter (its city
+      // is a cookie-backed UI choice), so a value here would be a phantom key
+      // (S7.5). The query text is the whole input.
       break;
     }
   }

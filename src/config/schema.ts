@@ -55,6 +55,7 @@ export const CONFIG_SPEC: Spec = {
         duckduckgo: { kind: "object", fields: { enabled: BOOL, kl: STRING_NE } },
         yandex: { kind: "object", fields: { enabled: BOOL, lr: STRING_NE } },
         avito: { kind: "object", fields: { enabled: BOOL, location: STRING_NE } },
+        ozon: { kind: "object", fields: { enabled: BOOL } },
       },
     },
     pacing: {
@@ -64,6 +65,7 @@ export const CONFIG_SPEC: Spec = {
         duckduckgo: { kind: "tuple", items: [NUM(0), NUM(0)] },
         yandex: { kind: "tuple", items: [NUM(0), NUM(0)] },
         avito: { kind: "tuple", items: [NUM(0), NUM(0)] },
+        ozon: { kind: "tuple", items: [NUM(0), NUM(0)] },
       },
     },
     search: {

@@ -42,6 +42,7 @@ const QUERY: Readonly<Record<EngineId, string>> = {
   duckduckgo: "rust tokio select macro example",
   yandex: "rust tokio select macro example",
   avito: "iphone 13",
+  ozon: "iphone 13",
 };
 
 /**

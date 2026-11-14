@@ -126,7 +126,7 @@
         "additionalProperties": false,
         "required": ["id", "enabled", "verdict"],
         "properties": {
-          "id": { "enum": ["google", "duckduckgo", "yandex", "avito"] },
+          "id": { "enum": ["google", "duckduckgo", "yandex", "avito", "ozon"] },
           "enabled": { "type": "boolean" },
           "verdict": {
             "enum": ["ok", "wall", "layout_changed", "blocked", "unavailable", "skipped", "disabled"]
