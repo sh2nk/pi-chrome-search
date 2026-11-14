@@ -1,6 +1,6 @@
 {
   "name": "pi-chrome-search",
-  "version": "0.1.1",
+  "version": "2.0.0",
   "description": "Free, keyless web search through the user's own visible Chrome (Google, DuckDuckGo, Yandex) for pi",
   "type": "module",
   "license": "MIT",

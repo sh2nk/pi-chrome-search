@@ -104,16 +104,26 @@ export function publishMode(env) {
  * pointing at a version that the registry does not have. A local run
  * (`mode === "none"`) still tags and releases, it just never publishes.
  *
+ * A pending release (package.json already names the version) has no version
+ * bump and no release commit, so those steps are skipped.
+ *
  * @param {string} next
  * @param {"token" | "oidc" | "none"} mode
+ * @param {{ bump?: boolean }} [options]
  * @returns {Array<[string, string[]]>}
  */
-export function releaseSteps(next, mode) {
-  const steps = [["npm", ["version", next, "--no-git-tag-version"]]];
+export function releaseSteps(next, mode, options = {}) {
+  const bump = options.bump ?? true;
+  const steps = [];
+  if (bump) steps.push(["npm", ["version", next, "--no-git-tag-version"]]);
   if (mode !== "none") steps.push(["npm", ["publish", "--provenance", "--access", "public"]]);
+  if (bump) {
+    steps.push(
+      ["git", ["add", "package.json", "package-lock.json"]],
+      ["git", ["commit", "-m", `chore(release): v${next}`]],
+    );
+  }
   steps.push(
-    ["git", ["add", "package.json", "package-lock.json"]],
-    ["git", ["commit", "-m", `chore(release): v${next}`]],
     ["git", ["tag", "-a", `v${next}`, "-m", `v${next}`]],
     ["git", ["push", "origin", "HEAD", "--follow-tags"]],
     ["gh", ["release", "create", `v${next}`, "--generate-notes", "--title", `v${next}`]],
@@ -155,6 +165,24 @@ export function commitsSince(tag, log = (range) => git(["log", "--format=%B%x00"
     .filter(Boolean);
 }
 
+/**
+ * What a release would ship. A manifest version that already differs from the
+ * last tag is the pending release: it must not be bumped again (that turned a
+ * prepared 2.0.0 into 3.0.0 on the next merge).
+ */
+export function planRelease(current, lastTag, messages) {
+  const tagged = lastTag === null ? null : lastTag.replace(/^v/, "");
+  const pending = tagged !== null && tagged !== current;
+  const bump = classifyBump(messages);
+  const next = pending ? current : nextVersion(current, bump);
+  return { current, lastTag, pending, bump, next };
+}
+
+/** The first publish of a prepared major version is an explicit owner action. */
+export function manualReleaseRequired(plan, env) {
+  return plan.pending && (env.RELEASE_MANUAL ?? "").trim() !== "1";
+}
+
 function run(command, args, options = {}) {
   process.stdout.write(`+ ${command} ${args.join(" ")}\n`);
   execFileSync(command, args, { cwd: ROOT, stdio: "inherit", ...options });
@@ -164,19 +192,29 @@ function main(argv) {
   const dryRun = argv.includes("--dry-run");
   const manifest = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
   const tag = lastTag();
-  const bump = classifyBump(commitsSince(tag));
-  const next = nextVersion(manifest.version, bump);
+  const plan = planRelease(manifest.version, tag, commitsSince(tag));
+  const { bump, next } = plan;
 
   process.stdout.write(
     [
       `last tag:   ${tag ?? "(none)"}`,
       `current:    ${manifest.version}`,
-      `bump:       ${bump}`,
+      `bump:       ${plan.pending ? "pending manifest version" : bump}`,
       `next:       ${next}`,
     ].join("\n") + "\n",
   );
   if (dryRun) return 0;
-  if (bump === "none") {
+  if (manualReleaseRequired(plan, process.env)) {
+    process.stdout.write(
+      [
+        `pending: package.json already names ${next}, last tag is ${tag ?? "(none)"}`,
+        "publish: skipped: the first publish of a prepared major is manual",
+        `run: RELEASE_MANUAL=1 node scripts/release.mjs  (or dispatch the release workflow with manual=true)`,
+      ].join("\n") + "\n",
+    );
+    return 0;
+  }
+  if (!plan.pending && bump === "none") {
     process.stdout.write("no release: the commits since the last tag are docs/test/chore only\n");
     return 0;
   }
@@ -195,7 +233,7 @@ function main(argv) {
       ? "publish: skipped: not on GitHub Actions and no NPM_TOKEN\n"
       : `publish: authenticating with ${mode}\n`,
   );
-  for (const [command, args] of releaseSteps(next, mode)) run(command, args);
+  for (const [command, args] of releaseSteps(next, mode, { bump: !plan.pending })) run(command, args);
   return 0;
 }
 
