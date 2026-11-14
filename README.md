@@ -1,6 +1,7 @@
 # pi-chrome-search
 
 [![npm](https://img.shields.io/npm/v/pi-chrome-search)](https://www.npmjs.com/package/pi-chrome-search)
+[![downloads](https://img.shields.io/npm/dm/pi-chrome-search)](https://www.npmjs.com/package/pi-chrome-search)
 [![pi](https://img.shields.io/badge/pi-package-6f42c1)](https://pi.dev/packages)
 [![ci](https://github.com/sh2nk/pi-chrome-search/actions/workflows/ci.yml/badge.svg)](https://github.com/sh2nk/pi-chrome-search/actions/workflows/ci.yml)
 [![license](https://img.shields.io/npm/l/pi-chrome-search)](LICENSE)
