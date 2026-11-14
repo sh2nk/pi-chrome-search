@@ -194,20 +194,30 @@ export interface WebSearchTool {
 
 /**
  * Kept under 350 chars (asserted in the unit test and re-measured by P2-E's
- * tool-budget test). It names the real browser, the three engines, the summary
- * and the syntax that needs no rewriting, and nothing else: the prompt pays for
+ * tool-budget test). It names the real browser, the engines, the summary and
+ * the syntax that needs no rewriting, and nothing else: the prompt pays for
  * every word.
+ *
+ * "Only when named" rather than "opt-in": the latter reads as "check the config
+ * before searching" and sent an agent hunting for `web-search.json` while both
+ * marketplaces were already enabled (S3.7). Naming an engine attempts it; a
+ * disabled one answers with E_UNSUPPORTED naming the key and the file.
  */
 export const WEB_SEARCH_DESCRIPTION =
-  "Search the web for free in the user's visible Chrome (Google, DuckDuckGo, Yandex; Avito and Ozon opt-in) with each engine's native AI summary. Compact results, n<=10. Call web_read on a result URL to get that page as paged Markdown. site:/filetype:/quoted queries pass through; engines: id, list, or auto.";
+  "Search the web for free in the user's visible Chrome (Google, DuckDuckGo, Yandex; Avito and Ozon only when named) with each engine's native AI summary. Compact results, n<=10. Call web_read on a result URL to get that page as paged Markdown. site:/filetype:/quoted queries pass through; engines: id, list, or auto.";
 
 /**
  * SPEC S3.6: `q` is passed verbatim, so narrowing happens in the query. The
  * guideline is prompt text, not an argument, and stays under 400 chars.
+ *
+ * S3.7: the marketplace line must not send the agent to the config file before
+ * it has tried the call. It names the two ids, says `auto` never picks them and
+ * that a disabled engine explains itself, which is the whole decision an agent
+ * needs; pre-reading `web-search.json` is not part of it.
  */
 export const WEB_SEARCH_GUIDELINES: readonly string[] = [
   "web_search passes q verbatim: use quoted phrases, -term, OR, site:, filetype:; narrow by date with after:/before: on Google or date: on Yandex (there is no date argument).",
-  "engines:\"avito\" (listings) and \"ozon\" (goods) are opt-in marketplaces: enable engines.<id>.enabled in web-search.json first; auto never uses them.",
+  "Marketplaces are named-only: engines:\"avito\" (listings) or \"ozon\" (goods); auto never picks them. Just name one — no config read first; if disabled, the error names the config key and file.",
 ];
 
 /**

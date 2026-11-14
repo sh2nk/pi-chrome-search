@@ -54,6 +54,9 @@ Five tools, one contract:
   actually narrow results: quoted phrases, `-term`, `OR`, `site:`, `filetype:`, and date narrowing where the engine
   supports it (Google `after:`/`before:`, Yandex `date:`). Guideline text ≤400 chars. There is no tool-level date filter
   (SPEC D2), so the model narrows in the query.
+- **S3.7 Action first, config second.** No description or guideline tells the model to inspect `web-search.json` before
+  calling: naming an engine attempts it, a disabled one returns the S4.7 hint (key + file), so config is read only on
+  error or request; `web_doctor` advertises and prints that path, so an agent can edit the config without a hunt.
 
 ## 4. `web_search` contract
 
@@ -294,6 +297,9 @@ owner approval.
   (`summary` flagged), warm-up on `https://www.ozon.ru/`, pacing 6–12 s, product links stripped of every query parameter.
   Its wall markup was **not** captured (provoking the firewall is forbidden), so those markers are defensive,
   `docs/engines.md` says so, and a block-page capture from the owner replaces them.
+- **D15** Tool guidance is action-first (owner request, 2026-11-14): describe a marketplace as "only when named", never
+  "opt-in, enable it in `web-search.json` first", and have `web_doctor` advertise and print the config path. The old
+  wording sent an agent hunting for the file before its first search although both marketplaces were enabled (S3.7).
 
 ## Appendix — v1 defect ledger (why each requirement exists)
 

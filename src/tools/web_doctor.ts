@@ -31,6 +31,7 @@ import type { DoctorCdp, DoctorDeps, DoctorEngine, DoctorReport, DoctorVerdict }
 import { applyDoctorFix, buildDoctorReport } from "../runtime/doctor.ts";
 import type { FailureJson, ToolTextBlock } from "../runtime/errors.ts";
 import { fail, renderToolFailure, toFailure } from "../runtime/errors.ts";
+import { tildify } from "../runtime/host.ts";
 
 // ---------------------------------------------------------------------------
 // Input schema (plain literals: provider-safe, no enum helper)
@@ -85,9 +86,16 @@ export interface WebDoctorTool {
   ): Promise<WebDoctorResult>;
 }
 
-/** Kept well under the 350-char per-tool cap; measured in the lane test. */
+/**
+ * Kept well under the 350-char per-tool cap; measured in the lane test.
+ *
+ * S3.7: it names the config file path and the per-engine enabled state because
+ * that is how an agent finds the file it may be asked to edit — a `find /` is
+ * not a diagnosis, and a deferred tool whose description omits the path is not
+ * discoverable by "where is my web-search config".
+ */
 export const WEB_DOCTOR_DESCRIPTION =
-  "Diagnose CDP attach, lock, window, per-engine probe verdicts and canaries. Optional fix reconnects, closes only owned tabs and prunes artifacts.";
+  "Diagnose Chrome attach, lock, window, and per-engine enabled state plus probe verdicts; it prints the config file path to edit. fix reconnects, closes only owned tabs, prunes artifacts.";
 
 const INPUT_HINT = "check the web_doctor arguments: probe and fix are booleans";
 
@@ -148,6 +156,9 @@ export function renderWebDoctorText(report: DoctorReport, actions: readonly stri
     `web_doctor: ${report.verdict} — cdp ${report.cdp.status}, webdriver ${webdriver}, ` +
       `lock ${report.cdp.lock.locked ? "held" : "free"}`,
   );
+  // S3.7: the config path is a first-class answer, not a detail buried in the
+  // CLI's full report. An agent asked to enable an engine edits this file.
+  lines.push(`config: ${tildify(report.config.path)}`);
   if (report.cdp.error !== undefined) {
     lines.push(`cdp error [${report.cdp.error.code}] ${report.cdp.error.stage}: ${report.cdp.error.hint}`);
   }

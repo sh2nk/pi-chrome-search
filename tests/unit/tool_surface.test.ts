@@ -188,6 +188,25 @@ test("search operators are taught in prompt guidelines, not another argument", (
   assert.equal(Object.hasOwn(properties, "date"), false, "date narrowing must not become a new argument");
 });
 
+test("S3.7: marketplace guidance is action-first, never a config pre-check", () => {
+  const search = TOOLS.find((tool) => tool.name === "web_search");
+  assert.ok(search !== undefined);
+  const text = ("promptGuidelines" in search ? search.promptGuidelines ?? [] : []).join(" ");
+
+  assert.match(search.description, /only when named/, "the description says how to reach a marketplace");
+  assert.doesNotMatch(search.description, /opt-in/, "'opt-in' reads as a config step the model must verify");
+  assert.match(text, /named-only/, "the guideline says naming is the whole opt-in");
+  assert.match(text, /no config read first/, "the guideline forbids a config pre-check");
+  assert.match(text, /error names the config key and file/, "a disabled engine explains itself instead");
+  assert.doesNotMatch(text, /or config\.|enable .* first/i, "no `enable x in the file first` step");
+
+  // S3.7: an agent asked to edit the config learns the path from the doctor, so
+  // the deferred tool has to advertise that answer (a ts-less `find /` is not one).
+  const doctor = TOOLS.find((tool) => tool.name === "web_doctor");
+  assert.ok(doctor !== undefined);
+  assert.match(doctor.description, /config file path/, "web_doctor must advertise the config path");
+});
+
 // ---------------------------------------------------------------------------
 // Generated README table (S13.3 pattern)
 // ---------------------------------------------------------------------------

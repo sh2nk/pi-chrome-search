@@ -290,6 +290,7 @@ test("S6.3: web_doctor returns compact text plus the report sections, not the wh
   assert.equal(result.details.engines.length, 5);
   const text = result.content.map((block) => block.text).join("\n");
   assert.match(text, /^web_doctor: ok — cdp ok/m);
+  assert.match(text, /^config: \/tmp\/pi-chrome-search-test\/web-search\.json$/m, "S3.7: the config path is part of the answer");
   assert.match(text, /^ {2}google ok \(1 results, ai=no, 25ms\)$/m);
   assert.equal(text.includes('"schemaVersion"'), false, "the full report stays in the CLI");
 });
