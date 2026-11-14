@@ -21,7 +21,7 @@ import { DEFAULT_AI_WAIT_MS } from "../../src/cdp/ai-wait.ts";
 import { createSession, discoverEndpoint } from "../../src/session/index.ts";
 import { loadConfig } from "../../src/config/index.ts";
 import { createDefaultRegistry } from "../../src/engines/index.ts";
-import type { EngineId } from "../../src/engines/types.ts";
+import { ENGINE_IDS, type EngineId } from "../../src/engines/types.ts";
 import { createArtifacts } from "../../src/runtime/artifacts.ts";
 import { createCache } from "../../src/runtime/cache.ts";
 import { createSystemClock } from "../../src/runtime/clock.ts";
@@ -31,12 +31,28 @@ import { createTools } from "../../src/tools/index.ts";
 
 const LIVE = process.env.PI_CHROME_LIVE === "1";
 
-/** One neutral, engine-appropriate query. Never personal, never a wall bait. */
-const QUERIES: ReadonlyArray<{ engine: EngineId; q: string }> = [
-  { engine: "google", q: "rust tokio select macro example" },
-  { engine: "duckduckgo", q: "rust tokio select macro example" },
-  { engine: "yandex", q: "rust tokio select macro example" },
-];
+/**
+ * One neutral, engine-appropriate query per engine. Never personal, never a
+ * wall bait. Avito is a marketplace, so a developer question would return the
+ * "no exact match" fallback instead of a SERP; a plain product is the shape its
+ * search actually has.
+ */
+const QUERY: Readonly<Record<EngineId, string>> = {
+  google: "rust tokio select macro example",
+  duckduckgo: "rust tokio select macro example",
+  yandex: "rust tokio select macro example",
+  avito: "iphone 13",
+};
+
+/**
+ * SPEC S10.4: one query per **enabled** engine. A disabled special engine
+ * (avito ships off, D12) is not part of the default run; enabling it in config
+ * adds exactly one query, without editing this file.
+ */
+function enabledQueries(): ReadonlyArray<{ engine: EngineId; q: string }> {
+  const config = loadConfig({ env: process.env });
+  return ENGINE_IDS.filter((id) => config.engines[id].enabled).map((id) => ({ engine: id, q: QUERY[id] }));
+}
 
 const MAX_OUTPUT_CHARS = 2500;
 
@@ -115,7 +131,7 @@ async function runOnce(engine: EngineId, q: string): Promise<SmokeResult> {
   }
 }
 
-for (const { engine, q } of QUERIES) {
+for (const { engine, q } of enabledQueries()) {
   test(`live ${engine}: one query, n=2`, { skip: LIVE ? false : "set PI_CHROME_LIVE=1 to run one live query per engine" }, async () => {
     const result = await runOnce(engine, q);
     // P8 gate format: `ai:|aiWaitMs|aiChars` so the evidence table is copy-paste.
