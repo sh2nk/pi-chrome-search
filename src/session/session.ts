@@ -506,7 +506,7 @@ export class BrowserSession implements Session {
       update.stage === "read";
     if (working) {
       this.#cancelIdleHandback();
-      await this.#raiseWork(update.engine ?? null);
+      await this.#raiseWork(update.engine ?? null, update.page ?? null);
       return;
     }
 
@@ -515,8 +515,14 @@ export class BrowserSession implements Session {
     if (update.stage === "done") this.#scheduleIdleHandback();
   }
 
-  async #raiseWork(engine: EngineId | null): Promise<void> {
-    const page = engine === null ? undefined : this.#tabs?.pageFor(engine);
+  /**
+   * Raise the tab a stage belongs to: an engine work tab, or a read slot when
+   * the announcement names one. Never a foreign tab: `pageFor` only answers for
+   * tabs this pool created (S12.3).
+   */
+  async #raiseWork(engine: EngineId | null, slot: PageKey | null = null): Promise<void> {
+    const key = slot ?? engine;
+    const page = key === null ? undefined : this.#tabs?.pageFor(key);
     if (page === undefined) return;
     try {
       await page.bringToFront();

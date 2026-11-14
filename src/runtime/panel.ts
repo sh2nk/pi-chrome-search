@@ -27,6 +27,7 @@
 
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import type { PageKey } from "../cdp/types.ts";
 import type { PacingWindow } from "../config/index.ts";
 import type { EngineId } from "../engines/types.ts";
 import type { Clock } from "./types.ts";
@@ -86,9 +87,36 @@ export interface WorkAnnouncement {
   engine?: EngineId | null;
   query?: string | null;
   stage: PanelStage;
+  /**
+   * The owned tab this stage belongs to when it is not an engine tab: a read
+   * slot (`read`, `read#2`, …). `window.follow: "work"` raises that tab; the
+   * panel itself never shows a page key.
+   */
+  page?: PageKey | null;
   pace?: PacingWindow | null;
   counters?: readonly PanelCounter[];
   error?: PanelError | null;
+}
+
+/** What a stage announcement needs from a connector (the optional panel channel). */
+export interface WorkChannel {
+  announce?(update: WorkAnnouncement): Promise<void>;
+}
+
+/**
+ * Publish one stage on the panel/follow channel. Best effort by contract: a
+ * connector without an anchor, a closed tab or a failed paint is observability,
+ * never a tool failure (S12.5). Every tool goes through this one helper so the
+ * guarantee cannot drift per call site.
+ */
+export async function announceWork(channel: WorkChannel | undefined, update: WorkAnnouncement): Promise<void> {
+  const announce = channel?.announce;
+  if (announce === undefined) return;
+  try {
+    await announce.call(channel, update);
+  } catch {
+    // A dead anchor tab must never turn into a failed search or read.
+  }
 }
 
 /** Context the panel needs but an announcement must not have to repeat. */

@@ -29,6 +29,7 @@ import {
   renderReadableDocument,
   type ReadableDocument,
 } from "../../src/extract/read.ts";
+import type { WorkAnnouncement } from "../../src/runtime/panel.ts";
 import type { ResolveHost } from "../../src/runtime/ssrf.ts";
 import { createWebReadTool } from "../../src/tools/web_read.ts";
 import type { WebReadFailure, WebReadResult, WebReadSuccess } from "../../src/tools/web_read.ts";
@@ -546,4 +547,67 @@ test("S5.7 two concurrent reads with pool 2 take different slots and different t
   assert.equal(firstPage.lastNavigation(), "https://example.test/first");
   assert.equal(secondPage.lastNavigation(), "https://example.test/second");
   assert.notEqual(firstPage, secondPage);
+});
+
+// ---------------------------------------------------------------------------
+// S12.5 the read is on the panel; a failure keeps its page
+// ---------------------------------------------------------------------------
+
+test("S12.5 a read is announced as read → done on its own slot", async () => {
+  const page = new FakePage({ url: "https://example.test/article" });
+  page.setEvaluateHandlers(pageHandlers({}));
+  const { harness, run } = setup({ page });
+  const updates: WorkAnnouncement[] = [];
+  harness.deps.cdp.announce = async (update) => {
+    updates.push(update);
+  };
+
+  asSuccess(await run({ url: "https://example.test/article" }));
+
+  assert.deepEqual(
+    updates.map((update) => update.stage),
+    ["read", "done"],
+    "the panel shows the read half of the loop, not the last search's done",
+  );
+  assert.deepEqual(updates.map((update) => update.page), ["read", "read"], "the stage names the slot tab");
+});
+
+test("S12.5 a failed read announces error and keeps the page in front", async () => {
+  const page = new FakePage({ url: "https://example.test/app" });
+  page.setEvaluateHandlers(
+    pageHandlers({
+      probe: () => ({ readyState: "complete", textChars: 0 }),
+      extract: () => ({ title: "App shell", blocks: [] }),
+    }),
+  );
+  const { harness, run } = setup({ page });
+  const updates: WorkAnnouncement[] = [];
+  harness.deps.cdp.announce = async (update) => {
+    updates.push(update);
+  };
+
+  const failure = asFailure(await run({ url: "https://example.test/app" }));
+
+  assert.equal(failure.details.code, "E_EMPTY_PAGE");
+  assert.deepEqual(
+    updates.map((update) => update.stage),
+    ["read", "error"],
+    "no done announcement: the page stays for the human to look at",
+  );
+  assert.equal(updates[1]?.error?.code, "E_EMPTY_PAGE");
+});
+
+test("S12.5 a dead panel never fails a read", async () => {
+  const page = new FakePage({ url: "https://example.test/article" });
+  page.setEvaluateHandlers(pageHandlers({}));
+  const { harness, run } = setup({ page });
+  let announcements = 0;
+  harness.deps.cdp.announce = async () => {
+    announcements += 1;
+    throw new Error("the anchor tab is gone");
+  };
+
+  const success = asSuccess(await run({ url: "https://example.test/article" }));
+  assert.ok(success.details.chars > 0);
+  assert.equal(announcements, 2, "the tool tried both stages; the channel refused the paint");
 });

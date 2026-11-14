@@ -42,6 +42,7 @@ import type { FailureDetails, Stage, WebSearchError } from "../runtime/error-cod
 import { isWebSearchError } from "../runtime/error-codes.ts";
 import { fail, renderToolFailure, toFailure } from "../runtime/errors.ts";
 import type { FailureFallback, FailureJson, ToolTextBlock } from "../runtime/errors.ts";
+import { announceWork } from "../runtime/panel.ts";
 import { assertPublicUrl, type ResolveHost } from "../runtime/ssrf.ts";
 import type { ToolDeps } from "./types.ts";
 
@@ -523,10 +524,42 @@ export function createWebReadTool(
     const slots = readSlotKeys(deps.config.read.pool);
     const slot = lock.pick(slots) as PageKey;
 
-    const work = lock.run(slot, () => readSlot(deps, input, requested, slot, budget));
+    const work = lock.run(slot, () => announcedRead(deps, input, requested, slot, budget));
     // A queued read must not outlive the call's deadline. The losing task is
     // left to finish and checks the budget again before touching the tab.
     return await raceSignal(work, signal);
+  }
+
+  /**
+   * Announce the read on the anchor panel and let `window.follow` raise the slot
+   * tab (S12.2, S12.5). The read half of the product was invisible on the panel:
+   * a reader looking at the window saw the last search's `done` while a tab was
+   * being navigated. A failure keeps its page — no idle hand-back — so the human
+   * can look at what the tool could not read.
+   */
+  async function announcedRead(
+    deps: ToolDeps,
+    input: NormalizedInput,
+    requested: URL,
+    slot: PageKey,
+    budget: CallBudget,
+  ): Promise<WebReadResult> {
+    await announceWork(deps.cdp, { stage: "read", page: slot, query: null });
+    try {
+      const result = await readSlot(deps, input, requested, slot, budget);
+      await announceWork(deps.cdp, { stage: "done", page: slot });
+      return result;
+    } catch (error) {
+      const details = isWebSearchError(error)
+        ? error.details
+        : toFailure(error, { code: "E_CDP_DISCONNECTED", stage: "read" });
+      await announceWork(deps.cdp, {
+        stage: "error",
+        page: slot,
+        error: { code: details.code, ...(details.hint === undefined ? {} : { hint: details.hint }) },
+      });
+      throw error;
+    }
   }
 
   /**

@@ -7,9 +7,9 @@
  * `ToolDeps`, which is what makes the whole unit suite offline.
  *
  * Ordering rules that are easy to get wrong:
- * - Cache *before* the limiter. A cache hit must not consume a daily slot, wait
- *   for the pacing gap, or touch the page — that is the whole point of the SERP
- *   cache (§8) and the reason a repeated query is instant.
+ * - Cache *before* the limiter. A cache hit must not spend pacing time or touch
+ *   the page — that is the whole point of the SERP cache (§8) and the reason a
+ *   repeated query is instant.
  * - Engines run sequentially in `select()` order (D10: `auto` = google → ddg →
  *   yandex; an explicit list keeps the caller's order), because only one search
  *   may hit a profile at a time (§5.5). `auto` stops at the first success — the
@@ -55,7 +55,7 @@ import { fail, renderToolFailure, toFailure } from "../runtime/errors.ts";
 import type { FailureFallback, FailureJson, ToolTextBlock } from "../runtime/errors.ts";
 import { saveFailureArtifact } from "../runtime/artifacts.ts";
 import { createCallBudget, raceSignal, type CallBudget } from "../runtime/budget.ts";
-import type { PanelCounter, WorkAnnouncement } from "../runtime/panel.ts";
+import { announceWork, type PanelCounter } from "../runtime/panel.ts";
 import type { Clock } from "../runtime/types.ts";
 import type { ToolDeps } from "./types.ts";
 
@@ -698,17 +698,6 @@ function panelCounters(deps: ToolDeps): PanelCounter[] {
   return counters;
 }
 
-/** P10: announce a stage, swallowing transport-level surprises (the panel is an instrument). */
-async function announceStage(deps: ToolDeps, update: WorkAnnouncement): Promise<void> {
-  const announce = deps.cdp.announce;
-  if (announce === undefined) return;
-  try {
-    await announce.call(deps.cdp, update);
-  } catch {
-    // A dead anchor tab must never turn into a failed search.
-  }
-}
-
 async function navigateAndSettle(
   page: CdpPage,
   engine: Engine,
@@ -900,7 +889,7 @@ async function runEngineLive(
   const pacing = deps.config.pacing[engine.id];
   // P10-A: the query reaches the anchor before the pacing sleep, so the panel
   // shows what is about to happen even when the limiter waits for seconds.
-  await announceStage(deps, {
+  await announceWork(deps.cdp, {
     engine: engine.id,
     query: query.text,
     stage: "pace",
@@ -930,7 +919,7 @@ async function runEngineLive(
 
   // The tab exists now: this is the first stage that can raise it under
   // `window.follow: "work"`. The panel also gets the fresh daily counters.
-  await announceStage(deps, {
+  await announceWork(deps.cdp, {
     engine: engine.id,
     query: query.text,
     stage: "navigate",
@@ -1041,7 +1030,7 @@ async function runEngineLive(
   // PLAN-v2 P8-A: wait for the native summary *before* extracting. Bounded by
   // `search.aiWaitMs`, and skipped entirely by `summary:false` and by adapters
   // without a probe — a wait nobody asked for is pure latency.
-  await announceStage(deps, { engine: engine.id, stage: "extract" });
+  await announceWork(deps.cdp, { engine: engine.id, stage: "extract" });
   let aiWait: AiWaitResult | undefined;
   if (query.summary === true && engine.ai !== undefined) {
     // A visible expand is opt-in (`search.aiExpand`) because it is a real click
@@ -1308,20 +1297,20 @@ export function createWebSearchTool(
               : undefined,
           ),
         );
-        await announceStage(deps, { engine: id, stage: "done" });
+        await announceWork(deps.cdp, { engine: id, stage: "done" });
         // D10: stop at the first success in auto mode; only an explicit list (or
         // a multi-engine route) merges.
         if (!merge) break;
       } catch (error) {
         const failure = asFailure(error, "extract", id, signal);
-        await announceStage(deps, {
+        await announceWork(deps.cdp, {
           engine: id,
           stage: "error",
           error: { code: failure.details.code, ...(failure.details.hint === undefined ? {} : { hint: failure.details.hint }) },
         });
         // A wall keeps the work tab surfaced for the user to solve; every other
         // failure hands the screen back to the panel.
-        if (failure.details.code !== "E_WALL") await announceStage(deps, { engine: id, stage: "done" });
+        if (failure.details.code !== "E_WALL") await announceWork(deps.cdp, { engine: id, stage: "done" });
         firstFailure ??= failure;
         if (!FALLBACK_CODES.has(failure.details.code)) return failureResult(failure);
         if (merge) failed[id] = failure.details.code;

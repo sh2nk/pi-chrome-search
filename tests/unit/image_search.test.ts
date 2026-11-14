@@ -41,6 +41,7 @@ import type { EngineId } from "../../src/engines/types.ts";
 import { domainOf } from "../../src/extract/urls.ts";
 import { createCache } from "../../src/runtime/cache.ts";
 import { WebSearchError, isWebSearchError } from "../../src/runtime/error-codes.ts";
+import type { WorkAnnouncement } from "../../src/runtime/panel.ts";
 import type { ArtifactInput, Artifacts, Limiter, LimiterStats, Logger } from "../../src/runtime/types.ts";
 import type { ToolDeps } from "../../src/tools/types.ts";
 import {
@@ -723,6 +724,57 @@ test("captcha wall renders E_WALL, surfaces the window and saves one artifact", 
   assert.equal(harness.page.callCount("bringToFront"), 1);
   assert.equal(harness.saved.length, 1);
   assert.equal(harness.saved[0]?.code, "E_WALL");
+});
+
+test("S12.5 an image search is announced as navigate → done (and a wall as error)", async () => {
+  const google = fixturePage("images-google", "google", GOOGLE_URL);
+  const success = makeHarness({ page: google.page });
+  const successUpdates: WorkAnnouncement[] = [];
+  success.deps.cdp.announce = async (update) => {
+    successUpdates.push(update);
+  };
+
+  expectSuccess(await run(success, { q: "red panda", engine: "google" }));
+  assert.deepEqual(
+    successUpdates.map((update) => update.stage),
+    ["navigate", "done"],
+    "the anchor shows the image query while the tab works",
+  );
+  assert.equal(successUpdates[0]?.query, "red panda");
+  assert.equal(successUpdates[0]?.engine, "google");
+
+  const doc = fixtureDocument(
+    '<div class="SmartCaptcha"></div><div>Подтвердите, что запросы отправляли вы</div>',
+    CAPTCHA_URL,
+  );
+  const walled = makeHarness({ page: pageFor(doc, CAPTCHA_URL) });
+  const wallUpdates: WorkAnnouncement[] = [];
+  walled.deps.cdp.announce = async (update) => {
+    wallUpdates.push(update);
+  };
+
+  const failure = expectFailure(await run(walled, { q: "red panda", engine: "yandex" }));
+  assert.equal(failure.details.code, "E_WALL");
+  assert.deepEqual(
+    wallUpdates.map((update) => update.stage),
+    ["navigate", "error"],
+    "a wall is never reported as done, so the window keeps the page",
+  );
+  assert.equal(wallUpdates[1]?.error?.code, "E_WALL");
+
+  const brokenDoc = fixtureDocument('<div class="Misspell">skeleton</div>', YANDEX_URL);
+  const broken = makeHarness({ page: pageFor(brokenDoc, YANDEX_URL, null) });
+  const brokenUpdates: WorkAnnouncement[] = [];
+  broken.deps.cdp.announce = async (update) => {
+    brokenUpdates.push(update);
+  };
+
+  expectFailure(await run(broken, { q: "broken", engine: "yandex" }));
+  assert.deepEqual(
+    brokenUpdates.map((update) => update.stage),
+    ["navigate", "error", "done"],
+    "a non-wall failure hands the screen back to the anchor",
+  );
 });
 
 test("a malformed extraction payload renders E_PARSE with an artifact", async () => {
